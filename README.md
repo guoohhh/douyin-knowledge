@@ -15,6 +15,8 @@ The first version is anchored on Douyin collections, while the long-term archite
 ```text
 Capture
   ↓
+Policy
+  ↓
 Understand
   ↓
 Retrieve
@@ -26,6 +28,8 @@ Resurface
 
 The user should still use Douyin normally: see something useful → tap **收藏** → continue scrolling. Everything after that should be handled by the system as automatically as possible.
 
+Not every save needs to become knowledge. A Processing Policy layer lets the user keep entertainment/watch-later content metadata-only and exclude specific creators, collections, content types, or individual sources from expensive AI processing.
+
 ## Documentation
 
 Current living design documents:
@@ -33,6 +37,8 @@ Current living design documents:
 - [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md) — product vision, principles, user journey, V1 scope, decisions, and open questions.
 - [`docs/DATA_SCHEMA.md`](docs/DATA_SCHEMA.md) — conceptual knowledge model: Source, Evidence, Claim, Entity, KnowledgeItem, User State, and provenance.
 - [`docs/AI_PIPELINE.md`](docs/AI_PIPELINE.md) — adaptive ingestion and AI processing pipeline, evidence acquisition, enrichment, extraction, and indexing.
+- [`docs/PROCESSING_POLICY.md`](docs/PROCESSING_POLICY.md) — user-controlled rules for deciding which saved sources should or should not enter knowledge processing.
+- [`docs/RETRIEVAL.md`](docs/RETRIEVAL.md) — hybrid retrieval, AI conversation planning, collection-vs-general scope, evidence grounding, and citations.
 
 As the design stabilizes, additional dedicated documents will be added:
 
@@ -41,6 +47,7 @@ docs/
 ├── PRODUCT_SPEC.md
 ├── DATA_SCHEMA.md
 ├── AI_PIPELINE.md
+├── PROCESSING_POLICY.md
 ├── RETRIEVAL.md
 ├── ARCHITECTURE.md
 └── TASKS.md
