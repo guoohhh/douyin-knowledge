@@ -1,0 +1,48 @@
+# ---- secrets and local config (SEC-001: never commit credentials) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+cookies.txt
+cookies.json
+secrets.json
+
+# ---- local runtime state (real personal collection data lives here) ----
+data/
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# ---- node / frontend ----
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# ---- editors / os ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ---- scratch ----
+tmp/
+scratch/
