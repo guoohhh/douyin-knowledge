@@ -45,6 +45,7 @@ Current living design documents:
 - [`docs/WIKI.md`](docs/WIKI.md) — compounding Wiki layer: compiled knowledge, two-stage integration, context pruning, revisions, lint, quality ledger, and rebuildability.
 - [`docs/RETRIEVAL.md`](docs/RETRIEVAL.md) — hybrid retrieval, AI conversation planning, collection-vs-general scope, evidence grounding, and citations.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — V1 technical architecture, stack choices, storage, jobs, capture-provider boundary, AI adapters, repo structure, and deployment model.
+- [`docs/PHYSICAL_SCHEMA.md`](docs/PHYSICAL_SCHEMA.md) — concrete SQLite V1 tables, foreign keys, provenance links, Wiki revisions, search/index projections, conversation citations, and migration order.
 
 Remaining handoff documents:
 
