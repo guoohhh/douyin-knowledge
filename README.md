@@ -28,17 +28,20 @@ The user should still use Douyin normally: see something useful → tap **收藏
 
 ## Documentation
 
-The living product specification is maintained in:
+Current living design documents:
 
-- [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md)
+- [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md) — product vision, principles, user journey, V1 scope, decisions, and open questions.
+- [`docs/DATA_SCHEMA.md`](docs/DATA_SCHEMA.md) — conceptual knowledge model: Source, Evidence, Claim, Entity, KnowledgeItem, User State, and provenance.
+- [`docs/AI_PIPELINE.md`](docs/AI_PIPELINE.md) — adaptive ingestion and AI processing pipeline, evidence acquisition, enrichment, extraction, and indexing.
 
-As the design stabilizes, the specification will be split into dedicated documents such as:
+As the design stabilizes, additional dedicated documents will be added:
 
 ```text
 docs/
 ├── PRODUCT_SPEC.md
 ├── DATA_SCHEMA.md
 ├── AI_PIPELINE.md
+├── RETRIEVAL.md
 ├── ARCHITECTURE.md
 └── TASKS.md
 
