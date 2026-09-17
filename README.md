@@ -2,7 +2,7 @@
 
 > Turn saved short-form content into a searchable, explainable, reusable personal knowledge system.
 
-Douyin Knowledge is a local-first personal knowledge project that starts from Douyin collections. The goal is not to build another downloader or another folder of AI summaries, but to transform content you once considered worth saving into knowledge that can be searched, synthesized, acted on, and resurfaced when it becomes relevant again.
+Douyin Knowledge is a local-first personal knowledge project that starts from Douyin collections. The goal is not to build another downloader or another folder of AI summaries, but to transform content you once considered worth saving into knowledge that can be searched, synthesized, acted on, compounded over time, and resurfaced when it becomes relevant again.
 
 ## Current status
 
@@ -19,6 +19,8 @@ Policy
   ↓
 Understand
   ↓
+Integrate
+  ↓
 Retrieve
   ↓
 Synthesize
@@ -30,6 +32,8 @@ The user should still use Douyin normally: see something useful → tap **收藏
 
 Not every save needs to become knowledge. A Processing Policy layer lets the user keep entertainment/watch-later content metadata-only and exclude specific creators, collections, content types, or individual sources from expensive AI processing.
 
+`Integrate` is the compounding-knowledge step: processed sources update a persistent Wiki view of entities, concepts, topics, and recurring syntheses instead of forcing every future question to reconstruct understanding from raw chunks.
+
 ## Documentation
 
 Current living design documents:
@@ -38,6 +42,7 @@ Current living design documents:
 - [`docs/DATA_SCHEMA.md`](docs/DATA_SCHEMA.md) — conceptual knowledge model: Source, Evidence, Claim, Entity, KnowledgeItem, User State, and provenance.
 - [`docs/AI_PIPELINE.md`](docs/AI_PIPELINE.md) — adaptive ingestion and AI processing pipeline, evidence acquisition, enrichment, extraction, and indexing.
 - [`docs/PROCESSING_POLICY.md`](docs/PROCESSING_POLICY.md) — user-controlled rules for deciding which saved sources should or should not enter knowledge processing.
+- [`docs/WIKI.md`](docs/WIKI.md) — compounding Wiki layer: compiled knowledge, two-stage integration, context pruning, revisions, lint, quality ledger, and rebuildability.
 - [`docs/RETRIEVAL.md`](docs/RETRIEVAL.md) — hybrid retrieval, AI conversation planning, collection-vs-general scope, evidence grounding, and citations.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — V1 technical architecture, stack choices, storage, jobs, capture-provider boundary, AI adapters, repo structure, and deployment model.
 
@@ -50,7 +55,38 @@ docs/
 AGENTS.md
 ```
 
-## V1 architecture at a glance
+## Knowledge architecture at a glance
+
+```text
+                    AI Conversation
+                          ↓
+                    Query Planner
+             ┌────────────┼────────────┐
+             ↓            ↓            ↓
+      Structured DB   Compounding Wiki  FTS / Vector
+             \            |            /
+              \           |           /
+                   Claim / Evidence
+                          ↓
+                       Source
+```
+
+The key trust principle is:
+
+```text
+Source / Evidence
+    ↓ most trustworthy
+Claims / Entities / UserState
+    ↓ structured interpretation
+Compounding Wiki
+    ↓ persistent synthesis
+Conversation
+    ↓ user-facing reasoning
+```
+
+The Wiki is a rebuildable compiled view, not the canonical truth store.
+
+## V1 technical architecture at a glance
 
 ```text
 React / TypeScript
@@ -75,6 +111,6 @@ The system is intentionally local-first and avoids unnecessary V1 infrastructure
 The system should answer a different question from the public web:
 
 - Search engines / public AI: **What exists on the internet?**
-- Douyin Knowledge: **What did the past version of me think was worth saving, and how can that help me now?**
+- Douyin Knowledge: **What did the past version of me think was worth saving, what has that knowledge become over time, and how can it help me now?**
 
 The repository is intentionally specification-first. We will finish the important product and architecture decisions before handing implementation tasks to Codex.
