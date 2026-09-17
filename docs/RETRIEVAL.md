@@ -977,3 +977,9 @@ To resolve during architecture / benchmarking:
 - how much evidence to pass to the answer model;
 - exact citation rendering UI;
 - whether general/hybrid mode ships in the earliest MVP or shortly after collection-only chat.
+
+---
+
+## Implementation note (2026-09-18)
+
+The current query planner selects personal/general/hybrid scope and performs bounded source/entity matching, FTS5, and cosine vector scoring. It does not yet parse rich structured constraints such as numeric price or location ranges. The no-result path keeps personal answers free of uncited general knowledge. See [`IMPLEMENTATION.md`](IMPLEMENTATION.md).

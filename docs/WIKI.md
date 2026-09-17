@@ -989,3 +989,9 @@ These should be resolved before final physical schema/task planning where they m
 - When should a concept become its own page instead of remaining a Topic/tag?
 - How should Wiki page embeddings interact with KnowledgeItem/Entity embeddings?
 - What evaluation metrics should determine whether Wiki retrieval is preferred over raw semantic retrieval for a query class?
+
+---
+
+## Implementation note (2026-09-18)
+
+The current slice compiles entity pages deterministically from current source-backed claims. Every revision has `WikiSupport` links and can be rebuilt. `dk wiki-lint` checks revision/support integrity. The proposed concept/topic/synthesis integration and quality ledger are not yet implemented; see [`IMPLEMENTATION.md`](IMPLEMENTATION.md).

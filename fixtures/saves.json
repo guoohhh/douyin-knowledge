@@ -1,0 +1,39 @@
+[
+  {
+    "external_id": "demo-food-1",
+    "url": "https://www.douyin.com/video/demo-food-1",
+    "title": "旺角平价日料推荐",
+    "caption": "旺角的樱花食堂人均约80港币，推荐叉烧饭。",
+    "creator_id": "food_creator",
+    "creator_name": "美食日记",
+    "collection": "香港美食",
+    "semantic_type": "restaurant_review",
+    "claims": [
+      {"quote": "樱花食堂人均约80港币", "predicate": "average_price", "value": "约80港币", "entity_name": "樱花食堂", "entity_kind": "restaurant"},
+      {"quote": "推荐叉烧饭", "predicate": "recommended_dish", "value": "叉烧饭", "entity_name": "樱花食堂", "entity_kind": "restaurant"}
+    ]
+  },
+  {
+    "external_id": "demo-tech-1",
+    "url": "https://www.douyin.com/video/demo-tech-1",
+    "title": "MCP 学习笔记",
+    "caption": "MCP 可以让 AI 应用连接外部工具。先理解工具调用，再学习 MCP 协议。",
+    "creator_id": "tech_creator",
+    "creator_name": "技术笔记",
+    "collection": "学习",
+    "semantic_type": "tutorial",
+    "claims": [
+      {"quote": "先理解工具调用，再学习 MCP 协议", "predicate": "learning_order", "value": "先理解工具调用，再学习 MCP 协议", "entity_name": "MCP", "entity_kind": "concept"}
+    ]
+  },
+  {
+    "external_id": "demo-entertainment-1",
+    "url": "https://www.douyin.com/video/demo-entertainment-1",
+    "title": "综艺片段",
+    "caption": "今晚的综艺笑点合集。",
+    "creator_id": "ent_creator",
+    "creator_name": "娱乐剪辑",
+    "collection": "待看影视",
+    "semantic_type": "variety_clip"
+  }
+]

@@ -1327,3 +1327,9 @@ These should be answered during implementation spikes or the TASKS phase rather 
 - whether V1 should integrate OS keychain storage or initially use local environment/secret files.
 
 These questions require empirical implementation/testing and should not force premature architectural complexity.
+
+---
+
+## Implementation note (2026-09-18)
+
+The current runnable text-first slice is described in [`IMPLEMENTATION.md`](IMPLEMENTATION.md). It uses a SQLite JSON vector projection instead of LanceDB and a normalized collection-export bridge rather than claiming a working live favorites API. This keeps the source/evidence/claim trust model intact while reducing V1 installation complexity. Linear vector scanning will need replacement for a large collection.

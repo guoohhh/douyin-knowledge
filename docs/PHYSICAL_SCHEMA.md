@@ -1927,3 +1927,9 @@ The remaining implementation-spec work should define:
 - acceptance tests;
 - benchmark/evaluation fixtures;
 - exact Codex working rules.
+
+---
+
+## Implementation note (2026-09-18)
+
+The initial runnable slice does not implement every table in this target schema. The concrete Alembic migration and its intentional omissions are documented in [`IMPLEMENTATION.md`](IMPLEMENTATION.md). In particular, timestamps currently use UTC `DateTime` fields, source collection membership is a single display field, and the vector projection is stored in SQLite JSON. These are tracked deviations rather than implied completion of the full physical schema.

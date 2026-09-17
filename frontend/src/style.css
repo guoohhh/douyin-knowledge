@@ -1,0 +1,245 @@
+:root {
+  font-family:
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    "PingFang SC",
+    "Microsoft YaHei",
+    sans-serif;
+  color: #202b31;
+  background: #f6f8f7;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+a {
+  color: #08766a;
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+.shell {
+  display: flex;
+  min-height: 100vh;
+}
+aside {
+  width: 250px;
+  background: #133e39;
+  color: white;
+  padding: 34px 25px;
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+aside h1 {
+  font-size: 25px;
+  line-height: 1.12;
+  letter-spacing: -0.04em;
+  margin: 0 0 48px;
+}
+aside nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+aside nav a {
+  color: #c3d9d3;
+  padding: 12px 14px;
+  border-radius: 8px;
+}
+aside nav a.active,
+aside nav a:hover {
+  color: white;
+  background: #266157;
+  text-decoration: none;
+}
+aside small {
+  margin-top: auto;
+  color: #9fc0b8;
+}
+main {
+  max-width: 1000px;
+  width: 100%;
+  padding: 58px 64px;
+}
+.eyebrow {
+  color: #008a78;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  font-weight: 800;
+}
+.muted {
+  color: #63736f;
+}
+.error {
+  color: #ad3838;
+}
+h2 {
+  font-size: 34px;
+  letter-spacing: -0.04em;
+  margin: 8px 0 14px;
+}
+h3 {
+  margin: 0 0 18px;
+}
+input,
+select,
+textarea {
+  font: inherit;
+  border: 1px solid #cad8d4;
+  border-radius: 8px;
+  padding: 12px;
+  background: white;
+  color: #233;
+  max-width: 100%;
+}
+input:focus,
+textarea:focus {
+  outline: 2px solid #85c6b8;
+}
+button {
+  border: 0;
+  background: #0d806f;
+  color: white;
+  border-radius: 8px;
+  padding: 12px 18px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.secondary {
+  background: #e5efec;
+  color: #17675b;
+}
+.ask {
+  display: flex;
+  gap: 9px;
+  margin: 34px 0;
+}
+.ask input {
+  flex: 1;
+}
+.stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 24px 0;
+}
+.stats span,
+.badge {
+  background: #e3f1ec;
+  color: #087465;
+  border-radius: 99px;
+  padding: 6px 11px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.card {
+  background: #fff;
+  border: 1px solid #e0e8e5;
+  border-radius: 14px;
+  padding: 24px;
+  margin: 22px 0;
+  box-shadow: 0 4px 22px #113d3110;
+}
+.answer {
+  white-space: pre-wrap;
+  line-height: 1.8;
+}
+.citation {
+  padding: 14px 0;
+  border-top: 1px solid #e7eeeb;
+}
+.citation p {
+  margin: 7px 0;
+}
+.citation small {
+  color: #667b73;
+}
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  background: white;
+  padding: 18px 20px;
+  border-bottom: 1px solid #e5ece9;
+  color: #253b36;
+}
+.row:hover {
+  background: #f2faf6;
+  text-decoration: none;
+}
+.row strong {
+  flex: 1;
+}
+.row span {
+  color: #5e706c;
+}
+.search {
+  width: 100%;
+  margin: 20px 0;
+}
+.formrow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.formrow input {
+  flex: 1;
+}
+textarea {
+  width: 100%;
+  display: block;
+  margin-bottom: 12px;
+}
+.wiki-body {
+  font: inherit;
+  white-space: pre-wrap;
+  line-height: 1.8;
+}
+@media (max-width: 700px) {
+  .shell {
+    display: block;
+  }
+  aside {
+    position: static;
+    width: 100%;
+    height: auto;
+    padding: 20px;
+  }
+  aside h1 {
+    font-size: 21px;
+    margin: 0 0 16px;
+  }
+  aside nav {
+    flex-direction: row;
+    overflow: auto;
+  }
+  aside nav a {
+    white-space: nowrap;
+    padding: 8px;
+  }
+  aside small {
+    display: none;
+  }
+  main {
+    padding: 28px 18px;
+  }
+  h2 {
+    font-size: 27px;
+  }
+  .row {
+    flex-wrap: wrap;
+  }
+}
