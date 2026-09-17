@@ -62,6 +62,16 @@ class AuthenticationRequired(DKError):
     http_status = 401
 
 
+class CaptureRateLimited(DKError):
+    """Distinct from CaptureUnavailable: the sidecar is healthy and told us to slow
+    down. Same retry behaviour, but the operator's fix is different, so it gets its
+    own code rather than being flattened into a generic transport failure."""
+
+    code = "capture_rate_limited"
+    retryable = True
+    http_status = 429
+
+
 class SourceUnavailable(DKError):
     code = "source_unavailable"
     retryable = False
