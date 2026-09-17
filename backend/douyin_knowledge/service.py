@@ -16,6 +16,7 @@ from .models import (
     KnowledgeItem,
     ProcessingRun,
     Source,
+    SourceCollectionMembership,
     now,
 )
 from .policy import evaluate
@@ -23,6 +24,18 @@ from .wiki import compile_entity
 from .wiki import rebuild as rebuild_wiki
 
 log = logging.getLogger(__name__)
+
+
+def cheap_semantic_type(title: str, caption: str) -> str:
+    text = f"{title} {caption}".casefold()
+    for label, cues in (
+        ("movie_clip", ("电影片段", "电影剪辑", "movie clip")),
+        ("variety_clip", ("综艺片段", "综艺剪辑", "综艺笑点")),
+        ("music_clip", ("音乐片段", "歌曲剪辑", "music clip")),
+    ):
+        if any(cue in text for cue in cues):
+            return label
+    return ""
 
 
 def enqueue(session, source_id: str, priority: int = 0) -> Job:
@@ -62,6 +75,22 @@ def ingest(session, records: list[CapturedSource]) -> dict:
             "transcript",
         ):
             setattr(source, field, getattr(record, field))
+        if not source.semantic_type:
+            source.semantic_type = cheap_semantic_type(source.title, source.caption)
+        collection_names = list(
+            dict.fromkeys(record.collections or ([record.collection] if record.collection else []))
+        )
+        if collection_names:
+            source.collection = collection_names[0]
+        for name in collection_names:
+            exists = session.scalar(
+                select(SourceCollectionMembership).where(
+                    SourceCollectionMembership.source_id == source.id,
+                    SourceCollectionMembership.collection_name == name,
+                )
+            )
+            if exists is None:
+                session.add(SourceCollectionMembership(source_id=source.id, collection_name=name))
         action, reason = evaluate(session, source)
         source.policy_action, source.policy_reason = action, reason
         if action == "metadata_only":
@@ -166,6 +195,8 @@ def process_source(session, source_id: str):
 
         annotation = session.get(SourceAnnotation, source.id)
         if annotation:
+            if not os.getenv("DK_OPENAI_API_KEY"):
+                extraction.claims = []
             extra = []
             for declared in annotation.payload:
                 matching = next(

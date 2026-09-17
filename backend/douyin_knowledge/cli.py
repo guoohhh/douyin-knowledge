@@ -27,6 +27,22 @@ def sync_sidecar():
 
 
 @app.command()
+def sync_loop(interval_seconds: int = 300):
+    """Poll the configured sidecar for new saves while this process runs."""
+    if interval_seconds < 30:
+        raise typer.BadParameter("Minimum interval is 30 seconds")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    while True:
+        try:
+            with SessionLocal() as session:
+                result = ingest(session, SidecarCaptureProvider().list_saves())
+            typer.echo(result)
+        except Exception:
+            logging.exception("sidecar sync failed")
+        time.sleep(interval_seconds)
+
+
+@app.command()
 def worker(once: bool = False):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     while True:

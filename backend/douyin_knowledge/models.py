@@ -46,6 +46,14 @@ class Source(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class SourceCollectionMembership(Base):
+    __tablename__ = "source_collection_memberships"
+    __table_args__ = (UniqueConstraint("source_id", "collection_name"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"))
+    collection_name: Mapped[str] = mapped_column(String)
+
+
 class ProcessingRule(Base):
     __tablename__ = "processing_rules"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)

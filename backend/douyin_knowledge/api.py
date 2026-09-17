@@ -14,6 +14,7 @@ from .models import (
     ProcessingRule,
     ProcessingRun,
     Source,
+    SourceCollectionMembership,
     UserState,
     WikiPage,
     WikiRevision,
@@ -126,6 +127,11 @@ def source_detail(source_id: str, session: Session = Depends(get_session)):
     if not row:
         raise HTTPException(404)
     evidence = session.scalars(select(Evidence).where(Evidence.source_id == source_id)).all()
+    collections = session.scalars(
+        select(SourceCollectionMembership.collection_name).where(
+            SourceCollectionMembership.source_id == source_id
+        )
+    ).all()
     claims = (
         session.scalars(select(Claim).where(Claim.run_id == row.current_run_id)).all()
         if row.current_run_id
@@ -145,6 +151,7 @@ def source_detail(source_id: str, session: Session = Depends(get_session)):
             "status": row.status,
             "policy_action": row.policy_action,
             "policy_reason": row.policy_reason,
+            "collections": collections,
         },
         "evidence": [{"id": ev.id, "kind": ev.kind, "text": ev.text} for ev in evidence],
         "claims": [

@@ -150,3 +150,15 @@ def test_policy_can_hide_previously_processed_source(session):
     assert source.status == "metadata_only"
     assert search(session, "旺角") == []
     assert source.current_run_id is not None
+
+
+def test_cheap_content_type_exclusion_before_work(session):
+    session.add(
+        ProcessingRule(dimension="semantic_type", value="variety_clip", action="metadata_only")
+    )
+    session.commit()
+    ingest(session, [CapturedSource(external_id="clip", title="综艺片段合集", caption="笑点很多")])
+    source = session.scalar(select(Source).where(Source.external_id == "clip"))
+    assert source.semantic_type == "variety_clip"
+    assert source.status == "metadata_only"
+    assert session.scalar(select(Job).where(Job.source_id == source.id)) is None

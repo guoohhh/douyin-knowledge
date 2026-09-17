@@ -1332,4 +1332,4 @@ These questions require empirical implementation/testing and should not force pr
 
 ## Implementation note (2026-09-18)
 
-The current runnable text-first slice is described in [`IMPLEMENTATION.md`](IMPLEMENTATION.md). It uses a SQLite JSON vector projection instead of LanceDB and a normalized collection-export bridge rather than claiming a working live favorites API. This keeps the source/evidence/claim trust model intact while reducing V1 installation complexity. Linear vector scanning will need replacement for a large collection.
+The current runnable text-first slice is described in [`IMPLEMENTATION.md`](IMPLEMENTATION.md). It uses a SQLite JSON vector projection instead of LanceDB and a Douyin_TikTok_Download_API 5.1+ collection adapter whose live account path still needs verification. This keeps the source/evidence/claim trust model intact while reducing V1 installation complexity. Linear vector scanning will need replacement for a large collection.

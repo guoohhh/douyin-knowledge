@@ -397,6 +397,7 @@ function Settings() {
   const [action, setAction] = useState("metadata_only");
   const [raw, setRaw] = useState("");
   const [notice, setNotice] = useState("");
+  const [syncing, setSyncing] = useState(false);
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["rules"] });
     qc.invalidateQueries({ queryKey: ["dashboard"] });
@@ -426,10 +427,35 @@ function Settings() {
       setNotice(String(e));
     }
   }
+  async function syncSidecar() {
+    setSyncing(true);
+    try {
+      const result = await api<{ created: number; total: number }>(
+        "/sync/sidecar",
+        { method: "POST" },
+      );
+      setNotice(`同步 ${result.total} 条，新增 ${result.created} 条`);
+      qc.invalidateQueries();
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setSyncing(false);
+    }
+  }
   return (
     <>
       <p className="eyebrow">SETTINGS</p>
       <h2>处理策略与导入</h2>
+      <section className="card">
+        <h3>同步抖音收藏夹</h3>
+        <p className="muted">
+          需要本机已配置 5.1+ sidecar、API Key 与导入的抖音身份。同步后由后台
+          worker 逐步处理。
+        </p>
+        <button disabled={syncing} onClick={syncSidecar}>
+          {syncing ? "同步中…" : "现在同步"}
+        </button>
+      </section>
       <section className="card">
         <h3>导入 JSON 收藏</h3>
         <p className="muted">

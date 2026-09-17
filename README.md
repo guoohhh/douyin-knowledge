@@ -6,7 +6,7 @@ A local-first knowledge app for saved short-form content. It keeps source materi
 
 A runnable **text-first vertical slice** is implemented. JSON capture and a fixture work without credentials. A configured OpenAI-compatible endpoint can extract structured claims, create embeddings, and synthesize answers; without it, deterministic local extraction and retrieval keep the demo usable. The UI supports Ask My Saves, library/source evidence, entity and personal state, Wiki, policy rules, and JSON import.
 
-Automatic sync from a live Douyin account is **not yet available**. The current upstream `Douyin_TikTok_Download_API` v5 documentation does not expose a confirmed saved-collection listing endpoint. `SidecarCaptureProvider` accepts a separate normalized collection-export bridge endpoint when one is available. No Douyin reverse-engineering code or cookies are stored here. ASR/OCR/media enrichment and scheduled sync are also outstanding.
+The sidecar adapter reads Douyin bookmark folders and their posts from [`Douyin_TikTok_Download_API` 5.1+](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/releases/tag/v5.1.0) using an imported identity. This path has a deterministic HTTP contract test but has **not been tested against a live Douyin account** in this environment. No Douyin reverse-engineering code or cookies are stored here. ASR/OCR/media enrichment remain outstanding; continuous sync requires running the separate sync loop.
 
 ## Requirements
 
@@ -69,9 +69,11 @@ Copy `.env.example` if useful and export variables in the backend shell. The app
 - `DK_OPENAI_BASE_URL`: optional OpenAI-compatible base URL.
 - `DK_OPENAI_MODEL`: chat/extraction model.
 - `DK_OPENAI_EMBEDDING_MODEL`: embedding model. Rebuild the index after changing it.
-- `DK_SIDECAR_URL`, `DK_SIDECAR_API_KEY`, `DK_SIDECAR_SAVES_PATH`: normalized collection-export bridge. The endpoint must return an array in the same shape as `fixtures/saves.json`.
+- `DK_SIDECAR_URL`, `DK_SIDECAR_API_KEY`, `DK_SIDECAR_IDENTITY`: URL, API key, and imported Douyin identity ID for a 5.1+ sidecar. The API key needs Douyin read and identity management permissions. Run `dk sync-sidecar` after configuring them. The sidecar owns session cookies.
 
-The sidecar key is sent only to the bridge and is never written to SQLite. Keep all keys out of Git.
+To poll for new saves while the app is running, keep `cd backend && .venv/bin/dk sync-loop --interval-seconds 300` running alongside the worker. This process needs an available sidecar and stops when you stop it.
+
+The sidecar key is sent only to the sidecar and is never written to SQLite. Keep all keys out of Git.
 
 ## Maintenance and checks
 
