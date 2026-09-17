@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
+import sys
+from enum import Enum
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+    class StrEnum(str, Enum):
+        """Backport of StrEnum for Python 3.10."""
+        def __new__(cls, value: str) -> "StrEnum":
+            obj = str.__new__(cls, value)
+            obj._value_ = value
+            return obj
 
 
 class JobType(StrEnum):

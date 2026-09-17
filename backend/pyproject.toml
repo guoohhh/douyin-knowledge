@@ -2,7 +2,7 @@
 name = "douyin-knowledge"
 version = "0.1.0"
 description = "Local-first personal knowledge system built from saved short-form content"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
