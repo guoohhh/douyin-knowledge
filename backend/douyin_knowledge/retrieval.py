@@ -82,11 +82,15 @@ def search(session, question: str, limit: int = 8) -> list[dict]:
             {"query": query},
         ).all()
         for source_id, rank in rows:
+            if session.get(Source, source_id).status != "ready":
+                continue
             scores[source_id] = scores.get(source_id, 0) + 2 + min(3, abs(rank))
             methods.setdefault(source_id, set()).add("fts")
     query_model, query_vector = embed(" ".join(terms) or question)
     for doc in session.scalars(select(VectorDocument)):
         if doc.model != query_model:
+            continue
+        if session.get(Source, doc.source_id).status != "ready":
             continue
         similarity = sum(a * b for a, b in zip(query_vector, doc.vector))
         if similarity >= (0.3 if query_model == "local-hash-v1" else 0.45):

@@ -22,6 +22,7 @@ class CapturedSource(BaseModel):
     collections: list[str] = Field(default_factory=list)
     semantic_type: str = ""
     transcript: str = ""
+    media_url: str = ""
     # Explicit fixture assertions; quotes are validated against evidence before persistence.
     claims: list[dict] = Field(default_factory=list)
 
@@ -146,6 +147,8 @@ class SidecarCaptureProvider:
                             caption=post.get("description") or "",
                             creator_id=author.get("uid") or "",
                             creator_name=author.get("nickname") or "",
+                            media_url=((post.get("media") or {}).get("video") or {}).get("url")
+                            or "",
                             collection=folder_name,
                             collections=[folder_name],
                         )

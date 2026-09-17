@@ -11,10 +11,12 @@ from .models import (
     Entity,
     Evidence,
     Job,
+    PolicyDecision,
     ProcessingRule,
     ProcessingRun,
     Source,
     SourceCollectionMembership,
+    SourceSnapshot,
     UserState,
     WikiPage,
     WikiRevision,
@@ -134,13 +136,23 @@ def source_detail(source_id: str, session: Session = Depends(get_session)):
     ).all()
     claims = (
         session.scalars(select(Claim).where(Claim.run_id == row.current_run_id)).all()
-        if row.current_run_id
+        if row.current_run_id and row.status == "ready"
         else []
     )
     runs = session.scalars(
         select(ProcessingRun)
         .where(ProcessingRun.source_id == source_id)
         .order_by(ProcessingRun.started_at.desc())
+    ).all()
+    snapshots = session.scalars(
+        select(SourceSnapshot)
+        .where(SourceSnapshot.source_id == source_id)
+        .order_by(SourceSnapshot.observed_at.desc())
+    ).all()
+    decisions = session.scalars(
+        select(PolicyDecision)
+        .where(PolicyDecision.source_id == source_id)
+        .order_by(PolicyDecision.evaluated_at.desc())
     ).all()
     return {
         "source": {
@@ -167,6 +179,25 @@ def source_detail(source_id: str, session: Session = Depends(get_session)):
                 "error": run.error,
             }
             for run in runs
+        ],
+        "snapshots": [
+            {
+                "id": item.id,
+                "checksum": item.checksum,
+                "payload": item.payload,
+                "observed_at": item.observed_at,
+            }
+            for item in snapshots
+        ],
+        "policy_decisions": [
+            {
+                "id": item.id,
+                "action": item.action,
+                "reason": item.reason,
+                "rule_id": item.rule_id,
+                "evaluated_at": item.evaluated_at,
+            }
+            for item in decisions
         ],
     }
 
@@ -251,7 +282,15 @@ def entity_detail(entity_id: str, session: Session = Depends(get_session)):
     entity = session.get(Entity, entity_id)
     if not entity:
         raise HTTPException(404)
-    claims = session.scalars(select(Claim).where(Claim.entity_id == entity_id)).all()
+    claims = session.scalars(
+        select(Claim)
+        .join(Source, Claim.source_id == Source.id)
+        .where(
+            Claim.entity_id == entity_id,
+            Claim.run_id == Source.current_run_id,
+            Source.status == "ready",
+        )
+    ).all()
     state = session.scalar(select(UserState).where(UserState.entity_id == entity_id))
     return {
         "entity": {"id": entity.id, "name": entity.name, "kind": entity.kind},

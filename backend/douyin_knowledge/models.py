@@ -43,7 +43,29 @@ class Source(Base):
     policy_reason: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String, default="pending")
     current_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    content_checksum: Mapped[str] = mapped_column(String, default="")
+    processed_checksum: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SourceSnapshot(Base):
+    __tablename__ = "source_snapshots"
+    __table_args__ = (UniqueConstraint("source_id", "checksum"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"))
+    checksum: Mapped[str] = mapped_column(String)
+    payload: Mapped[dict] = mapped_column(JSON)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SourceAsset(Base):
+    __tablename__ = "source_assets"
+    __table_args__ = (UniqueConstraint("source_id", "kind"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String)
+    remote_url: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class SourceCollectionMembership(Base):
@@ -62,6 +84,16 @@ class ProcessingRule(Base):
     action: Mapped[str] = mapped_column(String)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PolicyDecision(Base):
+    __tablename__ = "policy_decisions"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"))
+    action: Mapped[str] = mapped_column(String)
+    reason: Mapped[str] = mapped_column(Text)
+    rule_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class Job(Base):

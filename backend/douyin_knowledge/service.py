@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import os
 from datetime import timedelta
@@ -7,6 +9,7 @@ from sqlalchemy import or_, select
 from .ai import ExtractedClaim, Extraction, extractor
 from .capture import CapturedSource
 from .index import index_one
+from .media import OpenAITranscriber, should_transcribe
 from .models import (
     Claim,
     Entity,
@@ -14,9 +17,12 @@ from .models import (
     Evidence,
     Job,
     KnowledgeItem,
+    PolicyDecision,
     ProcessingRun,
     Source,
+    SourceAsset,
     SourceCollectionMembership,
+    SourceSnapshot,
     now,
 )
 from .policy import evaluate
@@ -24,6 +30,19 @@ from .wiki import compile_entity
 from .wiki import rebuild as rebuild_wiki
 
 log = logging.getLogger(__name__)
+
+
+def checksum(payload: dict) -> str:
+    value = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def record_policy(session, source: Source, action: str, reason: str):
+    if (source.policy_action, source.policy_reason) == (action, reason):
+        return
+    rule_id = reason.split(" ", 1)[0].removeprefix("rule:") if reason.startswith("rule:") else None
+    session.add(PolicyDecision(source_id=source.id, action=action, reason=reason, rule_id=rule_id))
+    source.policy_action, source.policy_reason = action, reason
 
 
 def cheap_semantic_type(title: str, caption: str) -> str:
@@ -82,6 +101,18 @@ def ingest(session, records: list[CapturedSource]) -> dict:
         )
         if collection_names:
             source.collection = collection_names[0]
+        if record.media_url:
+            asset = session.scalar(
+                select(SourceAsset).where(
+                    SourceAsset.source_id == source.id, SourceAsset.kind == "video"
+                )
+            )
+            if asset is None:
+                session.add(
+                    SourceAsset(source_id=source.id, kind="video", remote_url=record.media_url)
+                )
+            elif asset.remote_url != record.media_url:
+                asset.remote_url, asset.updated_at = record.media_url, now()
         for name in collection_names:
             exists = session.scalar(
                 select(SourceCollectionMembership).where(
@@ -91,12 +122,50 @@ def ingest(session, records: list[CapturedSource]) -> dict:
             )
             if exists is None:
                 session.add(SourceCollectionMembership(source_id=source.id, collection_name=name))
+        content_hash = checksum(
+            {
+                "title": source.title,
+                "caption": source.caption,
+                "transcript": source.transcript,
+                "semantic_type": source.semantic_type,
+            }
+        )
+        content_changed = source.content_checksum != content_hash
+        source.content_checksum = content_hash
+        snapshot_payload = {
+            "platform": source.platform,
+            "external_id": source.external_id,
+            "url": source.url,
+            "title": source.title,
+            "caption": source.caption,
+            "creator_id": source.creator_id,
+            "creator_name": source.creator_name,
+            "collections": sorted(collection_names),
+            "semantic_type": source.semantic_type,
+            "transcript": source.transcript,
+        }
+        snapshot_hash = checksum(snapshot_payload)
+        existing_snapshot = session.scalar(
+            select(SourceSnapshot).where(
+                SourceSnapshot.source_id == source.id, SourceSnapshot.checksum == snapshot_hash
+            )
+        )
+        if existing_snapshot is None:
+            session.add(
+                SourceSnapshot(
+                    source_id=source.id, checksum=snapshot_hash, payload=snapshot_payload
+                )
+            )
         action, reason = evaluate(session, source)
-        source.policy_action, source.policy_reason = action, reason
+        record_policy(session, source, action, reason)
         if action == "metadata_only":
             source.status = "metadata_only"
             skipped += 1
-        elif source.current_run_id:
+        elif (
+            source.current_run_id
+            and not content_changed
+            and source.processed_checksum == content_hash
+        ):
             source.status = "ready"
         else:
             source.status = "pending"
@@ -119,7 +188,7 @@ def ingest(session, records: list[CapturedSource]) -> dict:
 def reevaluate(session):
     for source in session.scalars(select(Source)):
         action, reason = evaluate(session, source)
-        source.policy_action, source.policy_reason = action, reason
+        record_policy(session, source, action, reason)
         if action == "metadata_only":
             source.status = "metadata_only"
             for job in session.scalars(
@@ -127,7 +196,11 @@ def reevaluate(session):
             ):
                 job.status = "cancelled"
         elif action != "metadata_only" and source.status == "metadata_only":
-            source.status = "ready" if source.current_run_id else "pending"
+            source.status = (
+                "ready"
+                if source.current_run_id and source.processed_checksum == source.content_checksum
+                else "pending"
+            )
             if source.status == "pending":
                 enqueue(session, source.id)
     session.commit()
@@ -166,7 +239,7 @@ def process_source(session, source_id: str):
     if not source:
         raise ValueError("Source missing")
     action, reason = evaluate(session, source)
-    source.policy_action, source.policy_reason = action, reason
+    record_policy(session, source, action, reason)
     if action == "metadata_only":
         source.status = "metadata_only"
         session.commit()
@@ -186,8 +259,33 @@ def process_source(session, source_id: str):
     session.commit()
     try:
         evidence = _evidence(session, source)
+        asset = session.scalar(
+            select(SourceAsset).where(
+                SourceAsset.source_id == source.id, SourceAsset.kind == "video"
+            )
+        )
+        if asset and should_transcribe(source.caption, source.transcript):
+            try:
+                transcription = OpenAITranscriber().transcribe(asset.remote_url)
+                asr = session.scalar(
+                    select(Evidence).where(
+                        Evidence.source_id == source.id,
+                        Evidence.kind == "asr",
+                        Evidence.text == transcription,
+                    )
+                )
+                if asr is None:
+                    asr = Evidence(source_id=source.id, kind="asr", text=transcription)
+                    session.add(asr)
+                    session.flush()
+                evidence.append(asr)
+            except Exception as exc:
+                run.error = f"Media transcription unavailable: {exc}"
         if not evidence:
-            raise ValueError("No caption or transcript evidence; media enrichment unavailable")
+            raise ValueError(
+                "No caption or transcript evidence; media enrichment unavailable"
+                + (f" ({run.error})" if run.error else "")
+            )
         payload = [{"id": item.id, "kind": item.kind, "text": item.text} for item in evidence]
         extraction = extractor().extract(payload)
         # Demo fixture declarations are accepted only if their quote exists verbatim.
@@ -219,7 +317,9 @@ def process_source(session, source_id: str):
             summary=extraction.summary,
             domain=extraction.domain,
             form=extraction.form,
-            coverage="transcript" if source.transcript else "text_only",
+            coverage="transcript"
+            if any(ev.kind in ("transcript", "asr") for ev in evidence)
+            else "text_only",
         )
         session.add(item)
         entities = []
@@ -262,9 +362,10 @@ def process_source(session, source_id: str):
             if entity:
                 entities.append((entity, claim))
         source.current_run_id = run.id
+        source.processed_checksum = source.content_checksum
         source.status = "ready"
         run.status = "succeeded"
-        run.level = 2 if source.transcript else 1
+        run.level = 2 if any(ev.kind in ("transcript", "asr") for ev in evidence) else 1
         run.completed_at = now()
         for entity_id in set(previous_entity_ids + [entity.id for entity, _ in entities]):
             compile_entity(session, session.get(Entity, entity_id))
@@ -276,7 +377,11 @@ def process_source(session, source_id: str):
         if run:
             run.status, run.error, run.completed_at = "failed", str(exc), now()
         source = session.get(Source, source_id)
-        source.status = "ready" if source.current_run_id else "failed"
+        source.status = (
+            "ready"
+            if source.current_run_id and source.processed_checksum == source.content_checksum
+            else "failed"
+        )
         session.commit()
         raise
 

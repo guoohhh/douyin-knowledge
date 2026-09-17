@@ -202,6 +202,7 @@ function SourceDetail() {
       status: string;
       policy_action: string;
       policy_reason: string;
+      collections: string[];
     };
     evidence: { id: string; kind: string; text: string }[];
     claims: {
@@ -217,6 +218,13 @@ function SourceDetail() {
       level: number;
       error: string;
     }[];
+    snapshots: { id: string; checksum: string; observed_at: string }[];
+    policy_decisions: {
+      id: string;
+      action: string;
+      reason: string;
+      evaluated_at: string;
+    }[];
   }>("source-" + id, "/sources/" + id);
   const qc = useQueryClient();
   const process = useMutation({
@@ -230,10 +238,12 @@ function SourceDetail() {
       <Link to="/library">← 收藏</Link>
       <h2>{d.source.title}</h2>
       <p>{d.source.caption}</p>
+      <p className="muted">收藏夹：{d.source.collections.join("、") || "未分组"}</p>
       <p>
         <span className="badge">{d.source.status}</span>{" "}
         {d.source.policy_reason}
       </p>
+      {d.source.status !== "ready" && <p className="muted">当前来源尚未完成知识处理；历史观点不会参与问答。</p>}
       <a href={d.source.url} target="_blank" rel="noreferrer">
         打开原视频 ↗
       </a>{" "}
@@ -267,6 +277,15 @@ function SourceDetail() {
         {d.runs.map((r) => (
           <p key={r.id}>
             {r.status} · {r.provider} · Level {r.level} {r.error}
+          </p>
+        ))}
+      </section>
+      <section className="card">
+        <h3>来源版本与策略记录</h3>
+        <p>已保存 {d.snapshots.length} 个来源快照</p>
+        {d.policy_decisions.map((decision) => (
+          <p key={decision.id}>
+            {decision.action} · {decision.reason} · {new Date(decision.evaluated_at).toLocaleString()}
           </p>
         ))}
       </section>

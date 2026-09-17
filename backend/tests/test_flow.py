@@ -13,9 +13,12 @@ from douyin_knowledge.models import (
     Entity,
     Evidence,
     Job,
+    PolicyDecision,
     ProcessingRule,
     ProcessingRun,
     Source,
+    SourceAsset,
+    SourceSnapshot,
     UserState,
     WikiPage,
     WikiRevision,
@@ -162,3 +165,101 @@ def test_cheap_content_type_exclusion_before_work(session):
     assert source.semantic_type == "variety_clip"
     assert source.status == "metadata_only"
     assert session.scalar(select(Job).where(Job.source_id == source.id)) is None
+
+
+def test_changed_source_is_versioned_and_stale_claims_hidden(session):
+    ingest(session, demo()[:1])
+    while work_once(session):
+        pass
+    source = session.scalar(select(Source))
+    first_run = source.current_run_id
+    first_snapshot_count = len(session.scalars(select(SourceSnapshot)).all())
+    updated = demo()[0].model_copy(
+        update={
+            "caption": "旺角的樱花食堂人均约120港币，推荐寿司。",
+            "claims": [
+                {
+                    "quote": "樱花食堂人均约120港币",
+                    "predicate": "average_price",
+                    "value": "约120港币",
+                    "entity_name": "樱花食堂",
+                    "entity_kind": "restaurant",
+                }
+            ],
+        }
+    )
+    ingest(session, [updated])
+    session.refresh(source)
+    assert source.status == "pending"
+    assert len(session.scalars(select(SourceSnapshot)).all()) == first_snapshot_count + 1
+    assert answer(session, "我收藏的樱花食堂人均多少？")["citations"] == []
+    assert work_once(session)
+    session.refresh(source)
+    assert source.status == "ready"
+    assert source.current_run_id != first_run
+    assert session.scalar(select(Claim).where(Claim.run_id == first_run))
+    assert any(
+        "120" in c["text"] for c in answer(session, "我收藏的樱花食堂人均多少？")["citations"]
+    )
+
+
+def test_policy_decisions_are_audited(session):
+    ingest(session, demo()[:1])
+    source = session.scalar(select(Source))
+    session.add(ProcessingRule(dimension="creator", value="food_creator", action="metadata_only"))
+    session.commit()
+    reevaluate(session)
+    decisions = session.scalars(
+        select(PolicyDecision).where(PolicyDecision.source_id == source.id)
+    ).all()
+    assert [row.action for row in decisions] == ["process", "metadata_only"]
+    assert decisions[-1].rule_id
+
+
+def test_media_transcription_retained_as_evidence(session, monkeypatch):
+    monkeypatch.setattr(
+        "douyin_knowledge.service.OpenAITranscriber.transcribe",
+        lambda self, url: "这是一段从视频转写得到的详细内容。",
+    )
+    ingest(
+        session,
+        [
+            CapturedSource(
+                external_id="media", caption="短标题", media_url="https://example.com/a.mp4"
+            )
+        ],
+    )
+    source = session.scalar(select(Source).where(Source.external_id == "media"))
+    assert session.scalar(select(SourceAsset).where(SourceAsset.source_id == source.id))
+    process_source(session, source.id)
+    assert source.status == "ready"
+    assert (
+        session.scalar(select(ProcessingRun).where(ProcessingRun.id == source.current_run_id)).level
+        == 2
+    )
+    assert session.scalar(
+        select(Evidence).where(Evidence.source_id == source.id, Evidence.kind == "asr")
+    )
+
+
+def test_media_failure_falls_back_to_caption(session, monkeypatch):
+    def fail(self, url):
+        raise RuntimeError("expired media URL")
+
+    monkeypatch.setattr("douyin_knowledge.service.OpenAITranscriber.transcribe", fail)
+    ingest(
+        session,
+        [
+            CapturedSource(
+                external_id="expired",
+                caption="这段说明足以作为文本证据。",
+                media_url="https://example.com/a.mp4",
+            )
+        ],
+    )
+    source = session.scalar(select(Source).where(Source.external_id == "expired"))
+    process_source(session, source.id)
+    run = session.get(ProcessingRun, source.current_run_id)
+    assert run.status == "succeeded"
+    assert "expired media URL" in run.error
+    assert run.level == 1
