@@ -39,21 +39,36 @@ Current living design documents:
 - [`docs/AI_PIPELINE.md`](docs/AI_PIPELINE.md) — adaptive ingestion and AI processing pipeline, evidence acquisition, enrichment, extraction, and indexing.
 - [`docs/PROCESSING_POLICY.md`](docs/PROCESSING_POLICY.md) — user-controlled rules for deciding which saved sources should or should not enter knowledge processing.
 - [`docs/RETRIEVAL.md`](docs/RETRIEVAL.md) — hybrid retrieval, AI conversation planning, collection-vs-general scope, evidence grounding, and citations.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — V1 technical architecture, stack choices, storage, jobs, capture-provider boundary, AI adapters, repo structure, and deployment model.
 
-As the design stabilizes, additional dedicated documents will be added:
+Remaining handoff documents:
 
 ```text
 docs/
-├── PRODUCT_SPEC.md
-├── DATA_SCHEMA.md
-├── AI_PIPELINE.md
-├── PROCESSING_POLICY.md
-├── RETRIEVAL.md
-├── ARCHITECTURE.md
 └── TASKS.md
 
 AGENTS.md
 ```
+
+## V1 architecture at a glance
+
+```text
+React / TypeScript
+       ↓
+FastAPI
+       ↓
+SQLite + FTS5  ← authoritative local data
+       +
+LanceDB         ← rebuildable vector index
+       +
+SQLite worker queue
+       ↓
+Adaptive AI/media pipeline
+       ↓
+Douyin capture sidecar
+```
+
+The system is intentionally local-first and avoids unnecessary V1 infrastructure such as Redis, Celery, PostgreSQL, Kafka, graph databases, or microservices.
 
 ## Guiding idea
 
