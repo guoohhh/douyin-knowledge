@@ -76,6 +76,7 @@ function App() {
           <NavLink to="/">提问</NavLink>
           <NavLink to="/library">收藏</NavLink>
           <NavLink to="/entities">知识对象</NavLink>
+          <NavLink to="/resurface">想做的事</NavLink>
           <NavLink to="/wiki">Wiki</NavLink>
           <NavLink to="/settings">设置</NavLink>
         </nav>
@@ -87,6 +88,7 @@ function App() {
           <Route path="/library" element={<Library />} />
           <Route path="/sources/:id" element={<SourceDetail />} />
           <Route path="/entities" element={<Entities />} />
+          <Route path="/resurface" element={<Resurface />} />
           <Route path="/entities/:id" element={<EntityDetail />} />
           <Route path="/wiki" element={<Wiki />} />
           <Route path="/wiki/:id" element={<WikiDetail />} />
@@ -310,6 +312,32 @@ function Entities() {
     </>
   );
 }
+function Resurface() {
+  const data = query<{
+    entity_id: string;
+    entity_name: string;
+    state: string;
+    note: string;
+    sources: { source_id: string; title: string; claim_id: string; claim: string }[];
+  }[]>("resurface", "/resurface");
+  return (
+    <>
+      <p className="eyebrow">RESURFACE</p>
+      <h2>之前想做的事</h2>
+      <p className="muted">来自你标记为想去、想试或想学的知识对象，并附上当前可用的收藏来源。</p>
+      {data.data?.length === 0 && <p>暂无待回看的事项。可在知识对象中标记“想去”。</p>}
+      {data.data?.map((card) => (
+        <section className="card" key={card.entity_id}>
+          <h3><Link to={"/entities/" + card.entity_id}>{card.entity_name}</Link></h3>
+          <p>{card.state} {card.note}</p>
+          {card.sources.map((source) => (
+            <p key={source.claim_id}>{source.claim} · <Link to={"/sources/" + source.source_id}>{source.title}</Link></p>
+          ))}
+        </section>
+      ))}
+    </>
+  );
+}
 function EntityDetail() {
   const { id } = useParams();
   const data = query<{
@@ -349,6 +377,8 @@ function EntityDetail() {
         <select value={state} onChange={(e) => setState(e.target.value)}>
           <option value="">选择状态</option>
           <option value="want_to_go">想去</option>
+          <option value="want_to_try">想试</option>
+          <option value="want_to_learn">想学</option>
           <option value="visited">去过</option>
           <option value="using">使用中</option>
           <option value="completed">已完成</option>

@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 
+from douyin_knowledge.api import resurface
 from douyin_knowledge.capture import CapturedSource
 from douyin_knowledge.db import Base
 from douyin_knowledge.index import rebuild
@@ -263,3 +264,19 @@ def test_media_failure_falls_back_to_caption(session, monkeypatch):
     assert run.status == "succeeded"
     assert "expired media URL" in run.error
     assert run.level == 1
+
+
+def test_resurface_requires_current_evidence(session):
+    ingest(session, demo()[:1])
+    while work_once(session):
+        pass
+    entity = session.scalar(select(Entity).where(Entity.name == "樱花食堂"))
+    session.add(UserState(entity_id=entity.id, state="want_to_go", note="周末看看"))
+    session.commit()
+    cards = resurface(session)
+    assert cards[0]["entity_name"] == "樱花食堂"
+    assert cards[0]["sources"][0]["claim_id"]
+    source = session.scalar(select(Source))
+    source.status = "metadata_only"
+    session.commit()
+    assert resurface(session) == []

@@ -4,7 +4,7 @@ A local-first knowledge app for saved short-form content. It keeps source materi
 
 ## V1 status
 
-A runnable **text-first vertical slice with optional speech transcription** is implemented. JSON capture and a fixture work without credentials. A configured OpenAI-compatible endpoint can extract structured claims, create embeddings, and synthesize answers; without it, deterministic local extraction and retrieval keep the demo usable. The UI supports Ask My Saves, library/source evidence, entity and personal state, Wiki, policy rules, and JSON import.
+A runnable **text-first vertical slice with optional speech transcription** is implemented. JSON capture and a fixture work without credentials. A configured OpenAI-compatible endpoint can extract structured claims, create embeddings, and synthesize answers; without it, deterministic local extraction and retrieval keep the demo usable. The UI supports Ask My Saves, library/source evidence, entity and personal state, Wiki, intent-based resurfacing, policy rules, and JSON import.
 
 The sidecar adapter reads Douyin bookmark folders and their posts from [`Douyin_TikTok_Download_API` 5.1+](https://github.com/Evil0ctal/Douyin_TikTok_Download_API/releases/tag/v5.1.0) using an imported identity. This path has a deterministic HTTP contract test but has **not been tested against a live Douyin account** in this environment. No Douyin reverse-engineering code or cookies are stored here. Speech transcription is available for short or empty captions with an API key; OCR and vision remain outstanding. Continuous sync requires running the separate sync loop.
 
@@ -58,7 +58,7 @@ cd backend
 
 Ask “我收藏的旺角日料人均多少？” in the UI. Open the citation to inspect the exact evidence and source. Add a rule for collection `待看影视` in Settings **before importing** to see the `metadata_only` path. Rules can also be added later; exclusion immediately removes processed sources from normal knowledge retrieval without erasing previous runs.
 
-API endpoints: `/health`, `/dashboard`, `/sync`, `/sync/sidecar`, `/sources`, `/rules`, `/jobs`, `/search`, `/ask`, `/entities`, `/wiki`. Interactive API docs: `http://127.0.0.1:8001/docs`.
+API endpoints: `/health`, `/dashboard`, `/sync`, `/sync/sidecar`, `/sources`, `/rules`, `/jobs`, `/search`, `/ask`, `/entities`, `/resurface`, `/wiki`. Interactive API docs: `http://127.0.0.1:8001/docs`.
 
 ## Configuration
 

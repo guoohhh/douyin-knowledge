@@ -21,6 +21,7 @@ from .models import (
     WikiPage,
     WikiRevision,
     WikiSupport,
+    now,
 )
 from .retrieval import answer, search
 from .service import enqueue, ingest, reevaluate, work_once
@@ -277,6 +278,48 @@ def entities(session: Session = Depends(get_session)):
     ]
 
 
+@app.get("/resurface")
+def resurface(session: Session = Depends(get_session)):
+    """Surface explicitly saved intentions with current source support."""
+    cards = []
+    states = session.scalars(
+        select(UserState).where(UserState.state.in_(["want_to_go", "want_to_try", "want_to_learn"]))
+    ).all()
+    for state in states:
+        entity = session.get(Entity, state.entity_id)
+        claims = session.scalars(
+            select(Claim)
+            .join(Source, Claim.source_id == Source.id)
+            .where(
+                Claim.entity_id == entity.id,
+                Claim.run_id == Source.current_run_id,
+                Source.status == "ready",
+            )
+            .limit(3)
+        ).all()
+        if not claims:
+            continue
+        cards.append(
+            {
+                "entity_id": entity.id,
+                "entity_name": entity.name,
+                "state": state.state,
+                "note": state.note,
+                "updated_at": state.updated_at,
+                "sources": [
+                    {
+                        "source_id": claim.source_id,
+                        "title": session.get(Source, claim.source_id).title,
+                        "claim_id": claim.id,
+                        "claim": claim.value,
+                    }
+                    for claim in claims
+                ],
+            }
+        )
+    return sorted(cards, key=lambda card: card["updated_at"], reverse=True)
+
+
 @app.get("/entities/{entity_id}")
 def entity_detail(entity_id: str, session: Session = Depends(get_session)):
     entity = session.get(Entity, entity_id)
@@ -315,6 +358,7 @@ def set_state(entity_id: str, input: StateInput, session: Session = Depends(get_
     else:
         for key, value in input.model_dump().items():
             setattr(state, key, value)
+        state.updated_at = now()
     session.commit()
     return {"ok": True}
 
