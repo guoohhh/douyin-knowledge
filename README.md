@@ -6,7 +6,7 @@ Douyin Knowledge is a local-first personal knowledge project that starts from Do
 
 ## Current status
 
-The project is currently in **product design / architecture design**. Implementation has not started yet.
+The project has completed the first **product + architecture specification pass** and is ready to begin phased implementation. Implementation should follow `docs/TASKS.md` and the repository guardrails in `AGENTS.md` rather than attempting the full system in one pass.
 
 The first version is anchored on Douyin collections, while the long-term architecture should allow other capture channels such as Xiaohongshu, YouTube, web pages, screenshots, and articles.
 
@@ -36,7 +36,7 @@ Not every save needs to become knowledge. A Processing Policy layer lets the use
 
 ## Documentation
 
-Current living design documents:
+Design and implementation handoff documents:
 
 - [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md) — product vision, principles, user journey, V1 scope, decisions, and open questions.
 - [`docs/DATA_SCHEMA.md`](docs/DATA_SCHEMA.md) — conceptual knowledge model: Source, Evidence, Claim, Entity, KnowledgeItem, User State, and provenance.
@@ -46,15 +46,8 @@ Current living design documents:
 - [`docs/RETRIEVAL.md`](docs/RETRIEVAL.md) — hybrid retrieval, AI conversation planning, collection-vs-general scope, evidence grounding, and citations.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — V1 technical architecture, stack choices, storage, jobs, capture-provider boundary, AI adapters, repo structure, and deployment model.
 - [`docs/PHYSICAL_SCHEMA.md`](docs/PHYSICAL_SCHEMA.md) — concrete SQLite V1 tables, foreign keys, provenance links, Wiki revisions, search/index projections, conversation citations, and migration order.
-
-Remaining handoff documents:
-
-```text
-docs/
-└── TASKS.md
-
-AGENTS.md
-```
+- [`docs/TASKS.md`](docs/TASKS.md) — phased implementation plan, acceptance tests, and milestone order.
+- [`AGENTS.md`](AGENTS.md) — repository-level coding-agent rules and non-negotiable architecture invariants.
 
 ## Knowledge architecture at a glance
 
@@ -107,6 +100,12 @@ Douyin capture sidecar
 
 The system is intentionally local-first and avoids unnecessary V1 infrastructure such as Redis, Celery, PostgreSQL, Kafka, graph databases, or microservices.
 
+## Implementation entry point
+
+Codex should begin with **Phase 0** in `docs/TASKS.md` unless explicitly instructed otherwise.
+
+Before coding, it must read `AGENTS.md` and the relevant design docs. The first implementation milestone is deliberately small: repository bootstrap, health checks, development tooling, and empty-database migration plumbing.
+
 ## Guiding idea
 
 The system should answer a different question from the public web:
@@ -114,4 +113,4 @@ The system should answer a different question from the public web:
 - Search engines / public AI: **What exists on the internet?**
 - Douyin Knowledge: **What did the past version of me think was worth saving, what has that knowledge become over time, and how can it help me now?**
 
-The repository is intentionally specification-first. We will finish the important product and architecture decisions before handing implementation tasks to Codex.
+The repository remains specification-first: implementation should make the documented model real rather than silently redefining it.
