@@ -70,3 +70,15 @@ def dispose_engine() -> None:
             _engine.dispose()
         _engine = None
         _factory = None
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency for database sessions.
+
+    Usage:
+        @app.get("/endpoint")
+        def endpoint(db: Session = Depends(get_db)):
+            ...
+    """
+    with session_scope() as session:
+        yield session

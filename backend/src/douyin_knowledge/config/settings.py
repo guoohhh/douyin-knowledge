@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 VectorBackend = Literal["numpy", "lancedb"]
-ProviderKind = Literal["fake", "openai", "openai_compatible", "local_whisper"]
 
 
 class Settings(BaseSettings):
@@ -64,28 +63,56 @@ class Settings(BaseSettings):
     )
 
     # ---- ai providers ----------------------------------------------------
-    llm_provider: ProviderKind = "fake"
-    embedding_provider: ProviderKind = "fake"
-    asr_provider: ProviderKind = "fake"
-    ocr_provider: ProviderKind = "fake"
-    vision_provider: ProviderKind = "fake"
+    ai_provider: Literal["mock", "openai"] = Field(
+        default="mock",
+        description="Primary AI provider: 'mock' for testing, 'openai' for production",
+    )
+    asr_provider: Literal["mock", "openai"] | None = Field(
+        default=None,
+        description="Override ASR provider; defaults to ai_provider",
+    )
+    ocr_provider: Literal["mock", "openai"] | None = Field(
+        default=None,
+        description="Override OCR provider; defaults to ai_provider",
+    )
+    embedding_provider: Literal["mock", "openai"] | None = Field(
+        default=None,
+        description="Override embedding provider; defaults to ai_provider",
+    )
 
     openai_api_key: str | None = Field(default=None, repr=False)
     openai_base_url: str | None = None
     openai_timeout_s: float = 120.0
+    openai_chat_model: str | None = Field(
+        default="gpt-4o-mini",
+        description="Model for chat and structured extraction",
+    )
+    openai_vision_model: str | None = Field(
+        default="gpt-4o",
+        description="Model for vision understanding",
+    )
+    openai_embedding_model: str | None = Field(
+        default="text-embedding-3-small",
+        description="Model for vector embeddings",
+    )
 
-    # model roles (ARCHITECTURE.md section 16)
-    triage_model: str = "fake-small"
-    extraction_model: str = "fake-large"
-    query_planner_model: str = "fake-small"
-    answer_model: str = "fake-large"
-    wiki_router_model: str = "fake-small"
-    wiki_integration_model: str = "fake-large"
-    vision_model: str = "fake-vision"
-    embedding_model: str = "fake-embed"
+    # ---- model roles (ARCHITECTURE.md section 16) -------------------------
+    # Each role is an *override*: left unset, the name is derived from the active
+    # provider by `model_for_role`. Hardcoding "fake-small" style defaults here was
+    # actively misleading -- the strings were never sent to any provider, so a
+    # processing run stamped `extraction_model="fake-large"` while genuinely calling
+    # gpt-4o-mini, and the provenance record lied about which model produced a claim.
+    triage_model: str | None = None
+    extraction_model: str | None = None
+    query_planner_model: str | None = None
+    answer_model: str | None = None
+    wiki_router_model: str | None = None
+    wiki_integration_model: str | None = None
+    vision_model: str | None = None
+    embedding_model: str | None = None
+    asr_model: str | None = None
+    ocr_model: str | None = None
     embedding_dim: int = 256
-    asr_model: str = "fake-asr"
-    ocr_model: str = "fake-ocr"
 
     # ---- processing ------------------------------------------------------
     default_desired_level: int = Field(default=2, ge=0, le=4)
@@ -177,16 +204,65 @@ class Settings(BaseSettings):
         ):
             path.mkdir(parents=True, exist_ok=True)
 
+    # ---- model role resolution -------------------------------------------
+    #: Which concrete provider setting backs each role. Roles are a *product*
+    #: vocabulary (ARCHITECTURE 16); providers are an infrastructure one. Keeping the
+    #: mapping in one table means adding a provider does not mean touching ten
+    #: call sites that each guess at a model name.
+    _ROLE_KIND: ClassVar[dict[str, str]] = {
+        "triage": "chat",
+        "extraction": "chat",
+        "query_planner": "chat",
+        "answer": "chat",
+        "wiki_router": "chat",
+        "wiki_integration": "chat",
+        "vision": "vision",
+        "embedding": "embedding",
+        "asr": "asr",
+        "ocr": "ocr",
+    }
+
+    def provider_for_role(self, role: str) -> str:
+        kind = self._ROLE_KIND.get(role, "chat")
+        if kind == "embedding":
+            return self.embedding_provider or self.ai_provider
+        if kind == "asr":
+            return self.asr_provider or self.ai_provider
+        if kind == "ocr":
+            return self.ocr_provider or self.ai_provider
+        return self.ai_provider
+
+    def model_for_role(self, role: str) -> str:
+        """Resolve the model name to record and to send for a given role.
+
+        An explicit per-role override always wins; otherwise the name comes from the
+        provider actually in use, so what gets written to ``processing_runs.models_json``
+        is what was really called.
+        """
+        override = getattr(self, f"{role}_model", None)
+        if override:
+            return str(override)
+
+        provider = self.provider_for_role(role)
+        if provider == "mock":
+            return f"mock-{role}"
+
+        kind = self._ROLE_KIND.get(role, "chat")
+        if kind == "embedding":
+            return self.openai_embedding_model or "text-embedding-3-small"
+        if kind == "vision":
+            return self.openai_vision_model or "gpt-4o"
+        if kind == "asr":
+            return "whisper-1"
+        if kind == "ocr":
+            return self.openai_vision_model or "gpt-4o"
+        return self.openai_chat_model or "gpt-4o-mini"
+
     def uses_real_providers(self) -> bool:
+        """True when any capability is wired to something that costs money or leaves
+        the machine. Demo mode (everything mock) must stay detectable."""
         return any(
-            p != "fake"
-            for p in (
-                self.llm_provider,
-                self.embedding_provider,
-                self.asr_provider,
-                self.ocr_provider,
-                self.vision_provider,
-            )
+            self.provider_for_role(role) != "mock" for role in self._ROLE_KIND
         )
 
     def redacted(self) -> dict[str, object]:

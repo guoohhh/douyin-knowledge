@@ -3,8 +3,8 @@
 All 46 relational tables from docs/PHYSICAL_SCHEMA.md sections 4-50.
 The FTS5 virtual table and partial indexes are created in 0002.
 
-Revision ID: 0f7877c728c0
-Revises: 
+Revision ID: 0001_core_schema
+Revises: none (this is the base revision)
 Create Date: 2026-09-18 01:24:18.013298
 """
 
@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision: str = "0001_core_schema"
 down_revision: str | None = None
