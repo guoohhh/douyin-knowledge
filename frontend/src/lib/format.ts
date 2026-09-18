@@ -1,0 +1,92 @@
+/** Formatting helpers. Chinese locale throughout: this is a Chinese-language interface. */
+
+export function timecode(ms: number | null | undefined): string {
+  if (ms == null) return '—'
+  const total = Math.floor(ms / 1000)
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+export function duration(ms: number | null | undefined): string {
+  if (ms == null) return '—'
+  const total = Math.round(ms / 1000)
+  if (total < 60) return `${total} 秒`
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return s ? `${m} 分 ${s} 秒` : `${m} 分`
+}
+
+export function date(ms: number | null | undefined): string {
+  if (ms == null) return '—'
+  return new Date(ms).toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+}
+
+export function dateTime(ms: number | null | undefined): string {
+  if (ms == null) return '—'
+  return new Date(ms).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+/** Processing status, in the user's terms rather than the column's. */
+export const PROCESSING_LABELS: Record<string, string> = {
+  pending: '待处理',
+  queued: '排队中',
+  running: '处理中',
+  processed: '已处理',
+  partial: '部分处理',
+  failed: '处理失败',
+  skipped: '已跳过',
+  excluded: '按规则排除',
+}
+
+export const statusLabel = (status: string) => PROCESSING_LABELS[status] ?? status
+
+/**
+ * Knowledge scope, explained rather than named.
+ *
+ * `personal_first` is the default for an unmarked question (RET-003), so its wording has
+ * to make the behaviour obvious without the user knowing the term.
+ */
+export const SCOPE_LABELS: Record<string, string> = {
+  personal_required: '只用你的收藏回答',
+  personal_first: '先看你的收藏',
+  general: '通用知识',
+  hybrid: '收藏加通用知识',
+}
+
+export const scopeLabel = (scope: string) => SCOPE_LABELS[scope] ?? scope
+
+export const ACTION_LABELS: Record<string, string> = {
+  process: '正常处理',
+  metadata_only: '只存元数据',
+  always_process: '总是深度处理',
+  exclude: '不处理',
+}
+
+export const actionLabel = (action: string) => ACTION_LABELS[action] ?? action
+
+export const RULE_TYPE_LABELS: Record<string, string> = {
+  source: '单个视频',
+  creator: '作者',
+  collection: '收藏夹',
+  metadata: '元数据条件',
+  semantic: '语义判断',
+}
+
+export const ruleTypeLabel = (kind: string) => RULE_TYPE_LABELS[kind] ?? kind
+
+export function errorMessage(error: unknown): string {
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message: unknown }).message)
+  }
+  return '出错了'
+}
