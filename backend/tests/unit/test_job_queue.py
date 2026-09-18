@@ -168,3 +168,83 @@ def test_backoff_grows_and_is_capped(attempt: int, settings: Settings) -> None:
     delay = backoff_delay_ms(attempt, settings)
     assert delay > 0
     assert delay <= settings.job_backoff_max_s * 1000
+
+
+def test_worker_persists_audit_record_the_rollback_would_have_destroyed(
+    engine, settings: Settings
+) -> None:
+    """A failed run must still be explainable afterwards (POL-004).
+
+    The handler's `session_scope` rolls back on the exception, so a `processing_runs` row
+    written to explain the failure is destroyed by the very failure it documents. Before the
+    audit replay, `dk sources show` on a source whose processing had died reported no failed
+    run at all -- the record said nothing had ever been attempted.
+    """
+    from douyin_knowledge.db import session_scope
+    from douyin_knowledge.db.models.capture import Source
+    from douyin_knowledge.db.models.policy import SourceProcessingState
+    from douyin_knowledge.db.models.processing import ProcessingRun
+    from douyin_knowledge.extraction.orchestrator import AUDIT_REPLAY_ATTR, AuditReplay
+
+    # A real source row: `processing_runs.source_id` is NOT NULL with a live FK, so the
+    # audit replay has to satisfy the same constraints the original insert did.
+    with session_scope() as s:
+        s.add(Source(id="src_audit", platform="douyin", external_id="a1", source_type="video"))
+
+    replay = AuditReplay(
+        run_id="run_audit_test",
+        source_id="src_audit",
+        run_kind="extract",
+        processor_version="1.0.0",
+        schema_version="1",
+        target_level=2,
+        achieved_level=1,
+        models_json={"provider": "mock"},
+        config_json={"chunk_target_chars": 360},
+        started_at_ms=now_ms(),
+        finished_at_ms=now_ms(),
+        error_json={"type": "SourceUnavailable", "message": "media gone"},
+        partial_counts={"evidence": 3, "mentions": 0, "claims": 0, "chunks": 0},
+    )
+
+    def boom(ctx: JobContext) -> None:
+        # Write the audit into the doomed transaction, exactly as the orchestrator does...
+        ctx.session.add(
+            ProcessingRun(
+                id="run_audit_test",
+                source_id="src_audit",
+                run_kind="extract",
+                processor_version="1.0.0",
+                schema_version="1",
+                target_level=2,
+                status="failed",
+            )
+        )
+        ctx.session.flush()
+        exc = SourceUnavailable("media gone")
+        setattr(exc, AUDIT_REPLAY_ATTR, replay)
+        raise exc
+
+    registry = HandlerRegistry()
+    registry.register(JobType.PROCESS_SOURCE, boom)
+    with session_scope() as s:
+        JobQueue(s).enqueue(JobType.PROCESS_SOURCE, dedupe_key="audit")
+
+    Worker(registry, settings=settings).run_once()
+
+    with session_scope() as s:
+        run = s.get(ProcessingRun, "run_audit_test")
+        assert run is not None, "the failed run must survive the rollback"
+        assert run.status == "failed"
+        assert run.error_json["message"] == "media gone"
+        assert run.achieved_level == 1, "how far it got is part of the explanation"
+        # What the rollback took with it is stated, not silently omitted.
+        assert run.config_json["discarded_partial_output"]["evidence"] == 3
+        state = s.get(SourceProcessingState, "src_audit")
+        assert state is not None and state.processing_status == "failed"
+        # The currency pointer stays where it was: a failed run must not un-index a source.
+        assert state.current_processing_run_id is None
+        # The job itself still fails and still counts the attempt.
+        job = s.query(Job).one()
+        assert job.status in (JobStatus.QUEUED, JobStatus.FAILED)
+        assert job.attempt == 1

@@ -47,6 +47,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = get_logger(__name__)
 
+# The attribute name the worker looks for on a raised exception to find an audit record
+# that must outlive the transaction the exception is about to roll back. Declared here,
+# next to the code that attaches it, and imported by the worker so the two cannot drift.
+AUDIT_REPLAY_ATTR = "dk_audit_replay"
+
 PROCESSOR_VERSION = "1.0.0"
 SCHEMA_VERSION = "1"
 
@@ -55,6 +60,76 @@ SCHEMA_VERSION = "1"
 # diluting the embedding with unrelated content.
 CHUNK_TARGET_CHARS = 360
 CHUNK_OVERLAP_CHARS = 60
+
+
+@dataclass(frozen=True)
+class AuditReplay:
+    """A failed run's audit trail, in plain values, ready to re-apply on a fresh session.
+
+    Exists because the transaction that produced the failure record is the transaction that
+    gets rolled back: the worker's `session_scope` unwinds on any exception, so writing
+    "run failed, here is why" into that same session guarantees it is discarded. Carried out
+    on the exception instead, and applied by the failure boundary afterwards.
+
+    `partial_counts` records how much work the run had completed before dying. Those rows
+    (evidence, mentions, claims, chunks) are rolled back with everything else and are *not*
+    restored here -- restoring them would mean re-running the paid AI calls that produced
+    them. The counts are kept so the record says what was lost rather than staying silent
+    about it.
+    """
+
+    run_id: str
+    source_id: str
+    run_kind: str
+    processor_version: str
+    schema_version: str
+    target_level: int
+    achieved_level: int
+    models_json: dict[str, Any]
+    config_json: dict[str, Any]
+    started_at_ms: int
+    finished_at_ms: int | None
+    error_json: dict[str, Any]
+    partial_counts: dict[str, int]
+
+    def apply(self, session: Session) -> None:
+        """Re-insert the failed run and re-point the source's status at it.
+
+        Idempotent by lookup rather than by assumption: the run id is normally free (its
+        insert was rolled back), but a caller that commits instead of rolling back -- an API
+        request handler, say -- leaves the row present, and the audit must not crash the
+        failure handler by colliding with it.
+        """
+        run = session.get(ProcessingRun, self.run_id)
+        if run is None:
+            run = ProcessingRun(
+                id=self.run_id,
+                source_id=self.source_id,
+                run_kind=self.run_kind,
+                processor_version=self.processor_version,
+                schema_version=self.schema_version,
+                target_level=self.target_level,
+                started_at_ms=self.started_at_ms,
+            )
+            session.add(run)
+        run.achieved_level = self.achieved_level
+        run.status = "failed"
+        run.models_json = self.models_json
+        # `discarded_partial_output` is the honest part: these rows existed and no longer do.
+        run.config_json = {**self.config_json, "discarded_partial_output": self.partial_counts}
+        run.finished_at_ms = self.finished_at_ms
+        run.error_json = self.error_json
+
+        state = session.get(SourceProcessingState, self.source_id)
+        if state is None:
+            state = SourceProcessingState(source_id=self.source_id)
+            session.add(state)
+        # The currency pointer is deliberately untouched: the previous run stays current, so
+        # a failed reprocess degrades to "no new knowledge", not "this source is now
+        # unsearchable" (DB-004).
+        state.processing_status = "failed"
+        state.last_error_json = self.error_json
+        session.flush()
 
 
 @dataclass
@@ -194,6 +269,15 @@ class ProcessingOrchestrator:
             outcome.status = "failed"
             outcome.error = run.error_json
             self._record_failure(session, source_id, run.error_json)
+            # These writes are about to be destroyed. The caller is a worker whose
+            # `session_scope` rolls back on any exception, so the failed run row and the
+            # "why did this source stop working" state we just wrote vanish with it, and
+            # POL-004's promise -- every processing decision explainable from the record --
+            # would hold for successes only. Attaching a replay closure lets the worker
+            # re-apply the audit on the fresh session it already opens to record the job
+            # failure, which is *after* the rollback and therefore durable.
+            snapshot = self._audit_snapshot(run, outcome)
+            setattr(exc, AUDIT_REPLAY_ATTR, snapshot)
             logger.exception(
                 "processing_run_failed", extra={"source_id": source_id, "run_id": run.id}
             )
@@ -456,6 +540,36 @@ class ProcessingOrchestrator:
         state.last_success_at_ms = now_ms()
         state.last_error_json = None
         session.flush()
+
+    def _audit_snapshot(
+        self, run: ProcessingRun, outcome: ProcessingOutcome
+    ) -> AuditReplay:
+        """Copy the failed run's audit trail out of the ORM into plain values.
+
+        Plain values, not the ORM objects: after the rollback those instances are detached
+        and their attributes may not even be loadable, so anything the replay needs has to
+        be read *now*, while the session is still usable.
+        """
+        return AuditReplay(
+            run_id=run.id,
+            source_id=run.source_id,
+            run_kind=run.run_kind,
+            processor_version=run.processor_version,
+            schema_version=run.schema_version,
+            target_level=run.target_level,
+            achieved_level=run.achieved_level,
+            models_json=dict(run.models_json or {}),
+            config_json=dict(run.config_json or {}),
+            started_at_ms=run.started_at_ms,
+            finished_at_ms=run.finished_at_ms,
+            error_json=dict(run.error_json or {}),
+            partial_counts={
+                "evidence": outcome.evidence_count,
+                "mentions": outcome.mention_count,
+                "claims": outcome.claim_count,
+                "chunks": outcome.chunk_count,
+            },
+        )
 
     def _record_failure(
         self, session: Session, source_id: str, error: dict[str, Any]

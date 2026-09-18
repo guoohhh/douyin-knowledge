@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import delete, select
 
 from douyin_knowledge.core.clock import now_ms
+from douyin_knowledge.db.dml import execute_rowcount
 from douyin_knowledge.db.models.policy import PolicyDecision as PolicyDecisionRow
 from douyin_knowledge.db.models.policy import ProcessingRule as ProcessingRuleRow
 from douyin_knowledge.policy.models import (
@@ -191,8 +192,9 @@ class PolicyRepository:
 
     def purge_decisions(self, source_id: str) -> int:
         """Drop a source's decision history. Used by local delete (PRIV-003)."""
-        result = self.session.execute(
-            delete(PolicyDecisionRow).where(PolicyDecisionRow.source_id == source_id)
+        removed = execute_rowcount(
+            self.session,
+            delete(PolicyDecisionRow).where(PolicyDecisionRow.source_id == source_id),
         )
         self.session.flush()
-        return int(result.rowcount or 0)
+        return removed

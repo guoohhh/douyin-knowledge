@@ -274,3 +274,42 @@ class TestWorker:
         assert result.exit_code == 0, result.output
         with session_scope() as session:
             assert JobQueue(session).counts_by_status().get("queued", 0) == 0
+
+
+class TestEntryPoint:
+    """The installed `dk` script and `python -m douyin_knowledge.cli` must behave alike.
+
+    They were not: `[project.scripts]` pointed at the Typer `app`, skipping the `DKError`
+    handler in `main`, so a domain error printed a traceback from `dk` and a one-line
+    message from `python -m`. Both go through `main` now, and these tests keep it that way
+    -- the entry-point string is not covered by any other test, and an editable reinstall
+    is required to notice a change in it.
+    """
+
+    def test_console_script_routes_through_main(self) -> None:
+        # Read as text rather than with tomllib: `requires-python` is >=3.10 and tomllib
+        # arrived in 3.11, so parsing would skip this test on the lowest supported version.
+        from pathlib import Path
+
+        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+        assert 'dk = "douyin_knowledge.cli.main:main"' in pyproject
+
+    def test_main_turns_a_domain_error_into_one_line(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from douyin_knowledge.cli import main as cli_main
+        from douyin_knowledge.core.errors import ConfigurationError
+
+        def boom() -> None:
+            raise ConfigurationError("sidecar url missing")
+
+        monkeypatch.setattr(cli_main, "app", boom)
+        with pytest.raises(SystemExit) as exit_info:
+            cli_main.main()
+        assert exit_info.value.code == 1
+        # stderr: diagnostics must not contaminate the stdout that `--json` callers parse.
+        err = capsys.readouterr().err
+        assert "sidecar url missing" in err
+        # The bracketed code has to survive rich's markup parser, which silently ate it.
+        assert "[configuration_error]" in err
+        assert "Traceback" not in err

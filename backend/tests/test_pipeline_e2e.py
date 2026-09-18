@@ -563,24 +563,31 @@ class TestScopeClassification:
         assert not classify_scope("MCP 一般来说是什么").requires_evidence
 
 
-class TestConversation:
-    @pytest.fixture
-    def indexed(self, synced, settings):
-        factory, source_ids = synced
-        with factory() as session:
-            orch = _orchestrator(settings)
-            for source_id in source_ids:
-                orch.process_source(session, source_id, target_level=2)
-            session.commit()
-            indexer.reindex_all(
-                session,
-                store=VectorStore(settings.vector_dir),
-                embedder=MockEmbeddingModel(),
-                model_name="mock-embedding",
-            )
-            session.commit()
-        return factory, source_ids
+@pytest.fixture
+def indexed(synced, settings):
+    """A fully processed, fully indexed corpus: the state a user asks questions against.
 
+    Module-level rather than nested in `TestConversation` because the demo-mode wiring test
+    below needs the same corpus, and the point of that test is to compare against what the
+    conversation tests do -- which is impossible if it cannot reach the same fixture.
+    """
+    factory, source_ids = synced
+    with factory() as session:
+        orch = _orchestrator(settings)
+        for source_id in source_ids:
+            orch.process_source(session, source_id, target_level=2)
+        session.commit()
+        indexer.reindex_all(
+            session,
+            store=VectorStore(settings.vector_dir),
+            embedder=MockEmbeddingModel(),
+            model_name="mock-embedding",
+        )
+        session.commit()
+    return factory, source_ids
+
+
+class TestConversation:
     def _manager(self, session, settings):
         return ConversationManager(
             session,
@@ -709,3 +716,57 @@ class TestConversation:
 
             assert "[99]" not in turn.answer.content
             assert turn.answer.diagnostics["stripped_markers"] == [99]
+
+
+class TestDemoModeAnswersHonestly:
+    """Demo mode must compose a real answer, not echo a placeholder.
+
+    The class above builds `ConversationManager` without a `chat_model`, so it exercised
+    `_deterministic_answer` -- but that is *not* what the API served. `deps.py` resolved the
+    chat model through the registry, which under `ai_provider=mock` returned `MockChatModel`,
+    whose `generate` echoes a canned string. So `POST /api/conversations/ask` answered with
+    the body "Mock response" carrying a real citation marker: a citation supporting a sentence
+    that asserts nothing, on the path every new user hits first (demo mode is the shipped
+    default, DEC-006).
+
+    These tests bind to the resolution helper the wiring uses, not to a hand-passed `None`,
+    because the gap was in the wiring rather than in the generator.
+    """
+
+    def test_registry_declines_a_chat_model_in_demo_mode(self, settings) -> None:
+        from douyin_knowledge.ai.registry import get_answer_chat_model, get_chat_model
+
+        assert settings.ai_provider == "mock"
+        assert get_answer_chat_model(settings) is None
+        # `get_chat_model` still yields the mock: callers that need generation
+        # unconditionally (and the adapter tests) depend on it.
+        assert get_chat_model(settings) is not None
+
+    def test_api_wiring_does_not_serve_a_canned_string(self, indexed, settings) -> None:
+        from douyin_knowledge.ai.adapters.mock_adapter import MockChatModel
+        from douyin_knowledge.ai.registry import get_answer_chat_model
+
+        factory, _ = indexed
+        with factory() as session:
+            manager = ConversationManager(
+                session,
+                vector_store=VectorStore(settings.vector_dir),
+                embedder=MockEmbeddingModel(),
+                # Exactly how `api.deps.get_conversation_manager` builds it.
+                chat_model=get_answer_chat_model(settings),
+                model_name=settings.model_for_role("answer"),
+            )
+            turn = manager.ask("我收藏里有哪些人均便宜的餐厅？")
+            session.commit()
+
+            canned = MockChatModel().canned_response
+            assert canned not in turn.answer.content
+            assert turn.answer.has_evidence
+            assert turn.citations
+            # The answer has to actually quote the corpus, not merely be non-canned.
+            assert len(turn.answer.content) > len(canned) * 3
+            import re
+
+            markers = {int(m) for m in re.findall(r"\[(\d+)\]", turn.answer.content)}
+            assert markers, "a cited answer must carry at least one marker"
+            assert markers <= {c["ordinal"] for c in turn.citations}

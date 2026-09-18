@@ -11,7 +11,7 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
-from douyin_knowledge.ai.registry import get_chat_model, get_embedding_model
+from douyin_knowledge.ai.registry import get_answer_chat_model, get_embedding_model
 from douyin_knowledge.config import Settings, get_settings
 from douyin_knowledge.conversation.conversation_manager import ConversationManager
 from douyin_knowledge.db.session import get_db
@@ -54,17 +54,18 @@ RetrieverDep = Annotated[HybridRetriever, Depends(get_retriever)]
 def get_conversation_manager(
     db: DbSession, settings: AppSettings, store: VectorStoreDep
 ) -> ConversationManager:
-    """Chat model is resolved eagerly.
+    """Chat model is resolved eagerly, and resolves to `None` in demo mode.
 
-    In demo mode (`ai_provider=mock`) this is the deterministic composer, which is the
-    point: the product must answer with real cited knowledge before anyone configures
-    a key, otherwise the citation path only ever gets exercised in production.
+    `get_answer_chat_model` -- not `get_chat_model` -- because in demo mode
+    (`ai_provider=mock`) the answer must come from the deterministic composer. That is the
+    point of the mode: the product answers with real cited knowledge before anyone
+    configures a key, otherwise the citation path only ever gets exercised in production.
     """
     return ConversationManager(
         db,
         vector_store=store,
         embedder=get_embedding_model(settings),
-        chat_model=get_chat_model(settings),
+        chat_model=get_answer_chat_model(settings),
         model_name=settings.model_for_role("answer"),
     )
 

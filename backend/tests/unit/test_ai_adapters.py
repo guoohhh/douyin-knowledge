@@ -104,3 +104,91 @@ def test_mock_embedding_is_not_degenerate() -> None:
 
     assert any(v != 0.0 for v in related.vector)
     assert cosine(related, same_topic) > cosine(related, unrelated)
+
+
+class TestStructuredExtractionFailsLoudly:
+    """A bad model response must fail the run, not succeed with nothing extracted.
+
+    `extract` returned `data = {}` when the response carried no function call, and let a
+    `JSONDecodeError` escape when the arguments were truncated. Both are worse than an
+    error: an empty dict is indistinguishable from "this video mentions no entities", so
+    the run was marked succeeded, the currency pointer advanced onto it, and the source
+    became permanently searchable-but-empty. The bare decode error was not a `DKError`, so
+    it carried no code and defaulted to `retryable = False`, retiring the job for what is
+    usually a transient bad generation.
+
+    Built with `object.__new__` to skip `_require_openai`: `openai` is an optional extra and
+    is not installed in the test environment, but `extract` itself only touches `self.model`
+    and `self._client`, so the parsing contract is testable without the SDK. Skipping the
+    test instead would mean this path is only ever exercised where it costs money to run.
+    """
+
+    def _model(self, response: object) -> object:
+        from douyin_knowledge.ai.adapters.openai_adapter import OpenAIStructuredModel
+
+        class FakeCompletions:
+            def create(self, **kwargs: object) -> object:
+                return response
+
+        class FakeClient:
+            chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+        model = object.__new__(OpenAIStructuredModel)
+        model.model = "gpt-4o-mini"  # type: ignore[attr-defined]
+        model._client = FakeClient()  # type: ignore[attr-defined]
+        return model
+
+    def _response(
+        self, *, finish_reason: str = "stop", arguments: str | None = None
+    ) -> object:
+        call = None if arguments is None else type("Call", (), {"arguments": arguments})()
+        message = type("Msg", (), {"function_call": call, "content": None})()
+        choice = type("Choice", (), {"message": message, "finish_reason": finish_reason})()
+        return type(
+            "Resp", (), {"choices": [choice], "model": "gpt-4o-mini", "usage": None}
+        )()
+
+    def test_truncated_response_raises_retryable(self) -> None:
+        import pytest
+
+        from douyin_knowledge.core.errors import StructuredOutputInvalid
+
+        model = self._model(
+            self._response(finish_reason="length", arguments='{"entities": [{"na')
+        )
+        with pytest.raises(StructuredOutputInvalid) as info:
+            model.extract("prompt", {"type": "object"})  # type: ignore[attr-defined]
+        assert info.value.retryable is True
+        assert info.value.code == "structured_output_invalid"
+
+    def test_malformed_json_raises_instead_of_escaping_as_decode_error(self) -> None:
+        import pytest
+
+        from douyin_knowledge.core.errors import StructuredOutputInvalid
+
+        model = self._model(self._response(arguments="{not json"))
+        with pytest.raises(StructuredOutputInvalid):
+            model.extract("prompt", {"type": "object"})  # type: ignore[attr-defined]
+
+    def test_missing_function_call_is_not_an_empty_extraction(self) -> None:
+        import pytest
+
+        from douyin_knowledge.core.errors import StructuredOutputInvalid
+
+        model = self._model(self._response(arguments=None))
+        with pytest.raises(StructuredOutputInvalid):
+            model.extract("prompt", {"type": "object"})  # type: ignore[attr-defined]
+
+    def test_non_object_payload_is_rejected(self) -> None:
+        import pytest
+
+        from douyin_knowledge.core.errors import StructuredOutputInvalid
+
+        model = self._model(self._response(arguments="[1, 2, 3]"))
+        with pytest.raises(StructuredOutputInvalid):
+            model.extract("prompt", {"type": "object"})  # type: ignore[attr-defined]
+
+    def test_a_good_response_still_parses(self) -> None:
+        model = self._model(self._response(arguments='{"entities": ["a"]}'))
+        result = model.extract("prompt", {"type": "object"})  # type: ignore[attr-defined]
+        assert result.data == {"entities": ["a"]}

@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.core.errors import DKError
+from douyin_knowledge.db.dml import execute_rowcount
 from douyin_knowledge.db.models.ops import Job, JobEvent
 from douyin_knowledge.jobs.types import JobStatus, JobType, Priority
 from douyin_knowledge.observability import get_logger
@@ -132,7 +133,8 @@ class JobQueue:
 
         for candidate in self.session.scalars(stmt).all():
             expected_status = candidate.status
-            result = self.session.execute(
+            claimed = execute_rowcount(
+                self.session,
                 update(Job)
                 .where(Job.id == candidate.id, Job.status == expected_status)
                 .values(
@@ -141,9 +143,9 @@ class JobQueue:
                     locked_by=worker,
                     started_at_ms=candidate.started_at_ms or ts,
                     attempt=Job.attempt + 1,
-                )
+                ),
             )
-            if result.rowcount == 1:
+            if claimed == 1:
                 self.session.flush()
                 self.session.refresh(candidate)
                 reclaimed = expected_status == JobStatus.RUNNING
@@ -184,6 +186,11 @@ class JobQueue:
             else {"code": type(error).__name__, "message": str(error), "retryable": False}
         )
         retryable = bool(payload.get("retryable")) and not force_terminal
+        # Coerced to `str` rather than passed straight through: `payload` comes from either
+        # `DKError.to_dict()` or the fallback literal, so its values are only loosely typed,
+        # and `log()` writes this into a `String` column. A non-string message would fail at
+        # flush time, inside the failure handler -- the one place an exception is worst.
+        message = str(payload.get("message") or type(error).__name__)
         job.last_error_json = payload
         job.locked_at_ms = None
         job.locked_by = None
@@ -192,13 +199,13 @@ class JobQueue:
             job.status = JobStatus.QUEUED
             job.available_at_ms = now_ms() + (retry_delay_ms or 5000)
             self.session.flush()
-            self.log(job, "retry_scheduled", payload.get("message"), payload)
+            self.log(job, "retry_scheduled", message, payload)
             return True
 
         job.status = JobStatus.FAILED
         job.finished_at_ms = now_ms()
         self.session.flush()
-        self.log(job, "failed", payload.get("message"), payload)
+        self.log(job, "failed", message, payload)
         return False
 
     def cancel(self, job_id: str, *, reason: str = "cancelled by user") -> bool:

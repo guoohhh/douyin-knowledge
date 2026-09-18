@@ -143,9 +143,9 @@ Read `AGENTS.md` first; it holds the invariants that must not be quietly renegot
 `docs/TASKS.md` section 0 says what exists. `docs/DECISIONS.md` says where the code and the design docs disagree, and it is the code that wins. If you find an entry in either file that no longer matches reality, fix the document in the same change: a stale status section is read as a description of the system, and it lies.
 
 ```bash
-cd backend && python -m pytest -q && python -m ruff check .   # 187 passed, 4 skipped
+cd backend && python -m pytest -q && python -m ruff check . && python -m mypy src
 cd frontend && npm run typecheck && npm run build
-DK_ORIGIN=http://127.0.0.1:8787 npm run probe                 # client vs a live server
+npm run probe                                 # client vs a live server on :8787
 ```
 
 The probe exists because every payload-shape bug in this project came from a plausible guess about a response, not from a missing endpoint. Read the route before writing the type.

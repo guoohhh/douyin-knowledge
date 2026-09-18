@@ -29,7 +29,11 @@ dev = [
 ]
 
 [project.scripts]
-dk = "douyin_knowledge.cli.main:app"
+# `main`, not `app`: `main` wraps the Typer app in the DKError handler that turns a domain
+# error into "error [code] message" instead of a traceback. Pointing the script at `app`
+# made the installed `dk` behave differently from `python -m douyin_knowledge.cli` on
+# exactly the inputs where a readable error matters most.
+dk = "douyin_knowledge.cli.main:main"
 
 [build-system]
 requires = ["hatchling"]

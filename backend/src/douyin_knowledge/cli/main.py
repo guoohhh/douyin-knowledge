@@ -64,7 +64,11 @@ def _revisions(settings: Settings) -> tuple[str | None, str]:
 
 
 def fail(message: str, *, code: int = 1) -> None:
-    err_console.print(f"[red]error[/red] {message}")
+    # `markup=False` because messages carry bracketed error codes like
+    # "[configuration_error] ...". Rich reads `[configuration_error]` as a style tag, finds
+    # no such style, and drops it -- so the one piece of the message a user would quote in a
+    # bug report was the piece that never got printed.
+    err_console.print(f"error {message}", markup=False, style="red")
     raise typer.Exit(code)
 
 
@@ -217,12 +221,20 @@ __all__ = ["app", "main", "commands_pipeline", "commands_query"]
 
 
 def main() -> None:
+    """Console-script wrapper: the process boundary, where exceptions become exit codes.
+
+    `fail()` is not reused here. It raises `typer.Exit`, which Typer's own runtime
+    translates into an exit code -- but at this point we are *outside* that runtime, having
+    just caught something it let through, so `typer.Exit` would propagate as an ordinary
+    uncaught exception and print the traceback this handler exists to prevent.
+    """
     try:
         app()
     except DKError as exc:
         # Domain errors already carry an operator-readable message and a code; a traceback
         # would bury it.
-        fail(f"[{exc.code}] {exc.message}")
+        err_console.print(f"error [{exc.code}] {exc.message}", markup=False, style="red")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

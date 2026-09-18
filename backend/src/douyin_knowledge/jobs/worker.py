@@ -12,9 +12,12 @@ import threading
 import time
 from collections.abc import Callable
 
+from sqlalchemy.orm import Session
+
 from douyin_knowledge.config import Settings, get_settings
 from douyin_knowledge.core.errors import DKError
 from douyin_knowledge.db.session import session_scope
+from douyin_knowledge.extraction.orchestrator import AUDIT_REPLAY_ATTR
 from douyin_knowledge.jobs.queue import JobQueue, worker_identity
 from douyin_knowledge.jobs.registry import HandlerRegistry, JobContext
 from douyin_knowledge.observability import get_logger, log_context
@@ -97,10 +100,34 @@ class Worker:
                 fresh = session.get(Job, job_id)
                 if fresh is None:  # pragma: no cover
                     return False
+                self._replay_audit(session, exc)
                 return queue.fail(fresh, exc, retry_delay_ms=backoff_delay_ms(attempt, self.settings))
         except Exception:  # pragma: no cover - never let bookkeeping kill the worker
             logger.exception("failed to record job failure")
             return False
+
+    @staticmethod
+    def _replay_audit(session: Session, exc: BaseException) -> None:
+        """Re-apply any audit record the handler wrote into the transaction we rolled back.
+
+        A handler runs inside a `session_scope` that unwinds on failure, so audit rows it
+        wrote to explain *why* it failed are rolled back along with the work they describe.
+        POL-004 requires every processing decision to be explainable from the record, and a
+        failure is a decision. A handler that has such a record attaches it to the exception;
+        this session is the first durable one after the rollback.
+
+        Duck-typed on the attribute rather than on an exception class, so a handler can raise
+        whatever its domain calls for -- wrapping the error in a carrier type would hide its
+        `code` and `retryable` flag from `queue.fail` right when they decide whether the job
+        is retried.
+        """
+        replay = getattr(exc, AUDIT_REPLAY_ATTR, None)
+        if replay is None:
+            return
+        try:
+            replay.apply(session)
+        except Exception:  # pragma: no cover - audit must not mask the original failure
+            logger.exception("failed to replay audit record", extra={"error": repr(exc)})
 
     # ---- loops ----------------------------------------------------------
     def run_forever(self, *, on_idle: Callable[[], None] | None = None) -> None:

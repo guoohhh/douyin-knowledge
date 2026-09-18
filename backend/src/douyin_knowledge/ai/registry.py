@@ -42,6 +42,26 @@ def get_chat_model(settings: Settings) -> ChatModel:
     raise ConfigurationError(f"unknown ai_provider {provider!r}")
 
 
+def get_answer_chat_model(settings: Settings) -> ChatModel | None:
+    """Build the chat model used to *phrase* an answer, or `None` to compose it directly.
+
+    Returns `None` under `ai_provider=mock` rather than `MockChatModel`, and the difference
+    is user-visible. `MockChatModel` echoes a canned string, so the demo path was serving
+    the literal body "Mock response" with real evidence and a real citation marker attached
+    -- a citation supporting a sentence that asserts nothing. `AnswerGenerator` treats a
+    missing model as "compose the answer from the retrieved evidence yourself"
+    (`_deterministic_answer`), which is the honest behaviour for a mode whose whole purpose
+    is to exercise the cited-answer path before anyone configures a key (DEC-006).
+
+    Distinct from `get_chat_model` because the two callers want different things: an answer
+    generator can degrade to deterministic prose, whereas a caller that needs generation
+    unconditionally should keep getting a model (and the mock, in tests).
+    """
+    if settings.ai_provider == "mock":
+        return None
+    return get_chat_model(settings)
+
+
 def get_structured_model(settings: Settings) -> StructuredModel:
     """Build the configured structured extraction model."""
     provider = settings.ai_provider

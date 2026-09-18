@@ -32,7 +32,7 @@ from douyin_knowledge.ai.providers import (
     TranscriptSegment,
     VisionResponse,
 )
-from douyin_knowledge.core.errors import ConfigurationError, DKError
+from douyin_knowledge.core.errors import ConfigurationError, DKError, StructuredOutputInvalid
 
 
 class OpenAINotAvailable(DKError):
@@ -124,10 +124,44 @@ class OpenAIStructuredModel:
             temperature=temperature,
         )
         choice = response.choices[0]
-        if choice.message.function_call:
-            data = json.loads(choice.message.function_call.arguments)
-        else:
-            data = {}
+        # A truncated or absent function call is a failure, not an empty extraction. This
+        # returned `data = {}` on `finish_reason == "length"`, and an empty dict is
+        # indistinguishable from "this video genuinely mentions no entities": the run was
+        # marked succeeded, the currency pointer advanced onto it, and the source became
+        # permanently searchable-but-empty with nothing in the record to say a model
+        # response had been cut off. Raising `StructuredOutputInvalid` (retryable) instead
+        # keeps the run failed and lets the worker retry it with backoff.
+        if choice.finish_reason == "length":
+            raise StructuredOutputInvalid(
+                "model response truncated before the extraction was complete",
+                model=response.model,
+                finish_reason=choice.finish_reason,
+            )
+        if not choice.message.function_call:
+            raise StructuredOutputInvalid(
+                "model returned no function call despite function_call being forced",
+                model=response.model,
+                finish_reason=choice.finish_reason,
+            )
+        raw_arguments = choice.message.function_call.arguments
+        try:
+            data = json.loads(raw_arguments)
+        except (TypeError, ValueError) as exc:
+            # Truncated or malformed JSON reached `json.loads` as a bare `JSONDecodeError`,
+            # which is not a `DKError`: the worker logged it with a full traceback and no
+            # error code, and `retryable` defaulted to false, so a transient bad
+            # generation retired the job permanently.
+            raise StructuredOutputInvalid(
+                f"model returned unparseable function arguments: {exc}",
+                model=response.model,
+            ) from exc
+        if not isinstance(data, dict):
+            # The schema always describes an object. A bare list or scalar would flow into
+            # callers that do `data.get(...)` and fail far from the cause.
+            raise StructuredOutputInvalid(
+                f"expected a JSON object from the model, got {type(data).__name__}",
+                model=response.model,
+            )
 
         return StructuredResponse(
             data=data,

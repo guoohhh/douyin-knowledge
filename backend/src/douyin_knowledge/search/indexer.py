@@ -24,6 +24,7 @@ from sqlalchemy import delete, select
 
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.core.text import content_hash, normalize_ws
+from douyin_knowledge.db.dml import execute_rowcount
 from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.entities import Entity, EntityAlias
 from douyin_knowledge.db.models.policy import SourceProcessingState
@@ -447,6 +448,6 @@ def reindex_all(
 
 def clear_index(session: Session) -> int:
     """Drop the whole projection. The FTS triggers cascade the deletion."""
-    result = session.execute(delete(SearchDocument))
+    removed = execute_rowcount(session, delete(SearchDocument))
     session.execute(delete(VectorDocument))
-    return int(result.rowcount or 0)
+    return removed

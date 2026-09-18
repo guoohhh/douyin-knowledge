@@ -24,15 +24,18 @@ from douyin_knowledge.cli.main import (
 
 
 def _services(session, settings):
-    from douyin_knowledge.ai.registry import get_chat_model, get_embedding_model
+    from douyin_knowledge.ai.registry import get_answer_chat_model, get_embedding_model
     from douyin_knowledge.conversation.conversation_manager import ConversationManager
     from douyin_knowledge.retrieval.vector_store import VectorStore
 
+    # `get_answer_chat_model` keeps `dk ask` and `POST /api/conversations/ask` phrasing
+    # answers the same way; under the mock provider both compose deterministically rather
+    # than echoing a canned string.
     return ConversationManager(
         session,
         vector_store=VectorStore(settings.vector_dir),
         embedder=get_embedding_model(settings),
-        chat_model=get_chat_model(settings),
+        chat_model=get_answer_chat_model(settings),
         model_name=settings.model_for_role("answer"),
     )
 

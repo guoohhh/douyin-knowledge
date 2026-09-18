@@ -249,6 +249,18 @@ class TestConversations:
         assert body["scope"] == "personal_first"
 
     def test_ask_produces_a_cited_answer(self, populated: TestClient) -> None:
+        """DEC-006: the answer must be traceable to whatever produced it.
+
+        This asserted `meta["model_name"]` is set, which passed only because demo mode was
+        handing the generator a `MockChatModel` that echoed the canned string "Mock
+        response" -- so the recorded provenance was a model that had written nothing of
+        substance. Demo mode now composes the answer itself, and a deterministic answer has
+        no model name to record: `generator` is the provenance, and inventing a model name
+        for prose that no model wrote would be false provenance, not better provenance.
+
+        So the assertion is on the pair: `generator` always present, `model_name` set
+        exactly when a model actually ran.
+        """
         body = populated.post(
             "/api/conversations/ask", json={"query": "我收藏里有哪些香港餐厅"}
         ).json()
@@ -256,7 +268,24 @@ class TestConversations:
         assert body["has_evidence"] is True
         assert body["citations"], "a personal-scope answer must cite the collection"
         assert body["conversation_id"]
-        assert body["meta"]["model_name"], "the answer records which model wrote it"
+
+        meta = body["meta"]
+        assert meta["generator"] in ("deterministic", "model")
+        if meta["generator"] == "model":
+            assert meta["model_name"], "a model-written answer records which model wrote it"
+        else:
+            assert meta["model_name"] is None, (
+                "a deterministic answer must not claim a model wrote it"
+            )
+        # The regression this file previously accepted: placeholder text under real citations.
+        from douyin_knowledge.ai.adapters.mock_adapter import MockChatModel
+
+        assert MockChatModel().canned_response not in body["content"]
+        # Every marker in the prose must resolve to a returned citation.
+        import re
+
+        markers = {int(m) for m in re.findall(r"\[(\d+)\]", body["content"])}
+        assert markers <= {c["ordinal"] for c in body["citations"]}
 
     def test_turns_accumulate_in_one_conversation(self, populated: TestClient) -> None:
         conversation_id = populated.post(
