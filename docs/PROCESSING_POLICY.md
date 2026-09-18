@@ -1,9 +1,9 @@
 # Douyin Knowledge — Processing Policy
 
-Status: Living document  
-Phase: Product / ingestion policy design  
-Version: 0.1  
-Last updated: 2026-09-17
+Status: Living document
+Phase: Design, plus an as-built record in section 14A
+Version: 0.2
+Last updated: 2026-09-18
 
 ---
 
@@ -469,7 +469,31 @@ policy_reason
 policy_evaluated_at
 ```
 
-The exact relational schema will be finalized during implementation design.
+The design above is the target. Section 14A records what was actually built; where the two disagree, the code is authoritative.
+
+---
+
+## 14A. As Built
+
+The policy layer is implemented and wired: every source that comes out of a sync is evaluated before any processing job runs, and every evaluation writes a row, including ones that resolve to the default. Read this section rather than inferring the schema from the sketch above.
+
+**Rules** live in `processing_rules` (`db/models/policy.py:ProcessingRule`) and carry `rule_type`, `action`, `priority`, one of `target_source_id` / `target_creator_id` / `target_collection_id`, and a JSON `matcher_json`.
+
+Rule types are `source`, `creator`, `collection`, `metadata`, `semantic`. Actions are `process`, `metadata_only`, `always_process`, `exclude`.
+
+**Targets are internal ids, never display names.** A rule excluding a creator stores `cre_...`, not the creator's handle. Douyin display names change, and a rule keyed on a name would silently stop applying the moment someone renamed themselves — the user would see previously-excluded content start being processed with nothing to explain why.
+
+**Precedence** is resolved in application logic, not SQL (PP-004): source rules beat creator rules beat collection rules beat metadata rules, and within a type, higher `priority` wins. See `policy/evaluator.py:_rule_matches` and the grouping above it.
+
+**Metadata matchers** support `title_contains`, `title_not_contains`, `hashtags`, `source_type`, `min_duration_ms`, `max_duration_ms`, `creator_name_contains`. Present keys are ANDed. An empty matcher matches nothing rather than everything — a rule saved with no conditions is a half-finished edit, and reading it as "match all" would let one stray `exclude` rule switch off the whole pipeline (`policy/evaluator.py:_matcher_matches`).
+
+**`semantic` rules are accepted and never match yet.** They need a triage classification that only exists after a model call, so the metadata-phase evaluator skips them. A rule of this type is stored, listed, and inert. This is the one place where the API's vocabulary promises more than the evaluator delivers.
+
+**Decisions** land in `policy_decisions` (`db/models/policy.py:PolicyDecision`) with `phase` (`metadata` / `semantic` / `manual_override`), `action`, `reason_code`, `explanation_json`, the `rule_id` that matched, and the `model_name` where a model was involved. This is what makes POL-004 real: `dk policy why <source_id>` and `GET /api/admin/policy/decisions` answer "why was this skipped?" from the audit trail rather than by re-deriving it from the rule table, which would be a different computation and could disagree.
+
+**A forced reprocess still respects an `exclude` rule.** `dk process --force` re-evaluates; the job runs, decides, and records the exclusion without creating a processing run, so `current_processing_run_id` stays as it was. Covered by `backend/tests/test_cli.py:test_exclude_rule_blocks_a_forced_reprocess` and the API-level equivalent in `test_api.py`.
+
+**Surfaces**: `GET/POST/DELETE /api/admin/policy/rules`, `GET /api/admin/policy/decisions`; `dk policy list|why|exclude`; the Settings page in the frontend lists rules and recent decisions, and a source whose decision was not `process` shows the reason inline.
 
 ---
 

@@ -1,9 +1,27 @@
 # Douyin Knowledge — Implementation Plan
 
-Status: Living handoff document  
-Phase: Pre-implementation  
-Version: 0.1  
-Last updated: 2026-09-17
+Status: Living handoff document
+Phase: Phases 0–13 delivered in demo mode; 10, 14, 15, 16 not started
+Version: 0.2
+Last updated: 2026-09-18
+
+---
+
+## 0. Delivered state
+
+This section is the answer to "what actually runs?", kept separate from the plan below so the plan can stay a plan. Everything here was verified by running it, not by reading the code.
+
+**Delivered and exercised end to end.** Phases 0–9 and 11–13. From an empty data directory: `dk db upgrade` → `dk doctor` → `dk sync --process --wait` produces 3 collections, 8 sources processed to L2, 14 entities, 4 claims, 2 wiki pages, 0 failed jobs across 25 jobs; `dk search` and `dk ask` return cited answers; `dk policy exclude` then `dk process --force` is blocked, and `dk policy why` explains the block from the recorded decision. The API serves all of it, and the React frontend calls every route through its own client module (`frontend/npm run probe` asserts this against a live server, including that every wiki support resolves to a source and that `/api/admin/settings` returns `openai_api_key` as a boolean rather than a value).
+
+**Runs in demo mode by default.** `DK_AI_PROVIDER=mock` and `DK_CAPTURE_PROVIDER=fixture` are the shipped defaults, so the whole product works with no key and no Douyin session. Phase 6's real adapters (OpenAI chat/embedding/vision) are implemented and selected by `DK_AI_PROVIDER=openai`, but have not been run against the live API. Phase 4's Douyin sidecar adapter is likewise implemented against the documented contract and unexercised: there is no sidecar to point it at.
+
+**Not started.** Phase 10 (on-demand enrichment), 14 (resurfacing), 15 (export/backup/rebuild — `exports/` is an empty package), 16 (evaluation suite). The corresponding job types `ENRICH_SOURCE`, `CLEANUP_CACHE` and `EXPORT_MARKDOWN` are declared in `jobs/types.py` but no handler is registered, so enqueueing one raises `ConfigurationError: no handler registered for job type ...` rather than failing quietly — deliberate, but it means the enum overstates what the queue can do.
+
+**Phase 12 partially.** Wiki lint runs and writes `wiki_lint_findings`; findings surface in the API and the UI. The governance loop around them — triage, suppression, close criteria beyond `wiki_quality_close_threshold` — is not built.
+
+**Known dead code.** `retrieval/query_planner.py` is exported and never instantiated; `Settings.enable_query_enrichment` and `query_planner_model` are read by nothing. Follow-up resolution happens in `conversation/conversation_manager.py:_resolve_followup` from conversation state instead. See DECISIONS.md "Known gaps".
+
+**Verification baseline.** 187 passed, 4 skipped; `ruff check` clean. The 4 skips are the tests that require real provider credentials.
 
 ---
 
@@ -77,7 +95,7 @@ Create a runnable development skeleton with no external AI or Douyin dependency.
 
 - Add `.env.example` with non-secret configuration.
 - Add data-root configuration.
-- Add dev commands for API, worker, and frontend.
+- Add dev commands for API, worker, and frontend. (`scripts/dev.sh` runs all three; `--seed` syncs the fixture corpus first, `--no-frontend` skips Vite.)
 - Add ffmpeg availability check, but do not make full media processing mandatory yet.
 
 ## Acceptance tests

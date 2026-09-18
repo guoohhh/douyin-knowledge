@@ -6,9 +6,44 @@ Douyin Knowledge is a local-first personal knowledge project that starts from Do
 
 ## Current status
 
-The project has completed the first **product + architecture specification pass** and is ready to begin phased implementation. Implementation should follow `docs/TASKS.md` and the repository guardrails in `AGENTS.md` rather than attempting the full system in one pass.
+The system runs end to end. In its default configuration it uses a fixture capture provider and a mock AI provider, so you can install it and watch the whole loop — sync, policy, processing, extraction, wiki integration, retrieval, cited answers — without a Douyin session or an API key. Real providers (OpenAI for chat/embedding/vision, a Douyin capture sidecar) are implemented and selected by configuration; neither has been exercised against a live endpoint.
+
+Delivered: phases 0–9 and 11–13 of `docs/TASKS.md`, with 12 partial. Not started: on-demand enrichment, resurfacing, export/backup, and the evaluation suite. `docs/TASKS.md` section 0 is the honest inventory, and `docs/DECISIONS.md` records where the implementation departs from the design docs.
 
 The first version is anchored on Douyin collections, while the long-term architecture should allow other capture channels such as Xiaohongshu, YouTube, web pages, screenshots, and articles.
+
+## Quick start
+
+```bash
+cp .env.example .env          # defaults are demo mode: no key, no cookies, no real data
+
+cd backend
+pip install -e '.[dev]'
+python -m douyin_knowledge.cli db upgrade
+python -m douyin_knowledge.cli sync --process --wait   # builds the fixture corpus
+python -m douyin_knowledge.cli ask "我收藏里有哪家茶餐厅"
+```
+
+That last command prints an answer with a citation table. If the citations are empty, something is wrong — an uncited answer is not a feature of this system.
+
+For the UI:
+
+```bash
+cd frontend && npm install
+cd .. && scripts/dev.sh --seed     # API + worker + Vite together
+```
+
+Then open http://127.0.0.1:5173. The dev script runs all three processes because the failure mode of forgetting the worker is silent: `sync` enqueues jobs, nothing runs them, and the library just looks empty.
+
+To serve everything from one process instead, `npm run build` in `frontend/` and the API will serve the bundle at http://127.0.0.1:8787 (`DK_SERVE_FRONTEND`, on by default).
+
+`dk doctor` checks the install — migrations, directories, provider configuration, ffmpeg — and never prints a key.
+
+## Configuration and secrets
+
+Configuration is environment variables with a `DK_` prefix, documented in `.env.example`; `backend/tests/test_env_example.py` fails if that file drifts from the real settings, because a wrong example is worse than no example — it breaks at the first step a new user takes.
+
+Nothing secret belongs in this repository: no Douyin cookies or session tokens, no API keys, no credentials, and no real collection data. `.env` is gitignored, and `GET /api/admin/settings` returns `openai_api_key` as a boolean rather than a value.
 
 ## Core product loop
 
@@ -46,7 +81,8 @@ Design and implementation handoff documents:
 - [`docs/RETRIEVAL.md`](docs/RETRIEVAL.md) — hybrid retrieval, AI conversation planning, collection-vs-general scope, evidence grounding, and citations.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — V1 technical architecture, stack choices, storage, jobs, capture-provider boundary, AI adapters, repo structure, and deployment model.
 - [`docs/PHYSICAL_SCHEMA.md`](docs/PHYSICAL_SCHEMA.md) — concrete SQLite V1 tables, foreign keys, provenance links, Wiki revisions, search/index projections, conversation citations, and migration order.
-- [`docs/TASKS.md`](docs/TASKS.md) — phased implementation plan, acceptance tests, and milestone order.
+- [`docs/TASKS.md`](docs/TASKS.md) — phased implementation plan, acceptance tests, and milestone order. Section 0 records what is actually delivered.
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — where the implementation differs from the design docs, with the symbol proving each claim.
 - [`AGENTS.md`](AGENTS.md) — repository-level coding-agent rules and non-negotiable architecture invariants.
 
 ## Knowledge architecture at a glance
@@ -89,7 +125,7 @@ FastAPI
        ↓
 SQLite + FTS5  ← authoritative local data
        +
-LanceDB         ← rebuildable vector index
+numpy .npz      ← rebuildable vector index (LanceDB optional; see DEC-012)
        +
 SQLite worker queue
        ↓
@@ -100,11 +136,19 @@ Douyin capture sidecar
 
 The system is intentionally local-first and avoids unnecessary V1 infrastructure such as Redis, Celery, PostgreSQL, Kafka, graph databases, or microservices.
 
-## Implementation entry point
+## Working on this
 
-Codex should begin with **Phase 0** in `docs/TASKS.md` unless explicitly instructed otherwise.
+Read `AGENTS.md` first; it holds the invariants that must not be quietly renegotiated — the provenance spine, the rule that a Source carries no AI-derived fields, that a Claim is never a global fact, that an uncited wiki statement is a defect.
 
-Before coding, it must read `AGENTS.md` and the relevant design docs. The first implementation milestone is deliberately small: repository bootstrap, health checks, development tooling, and empty-database migration plumbing.
+`docs/TASKS.md` section 0 says what exists. `docs/DECISIONS.md` says where the code and the design docs disagree, and it is the code that wins. If you find an entry in either file that no longer matches reality, fix the document in the same change: a stale status section is read as a description of the system, and it lies.
+
+```bash
+cd backend && python -m pytest -q && python -m ruff check .   # 187 passed, 4 skipped
+cd frontend && npm run typecheck && npm run build
+DK_ORIGIN=http://127.0.0.1:8787 npm run probe                 # client vs a live server
+```
+
+The probe exists because every payload-shape bug in this project came from a plausible guess about a response, not from a missing endpoint. Read the route before writing the type.
 
 ## Guiding idea
 
