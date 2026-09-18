@@ -229,6 +229,8 @@ def process(source_id: str, session: Session = Depends(get_session)):
     row = session.get(Source, source_id)
     if not row:
         raise HTTPException(404)
+    if row.status == "removed":
+        raise HTTPException(409, "Source is no longer in the sidecar collection")
     # One-time processing does not remove a broad rule; explicit source override is durable.
     rule = ProcessingRule(dimension="source", value=row.external_id, action="always_process")
     session.add(rule)

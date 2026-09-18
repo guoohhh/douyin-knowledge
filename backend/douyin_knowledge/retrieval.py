@@ -16,7 +16,7 @@ def plan(question: str) -> dict:
         word in question for word in ("一般来说", "不看我的", "通用知识", "general knowledge")
     )
     hybrid = any(word in question for word in ("结合我的收藏和", "结合我收藏的", "hybrid"))
-    scope = "hybrid" if hybrid else "general" if general else "personal"
+    scope = "hybrid" if hybrid else "personal" if personal and not general else "general"
     intent = (
         "synthesize"
         if any(word in question for word in ("综合", "共同", "比较", "对比"))
@@ -52,6 +52,23 @@ def _terms(question: str) -> list[str]:
     ):
         cleaned = cleaned.replace(phrase, " ")
     return re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z0-9]{2,}", cleaned)
+
+
+def _claim_relevance(question: str, claim: Claim, entity: Entity | None) -> int:
+    q = question.casefold()
+    score = 0
+    if entity and entity.name.casefold() in q:
+        score += 2
+    if claim.value.casefold() in q:
+        score += 2
+    cues = {
+        "average_price": ("人均", "价格", "多少钱", "多少", "花费", "price", "cost"),
+        "recommended_dish": ("推荐", "菜", "吃", "招牌", "dish"),
+        "learning_order": ("怎么学", "先学", "学习", "顺序", "入门"),
+    }
+    if any(cue in q for cue in cues.get(claim.predicate, ())):
+        score += 4
+    return score
 
 
 def search(session, question: str, limit: int = 8) -> list[dict]:
@@ -105,6 +122,31 @@ def search(session, question: str, limit: int = 8) -> list[dict]:
             select(KnowledgeItem).where(KnowledgeItem.run_id == source.current_run_id)
         )
         claims = session.scalars(select(Claim).where(Claim.run_id == source.current_run_id)).all()
+        ranked = sorted(
+            claims,
+            key=lambda claim: _claim_relevance(
+                question, claim, session.get(Entity, claim.entity_id) if claim.entity_id else None
+            ),
+            reverse=True,
+        )
+        best = (
+            _claim_relevance(
+                question,
+                ranked[0],
+                session.get(Entity, ranked[0].entity_id) if ranked[0].entity_id else None,
+            )
+            if ranked
+            else 0
+        )
+        claims = [
+            claim
+            for claim in ranked
+            if best == 0
+            or _claim_relevance(
+                question, claim, session.get(Entity, claim.entity_id) if claim.entity_id else None
+            )
+            == best
+        ][: 5 if any(word in question for word in ("综合", "比较", "对比", "共同")) else 3]
         cited = []
         for claim in claims:
             ev = session.get(Evidence, claim.evidence_id)

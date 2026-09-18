@@ -58,6 +58,8 @@ cd backend
 
 Ask “我收藏的旺角日料人均多少？” in the UI. Open the citation to inspect the exact evidence and source. Add a rule for collection `待看影视` in Settings **before importing** to see the `metadata_only` path. Rules can also be added later; exclusion immediately removes processed sources from normal knowledge retrieval without erasing previous runs.
 
+Questions without an explicit personal cue use general scope and require a configured AI provider for a general answer. A successful sidecar sync marks previously synced saves absent from its latest listing as `removed`; they leave current answers while history remains available.
+
 API endpoints: `/health`, `/dashboard`, `/sync`, `/sync/sidecar`, `/sync/status`, `/sources`, `/rules`, `/jobs`, `/search`, `/ask`, `/entities`, `/resurface`, `/wiki`. Interactive API docs: `http://127.0.0.1:8001/docs`.
 
 ## Configuration

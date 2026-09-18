@@ -8,7 +8,7 @@ import re
 import httpx
 from sqlalchemy import select, text
 
-from .models import KnowledgeItem, Source, VectorDocument
+from .models import Claim, Evidence, KnowledgeItem, Source, VectorDocument
 
 SIZE = 256
 
@@ -39,6 +39,19 @@ def embed(value: str) -> tuple[str, list[float]]:
     return model, response.json()["data"][0]["embedding"]
 
 
+def index_text(session, source: Source, item: KnowledgeItem) -> str:
+    evidence = session.scalars(
+        select(Evidence)
+        .join(Claim, Claim.evidence_id == Evidence.id)
+        .where(Claim.run_id == source.current_run_id)
+        .distinct()
+    ).all()
+    return " ".join(
+        [source.title, source.caption, source.transcript, item.summary]
+        + [unit.text for unit in evidence]
+    )
+
+
 def rebuild(session):
     session.execute(text("DELETE FROM search_fts"))
     session.query(VectorDocument).delete()
@@ -49,12 +62,12 @@ def rebuild(session):
         )
         if not item:
             continue
-        content = " ".join([source.title, source.caption, source.transcript, item.summary])
+        content = index_text(session, source, item)
         session.execute(
             text("INSERT INTO search_fts(source_id,text) VALUES (:id,:text)"),
             {"id": source.id, "text": content},
         )
-        model, vector = embed(content)
+        model, vector = embed(content[:4000])
         session.add(VectorDocument(source_id=source.id, model=model, vector=vector))
         count += 1
     session.commit()
@@ -62,14 +75,14 @@ def rebuild(session):
 
 
 def index_one(session, source: Source, item: KnowledgeItem):
-    content = " ".join([source.title, source.caption, source.transcript, item.summary])
+    content = index_text(session, source, item)
     session.execute(text("DELETE FROM search_fts WHERE source_id=:id"), {"id": source.id})
     session.execute(
         text("INSERT INTO search_fts(source_id,text) VALUES (:id,:text)"),
         {"id": source.id, "text": content},
     )
     row = session.get(VectorDocument, source.id)
-    model, vector = embed(content)
+    model, vector = embed(content[:4000])
     if row:
         row.model, row.vector = model, vector
     else:

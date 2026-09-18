@@ -300,13 +300,15 @@ function SourceDetail() {
         <span className="badge">{d.source.status}</span>{" "}
         {d.source.policy_reason}
       </p>
-      {d.source.status !== "ready" && <p className="muted">当前来源尚未完成知识处理；历史观点不会参与问答。</p>}
+      {d.source.status !== "ready" && d.source.status !== "removed" && <p className="muted">当前来源尚未完成知识处理；历史观点不会参与问答。</p>}
+      {d.source.status === "removed" && <p className="muted">该视频已不在最近一次 sidecar 收藏列表中；若重新收藏并同步，历史内容可恢复。</p>}
       <a href={d.source.url} target="_blank" rel="noreferrer">
         打开原视频 ↗
       </a>{" "}
-      <button className="secondary" onClick={() => process.mutate()}>
+      <button className="secondary" disabled={d.source.status === "removed" || process.isPending} onClick={() => process.mutate()}>
         重新处理
       </button>
+      {process.error && <p className="error">{String(process.error)}</p>}
       <section className="card">
         <h3>来源观点</h3>
         {d.claims.map((c) => (

@@ -85,6 +85,7 @@ def ingest(session, records: list[CapturedSource], sync_kind: str = "import") ->
             session.add(source)
             session.flush()
             created += 1
+        source.capture_origin = sync_kind
         for field in (
             "url",
             "title",
@@ -101,8 +102,7 @@ def ingest(session, records: list[CapturedSource], sync_kind: str = "import") ->
         collection_names = list(
             dict.fromkeys(record.collections or ([record.collection] if record.collection else []))
         )
-        if collection_names:
-            source.collection = collection_names[0]
+        source.collection = collection_names[0] if collection_names else ""
         if record.media_url:
             asset = session.scalar(
                 select(SourceAsset).where(
@@ -115,14 +115,17 @@ def ingest(session, records: list[CapturedSource], sync_kind: str = "import") ->
                 )
             elif asset.remote_url != record.media_url:
                 asset.remote_url, asset.updated_at = record.media_url, now()
-        for name in collection_names:
-            exists = session.scalar(
-                select(SourceCollectionMembership).where(
-                    SourceCollectionMembership.source_id == source.id,
-                    SourceCollectionMembership.collection_name == name,
-                )
+        memberships = session.scalars(
+            select(SourceCollectionMembership).where(
+                SourceCollectionMembership.source_id == source.id
             )
-            if exists is None:
+        ).all()
+        active = {membership.collection_name: membership for membership in memberships}
+        for name, membership in active.items():
+            if name not in collection_names:
+                session.delete(membership)
+        for name in collection_names:
+            if name not in active:
                 session.add(SourceCollectionMembership(source_id=source.id, collection_name=name))
         content_hash = checksum(
             {
@@ -179,6 +182,37 @@ def ingest(session, records: list[CapturedSource], sync_kind: str = "import") ->
             annotation.payload = record.claims
         elif record.claims:
             session.add(SourceAnnotation(source_id=source.id, payload=record.claims))
+    if sync_kind == "sidecar":
+        present = {(record.platform, record.external_id) for record in records}
+        for source in session.scalars(select(Source).where(Source.capture_origin == "sidecar")):
+            if (source.platform, source.external_id) in present or source.status == "removed":
+                continue
+            source.status = "removed"
+            source.collection = ""
+            for membership in session.scalars(
+                select(SourceCollectionMembership).where(
+                    SourceCollectionMembership.source_id == source.id
+                )
+            ):
+                session.delete(membership)
+            for job in session.scalars(
+                select(Job).where(Job.source_id == source.id, Job.status == "queued")
+            ):
+                job.status = "cancelled"
+            absent = {
+                "platform": source.platform,
+                "external_id": source.external_id,
+                "present": False,
+            }
+            if not session.scalar(
+                select(SourceSnapshot).where(
+                    SourceSnapshot.source_id == source.id,
+                    SourceSnapshot.checksum == checksum(absent),
+                )
+            ):
+                session.add(
+                    SourceSnapshot(source_id=source.id, checksum=checksum(absent), payload=absent)
+                )
     session.commit()
     rebuild_wiki(session)
     session.add(SyncEvent(kind=sync_kind, status="succeeded", total=len(records), created=created))
@@ -199,6 +233,8 @@ def sync_capture(session, provider: CaptureProvider, kind: str) -> dict:
 
 def reevaluate(session):
     for source in session.scalars(select(Source)):
+        if source.status == "removed":
+            continue
         action, reason = evaluate(session, source)
         record_policy(session, source, action, reason)
         if action == "metadata_only":
@@ -254,6 +290,8 @@ def process_source(session, source_id: str):
     source = session.get(Source, source_id)
     if not source:
         raise ValueError("Source missing")
+    if source.status == "removed":
+        raise ValueError("Source is no longer in the sidecar collection")
     action, reason = evaluate(session, source)
     record_policy(session, source, action, reason)
     if action == "metadata_only":

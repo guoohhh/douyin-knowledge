@@ -22,6 +22,7 @@ from douyin_knowledge.models import (
     Source,
     SourceAnnotation,
     SourceAsset,
+    SourceCollectionMembership,
     SourceSnapshot,
     SyncEvent,
     UserState,
@@ -31,7 +32,7 @@ from douyin_knowledge.models import (
     WikiSupport,
 )
 from douyin_knowledge.policy import evaluate
-from douyin_knowledge.retrieval import answer, search
+from douyin_knowledge.retrieval import answer, plan, search
 from douyin_knowledge.service import (
     _validated_claims,
     ingest,
@@ -141,6 +142,21 @@ def test_no_result_and_no_fake_citation(session):
     assert "没有找到" in result["answer"]
 
 
+def test_general_question_is_not_assumed_to_be_about_saves():
+    assert plan("MCP 是什么？")["scope"] == "general"
+    assert plan("我收藏的视频里大家怎么解释 MCP？")["scope"] == "personal"
+    assert plan("结合我的收藏和一般知识解释 MCP")["scope"] == "hybrid"
+
+
+def test_price_answer_does_not_cite_unrelated_dish_claim(session):
+    ingest(session, demo()[:1])
+    while work_once(session):
+        pass
+    result = answer(session, "我收藏的樱花食堂人均多少？")
+    assert len(result["citations"]) == 1
+    assert "80" in result["citations"][0]["text"]
+
+
 def test_failed_run_is_persisted_and_retried(session):
     ingest(session, [CapturedSource(external_id="empty", title="No evidence")])
     source = session.scalar(select(Source).where(Source.external_id == "empty"))
@@ -205,6 +221,76 @@ def test_claim_validation_rejects_empty_quote_and_unquoted_value(session):
         ],
     )
     assert [claim.value for claim in _validated_claims(extraction, [evidence])] == ["80港币"]
+
+
+def test_collection_move_updates_active_policy_and_preserves_snapshot(session):
+    session.add(ProcessingRule(dimension="collection", value="待看影视", action="metadata_only"))
+    session.commit()
+    original = demo()[0].model_copy(
+        update={"collection": "待看影视", "collections": ["待看影视", "香港美食"]}
+    )
+    ingest(session, [original])
+    source = session.scalar(select(Source))
+    assert source.status == "metadata_only"
+    moved = original.model_copy(update={"collection": "香港美食", "collections": ["香港美食"]})
+    ingest(session, [moved])
+    session.refresh(source)
+    assert source.status == "pending"
+    assert set(
+        session.scalars(
+            select(SourceCollectionMembership.collection_name).where(
+                SourceCollectionMembership.source_id == source.id
+            )
+        ).all()
+    ) == {"香港美食"}
+    snapshots = session.scalars(
+        select(SourceSnapshot).where(SourceSnapshot.source_id == source.id)
+    ).all()
+    assert any("待看影视" in snapshot.payload["collections"] for snapshot in snapshots)
+
+
+def test_sidecar_removal_hides_claims_and_reappearance_restores_source(session):
+    record = demo()[0]
+    ingest(session, [record], sync_kind="sidecar")
+    while work_once(session):
+        pass
+    source = session.scalar(select(Source))
+    assert answer(session, "我收藏的樱花食堂人均多少？")["citations"]
+    ingest(session, [], sync_kind="sidecar")
+    session.refresh(source)
+    assert source.status == "removed"
+    assert answer(session, "我收藏的樱花食堂人均多少？")["citations"] == []
+    assert audit(session) == []
+    assert any(
+        snapshot.payload.get("present") is False
+        for snapshot in session.scalars(
+            select(SourceSnapshot).where(SourceSnapshot.source_id == source.id)
+        )
+    )
+    ingest(session, [record], sync_kind="sidecar")
+    session.refresh(source)
+    assert source.status == "ready"
+    assert answer(session, "我收藏的樱花食堂人均多少？")["citations"]
+
+
+def test_long_transcript_claim_remains_searchable(session):
+    transcript = "普通内容。" * 100 + " 深海种植 技术值得了解。"
+    ingest(
+        session,
+        [
+            CapturedSource(
+                external_id="long-asr",
+                title="课程记录",
+                transcript=transcript,
+                claims=[{"quote": "深海种植", "value": "深海种植", "predicate": "states"}],
+            )
+        ],
+    )
+    while work_once(session):
+        pass
+    result = search(session, "深海种植")
+    assert len(result) == 1
+    assert "fts" in result[0]["methods"]
 
 
 def test_policy_can_hide_previously_processed_source(session):

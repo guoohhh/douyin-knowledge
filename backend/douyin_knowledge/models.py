@@ -31,6 +31,7 @@ class Source(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
     platform: Mapped[str] = mapped_column(String, default="douyin")
     external_id: Mapped[str] = mapped_column(String)
+    capture_origin: Mapped[str] = mapped_column(String, default="import")
     url: Mapped[str] = mapped_column(Text, default="")
     title: Mapped[str] = mapped_column(Text, default="")
     caption: Mapped[str] = mapped_column(Text, default="")
