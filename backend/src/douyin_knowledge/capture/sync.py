@@ -1,0 +1,423 @@
+"""Persist captured items into the provenance spine.
+
+This is the boundary where provider-shaped data (`CapturedSource`) becomes
+database state. Everything written here is *observed*, never inferred: no AI
+field is set, no processing level is claimed. That is what KM-001 means by
+keeping `Source` free of derived data.
+
+Three behaviors matter more than they look:
+
+* **Sync is idempotent.** Re-running it over an unchanged collection produces no
+  new rows and no new snapshots, because the item is keyed on
+  ``(platform, external_id)`` and its payload is compared by content hash. Users
+  will re-sync constantly; that must be cheap and must not inflate history.
+
+* **Disappearance is not deletion.** An item missing from a collection listing
+  gets ``is_present = 0`` on its membership, keeping the record that it was once
+  there. Deleting the row would destroy the only evidence of past organization,
+  and "what did I have saved in March" is a question this system is supposed to
+  answer.
+
+* **Snapshots accumulate only on change.** Each *different* payload becomes a
+  `SourceSnapshot`, which is how a caption edit or a price change in the
+  description stays visible after the fact.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import select
+
+from douyin_knowledge.core.clock import now_ms
+from douyin_knowledge.core.text import content_hash
+from douyin_knowledge.db.models.capture import (
+    Collection,
+    Creator,
+    Source,
+    SourceAsset,
+    SourceCollectionMembership,
+    SourceSnapshot,
+)
+from douyin_knowledge.db.models.processing import EvidenceUnit
+from douyin_knowledge.observability.logging import get_logger
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Iterable, Sequence
+
+    from sqlalchemy.orm import Session
+
+    from douyin_knowledge.capture.models import (
+        CapturedCollection,
+        CapturedCreator,
+        CapturedSource,
+    )
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class SyncStats:
+    collections: int = 0
+    creators_created: int = 0
+    sources_created: int = 0
+    sources_updated: int = 0
+    sources_unchanged: int = 0
+    snapshots: int = 0
+    assets: int = 0
+    memberships_removed: int = 0
+    subtitles_captured: int = 0
+    source_ids: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "collections": self.collections,
+            "creators_created": self.creators_created,
+            "sources_created": self.sources_created,
+            "sources_updated": self.sources_updated,
+            "sources_unchanged": self.sources_unchanged,
+            "snapshots": self.snapshots,
+            "assets": self.assets,
+            "memberships_removed": self.memberships_removed,
+            "subtitles_captured": self.subtitles_captured,
+        }
+
+
+class CaptureSyncService:
+    """Writes `CapturedSource` batches into the database idempotently.
+
+    `platform` is held by the service rather than read off each item: collections
+    and creators are provider-scoped concepts, so the provider identity belongs
+    to the sync session, not to every payload.
+    """
+
+    def __init__(self, session: Session, *, platform: str = "douyin") -> None:
+        self.session = session
+        self.platform = platform
+
+    # -------------------------------------------------------------- collections
+
+    def upsert_collection(self, captured: CapturedCollection) -> Collection:
+        existing = self.session.scalars(
+            select(Collection).where(
+                Collection.platform == self.platform,
+                Collection.external_collection_id == captured.external_collection_id,
+            )
+        ).first()
+
+        if existing is None:
+            collection = Collection(
+                platform=self.platform,
+                external_collection_id=captured.external_collection_id,
+                name=captured.name,
+                description=captured.description,
+                raw_json=self._raw_of(captured),
+                last_synced_at_ms=now_ms(),
+            )
+            self.session.add(collection)
+            self.session.flush()
+            return collection
+
+        existing.name = captured.name
+        existing.description = captured.description or existing.description
+        existing.last_synced_at_ms = now_ms()
+        return existing
+
+    def upsert_creator(self, captured: CapturedCreator) -> Creator:
+        existing = self.session.scalars(
+            select(Creator).where(
+                Creator.platform == self.platform,
+                Creator.external_creator_id == captured.external_creator_id,
+            )
+        ).first()
+
+        if existing is None:
+            creator = Creator(
+                platform=self.platform,
+                external_creator_id=captured.external_creator_id,
+                display_name=captured.display_name,
+                handle=captured.handle,
+                profile_url=captured.profile_url,
+                avatar_url=captured.avatar_url,
+                raw_json=self._raw_of(captured),
+            )
+            self.session.add(creator)
+            self.session.flush()
+            return creator
+
+        existing.display_name = captured.display_name or existing.display_name
+        existing.last_seen_at_ms = now_ms()
+        return existing
+
+    # ------------------------------------------------------------------ sources
+
+    def sync_sources(
+        self,
+        sources: Sequence[CapturedSource],
+        *,
+        collection: Collection | None = None,
+        prune_missing: bool = False,
+        stats: SyncStats | None = None,
+    ) -> SyncStats:
+        """Upsert a batch of captured sources.
+
+        `prune_missing` marks memberships absent for items not in this batch. It
+        must only be set when `sources` is a *complete* listing of the
+        collection, otherwise a partial page would mark the rest as removed.
+        """
+        stats = stats or SyncStats()
+        seen_ids: list[str] = []
+
+        for captured in sources:
+            source, changed = self._upsert_source(captured, stats)
+            seen_ids.append(source.id)
+            stats.source_ids.append(source.id)
+
+            if changed:
+                self._write_snapshot(source, captured, stats)
+                self._sync_assets(source, captured, stats)
+
+            if collection is not None:
+                self._touch_membership(source, collection)
+
+        if collection is not None and prune_missing:
+            stats.memberships_removed += self._mark_absent(collection, seen_ids)
+
+        if collection is not None:
+            collection.last_synced_at_ms = now_ms()
+
+        self.session.flush()
+        logger.info("capture_sync_complete", extra=stats.as_dict())
+        return stats
+
+    def sync_collection(
+        self,
+        provider: Any,
+        captured_collection: CapturedCollection,
+        *,
+        page_limit: int = 50,
+        max_pages: int = 200,
+        stats: SyncStats | None = None,
+    ) -> SyncStats:
+        """Walk a provider collection to completion and sync every page.
+
+        Pruning is applied only after the *last* page, because a mid-walk prune
+        would mark everything not yet seen as removed. `max_pages` bounds the
+        walk so a provider returning a non-advancing cursor cannot loop forever.
+        """
+        stats = stats or SyncStats()
+        collection = self.upsert_collection(captured_collection)
+
+        collected: list[CapturedSource] = []
+        cursor: str | None = None
+        for _ in range(max_pages):
+            page = provider.list_collection_sources(
+                captured_collection.external_collection_id, cursor=cursor, limit=page_limit
+            )
+            collected.extend(page.sources)
+            if not page.has_more or not page.next_cursor or page.next_cursor == cursor:
+                break
+            cursor = page.next_cursor
+        else:
+            logger.warning(
+                "collection_walk_truncated",
+                extra={"collection": captured_collection.external_collection_id},
+            )
+
+        self.sync_sources(collected, collection=collection, prune_missing=True, stats=stats)
+        stats.collections += 1
+        return stats
+
+    def _upsert_source(
+        self, captured: CapturedSource, stats: SyncStats
+    ) -> tuple[Source, bool]:
+        creator = self.upsert_creator(captured.creator) if captured.creator else None
+        digest = self._payload_hash(captured)
+
+        existing = self.session.scalars(
+            select(Source).where(
+                Source.platform == captured.platform,
+                Source.external_id == captured.external_id,
+            )
+        ).first()
+
+        if existing is None:
+            source = Source(
+                platform=captured.platform,
+                external_id=captured.external_id,
+                source_type=captured.source_type,
+                creator_id=creator.id if creator else None,
+                title=captured.title,
+                caption_raw=captured.caption_raw,
+                source_url=captured.source_url,
+                cover_url=captured.cover_url,
+                published_at_ms=captured.published_at_ms,
+                saved_at_ms=captured.saved_at_ms,
+                duration_ms=captured.duration_ms,
+                availability=captured.availability,
+            )
+            self.session.add(source)
+            self.session.flush()
+            stats.sources_created += 1
+            return source, True
+
+        # Compare against the newest snapshot; identical payloads are a no-op.
+        latest = self.session.scalars(
+            select(SourceSnapshot)
+            .where(SourceSnapshot.source_id == existing.id)
+            .order_by(SourceSnapshot.fetched_at_ms.desc())
+        ).first()
+
+        existing.last_seen_at_ms = now_ms()
+        if latest is not None and latest.content_hash == digest:
+            stats.sources_unchanged += 1
+            return existing, False
+
+        existing.title = captured.title
+        existing.caption_raw = captured.caption_raw
+        existing.source_url = captured.source_url or existing.source_url
+        existing.cover_url = captured.cover_url or existing.cover_url
+        existing.availability = captured.availability
+        existing.duration_ms = captured.duration_ms or existing.duration_ms
+        if creator is not None:
+            existing.creator_id = creator.id
+        stats.sources_updated += 1
+        return existing, True
+
+    def _write_snapshot(
+        self, source: Source, captured: CapturedSource, stats: SyncStats
+    ) -> None:
+        snapshot = SourceSnapshot(
+            source_id=source.id,
+            content_hash=self._payload_hash(captured),
+            raw_json=captured.model_dump(mode="json"),
+        )
+        self.session.add(snapshot)
+        self.session.flush()
+        source.latest_snapshot_id = snapshot.id
+        stats.snapshots += 1
+
+    def _sync_assets(
+        self, source: Source, captured: CapturedSource, stats: SyncStats
+    ) -> None:
+        """Record media as assets; keep inline subtitle text as evidence.
+
+        `SourceAsset` has no text column by design — it describes a *file*. A
+        provider-supplied subtitle is already observed text, so it is stored as a
+        level-2 `EvidenceUnit` directly. This is why the demo reaches level 2
+        without ffmpeg or an ASR key.
+        """
+        for media in captured.media:
+            if media.kind == "subtitle" and media.text:
+                if self._store_subtitle_evidence(source, media.text, media.language):
+                    stats.subtitles_captured += 1
+                continue
+
+            storage_key = media.url or f"{source.platform}/{source.external_id}/{media.kind}"
+            existing = self.session.scalars(
+                select(SourceAsset).where(
+                    SourceAsset.source_id == source.id,
+                    SourceAsset.asset_type == media.kind,
+                    SourceAsset.storage_key == storage_key,
+                )
+            ).first()
+            if existing is not None:
+                continue
+
+            self.session.add(
+                SourceAsset(
+                    source_id=source.id,
+                    asset_type=media.kind,
+                    # 'cache' means: safe to delete and re-fetch. Nothing here is
+                    # irreplaceable, because the URLs are provider-signed anyway.
+                    retention_class="cache",
+                    storage_key=storage_key,
+                    mime_type=media.mime_type,
+                    byte_size=media.byte_size,
+                    duration_ms=media.duration_ms,
+                    width=media.width,
+                    height=media.height,
+                )
+            )
+            stats.assets += 1
+
+    def _store_subtitle_evidence(
+        self, source: Source, text: str, language: str | None
+    ) -> bool:
+        """Persist an inline subtitle as evidence, deduplicated by content hash."""
+        digest = content_hash("subtitle", text)
+        existing = self.session.scalars(
+            select(EvidenceUnit).where(
+                EvidenceUnit.source_id == source.id,
+                EvidenceUnit.kind == "subtitle",
+                EvidenceUnit.content_hash == digest,
+            )
+        ).first()
+        if existing is not None:
+            return False
+
+        self.session.add(
+            EvidenceUnit(
+                source_id=source.id,
+                kind="subtitle",
+                raw_text=text,
+                normalized_text=text,
+                content_hash=digest,
+                language=language or "zh",
+                # Provider-supplied subtitles are authored, not inferred.
+                confidence=1.0,
+                observation_json={"origin": "provider_native_subtitle"},
+            )
+        )
+        return True
+
+    def _touch_membership(self, source: Source, collection: Collection) -> None:
+        membership = self.session.get(
+            SourceCollectionMembership, {"source_id": source.id, "collection_id": collection.id}
+        )
+        if membership is None:
+            self.session.add(
+                SourceCollectionMembership(
+                    source_id=source.id, collection_id=collection.id, is_present=1
+                )
+            )
+            return
+        membership.last_seen_at_ms = now_ms()
+        membership.is_present = 1  # re-adding a removed item revives it
+
+    def _mark_absent(self, collection: Collection, present_ids: Iterable[str]) -> int:
+        keep = set(present_ids)
+        rows = self.session.scalars(
+            select(SourceCollectionMembership).where(
+                SourceCollectionMembership.collection_id == collection.id,
+                SourceCollectionMembership.is_present == 1,
+            )
+        ).all()
+        removed = 0
+        for row in rows:
+            if row.source_id not in keep:
+                row.is_present = 0
+                removed += 1
+        return removed
+
+    # ---------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _payload_hash(captured: CapturedSource) -> str:
+        """Hash the payload with stable key ordering.
+
+        Sorting keys matters: without it, a provider reordering its JSON would
+        look like a content change and create a spurious snapshot on every sync.
+        """
+        payload = captured.model_dump(mode="json")
+        return content_hash(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+
+    @staticmethod
+    def _raw_of(model: Any) -> dict[str, Any] | None:
+        dump = getattr(model, "model_dump", None)
+        return dump(mode="json") if callable(dump) else None
+
+
+__all__ = ["CaptureSyncService", "SyncStats"]
