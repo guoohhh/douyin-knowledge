@@ -4,10 +4,10 @@ import logging
 import os
 from datetime import timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 
 from .ai import ExtractedClaim, Extraction, extractor
-from .capture import CapturedSource
+from .capture import CapturedSource, CaptureProvider
 from .index import index_one
 from .media import OpenAITranscriber, should_transcribe
 from .models import (
@@ -20,9 +20,11 @@ from .models import (
     PolicyDecision,
     ProcessingRun,
     Source,
+    SourceAnnotation,
     SourceAsset,
     SourceCollectionMembership,
     SourceSnapshot,
+    SyncEvent,
     now,
 )
 from .policy import evaluate
@@ -69,7 +71,7 @@ def enqueue(session, source_id: str, priority: int = 0) -> Job:
     return job
 
 
-def ingest(session, records: list[CapturedSource]) -> dict:
+def ingest(session, records: list[CapturedSource], sync_kind: str = "import") -> dict:
     created = 0
     skipped = 0
     for record in records:
@@ -172,17 +174,27 @@ def ingest(session, records: list[CapturedSource]) -> dict:
             enqueue(session, source.id)
         # Fixture annotations are transport data; save them only as evidence text.
         # Extraction uses them through a separate process call, never as Source facts.
-        if record.claims:
-            from .models import SourceAnnotation
-
-            annotation = session.get(SourceAnnotation, source.id)
-            if annotation:
-                annotation.payload = record.claims
-            else:
-                session.add(SourceAnnotation(source_id=source.id, payload=record.claims))
+        annotation = session.get(SourceAnnotation, source.id)
+        if annotation:
+            annotation.payload = record.claims
+        elif record.claims:
+            session.add(SourceAnnotation(source_id=source.id, payload=record.claims))
     session.commit()
     rebuild_wiki(session)
+    session.add(SyncEvent(kind=sync_kind, status="succeeded", total=len(records), created=created))
+    session.commit()
     return {"created": created, "total": len(records), "metadata_only": skipped}
+
+
+def sync_capture(session, provider: CaptureProvider, kind: str) -> dict:
+    try:
+        return ingest(session, provider.list_saves(), sync_kind=kind)
+    except Exception as exc:
+        session.rollback()
+        reason = str(exc)[:200] if isinstance(exc, (RuntimeError, ValueError)) else ""
+        session.add(SyncEvent(kind=kind, status="failed", error=f"{type(exc).__name__}: {reason}"))
+        session.commit()
+        raise
 
 
 def reevaluate(session):
@@ -230,7 +242,11 @@ def _validated_claims(extraction: Extraction, evidence: list[Evidence]) -> list[
     return [
         claim
         for claim in extraction.claims
-        if claim.evidence_id in lookup and claim.quote in lookup[claim.evidence_id]
+        if claim.evidence_id in lookup
+        and claim.quote
+        and claim.quote in lookup[claim.evidence_id]
+        and claim.value
+        and claim.value in claim.quote
     ]
 
 
@@ -244,6 +260,7 @@ def process_source(session, source_id: str):
         source.status = "metadata_only"
         session.commit()
         return
+    captured_checksum = source.content_checksum
     previous_entity_ids = []
     if source.current_run_id:
         previous_entity_ids = session.scalars(
@@ -254,6 +271,9 @@ def process_source(session, source_id: str):
     run = ProcessingRun(
         source_id=source.id,
         provider="openai" if os.getenv("DK_OPENAI_API_KEY") else "local",
+        model_name=os.getenv("DK_OPENAI_MODEL", "gpt-4.1-mini")
+        if os.getenv("DK_OPENAI_API_KEY")
+        else "local-rules-v1",
     )
     session.add(run)
     session.commit()
@@ -289,8 +309,6 @@ def process_source(session, source_id: str):
         payload = [{"id": item.id, "kind": item.kind, "text": item.text} for item in evidence]
         extraction = extractor().extract(payload)
         # Demo fixture declarations are accepted only if their quote exists verbatim.
-        from .models import SourceAnnotation
-
         annotation = session.get(SourceAnnotation, source.id)
         if annotation:
             if not os.getenv("DK_OPENAI_API_KEY"):
@@ -361,16 +379,37 @@ def process_source(session, source_id: str):
             session.flush()
             if entity:
                 entities.append((entity, claim))
+        session.refresh(source)
+        if source.content_checksum != captured_checksum:
+            raise RuntimeError("Source changed during processing; retry with current content")
         source.current_run_id = run.id
         source.processed_checksum = source.content_checksum
         source.status = "ready"
         run.status = "succeeded"
         run.level = 2 if any(ev.kind in ("transcript", "asr") for ev in evidence) else 1
+        run.result_summary = {
+            "evidence_count": len(evidence),
+            "claim_count": len(valid),
+            "entity_count": len({entity.id for entity, _ in entities}),
+            "summary_excerpt": extraction.summary[:160],
+            "asr_model": os.getenv("DK_OPENAI_ASR_MODEL", "whisper-1")
+            if any(ev.kind == "asr" for ev in evidence)
+            else "",
+        }
         run.completed_at = now()
         for entity_id in set(previous_entity_ids + [entity.id for entity, _ in entities]):
             compile_entity(session, session.get(Entity, entity_id))
         index_one(session, source, item)
         session.commit()
+        log.info(
+            "processing_succeeded",
+            extra={
+                "source_id": source.id,
+                "run_id": run.id,
+                "provider": run.provider,
+                "model_name": run.model_name,
+            },
+        )
     except Exception as exc:
         session.rollback()
         run = session.get(ProcessingRun, run.id)
@@ -399,14 +438,35 @@ def work_once(session) -> bool:
     )
     if not job:
         return False
-    job.status, job.locked_at, job.attempts = "running", now(), job.attempts + 1
+    locked_at = now()
+    eligibility = or_(
+        Job.status == "queued",
+        (Job.status == "running") & (Job.locked_at < threshold),
+    )
+    claimed = session.execute(
+        update(Job)
+        .where(Job.id == job.id, eligibility, Job.available_at <= locked_at)
+        .values(status="running", locked_at=locked_at, attempts=Job.attempts + 1)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        session.rollback()
+        return False
     session.commit()
+    session.refresh(job)
     try:
         process_source(session, job.source_id)
         job = session.get(Job, job.id)
         job.status, job.error = "done", ""
     except Exception as exc:
-        log.exception("processing failed", extra={"source_id": job.source_id, "job_id": job.id})
+        log.error(
+            "processing_failed",
+            extra={
+                "source_id": job.source_id,
+                "job_id": job.id,
+                "error_type": type(exc).__name__,
+            },
+        )
         job = session.get(Job, job.id)
         job.error = str(exc)
         job.status = "failed" if job.attempts >= 3 else "queued"

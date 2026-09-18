@@ -63,7 +63,7 @@ class SidecarCaptureProvider:
         payload = response.json()
         if not payload.get("success"):
             raise RuntimeError(
-                f"Sidecar request failed: {payload.get('error', {}).get('code', 'unknown')}"
+                f"Sidecar request failed: {(payload.get('error') or {}).get('code', 'unknown')}"
             )
         for _ in range(30):
             if response.status_code != 202:
@@ -83,7 +83,7 @@ class SidecarCaptureProvider:
             payload = response.json()
             if not payload.get("success"):
                 raise RuntimeError(
-                    f"Sidecar task failed: {payload.get('error', {}).get('code', 'unknown')}"
+                    f"Sidecar task failed: {(payload.get('error') or {}).get('code', 'unknown')}"
                 )
             task = payload.get("data", {})
             if task.get("state") == "failed":

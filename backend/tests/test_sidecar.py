@@ -1,4 +1,5 @@
 import httpx
+import pytest
 from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 
@@ -113,3 +114,15 @@ def test_sidecar_async_task_result(monkeypatch):
     client = httpx.Client(transport=httpx.MockTransport(handler))
     provider = SidecarCaptureProvider(client)
     assert provider.list_saves() == []
+
+
+def test_sidecar_failed_envelope_has_clear_error(monkeypatch):
+    monkeypatch.setenv("DK_SIDECAR_API_KEY", "test-key")
+    monkeypatch.setenv("DK_SIDECAR_IDENTITY", "imported-identity")
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"success": False, "error": None})
+        )
+    )
+    with pytest.raises(RuntimeError, match="Sidecar request failed: unknown"):
+        SidecarCaptureProvider(client).list_saves()

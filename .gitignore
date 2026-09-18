@@ -12,4 +12,3 @@ frontend/dist/
 .DS_Store
 *.egg-info/
 *.tsbuildinfo
-frontend/pnpm-workspace.yaml

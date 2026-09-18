@@ -1,10 +1,12 @@
 import json
+import threading
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 
+from douyin_knowledge.ai import ExtractedClaim, Extraction
 from douyin_knowledge.api import resurface
 from douyin_knowledge.capture import CapturedSource
 from douyin_knowledge.db import Base
@@ -18,16 +20,27 @@ from douyin_knowledge.models import (
     ProcessingRule,
     ProcessingRun,
     Source,
+    SourceAnnotation,
     SourceAsset,
     SourceSnapshot,
+    SyncEvent,
     UserState,
     WikiPage,
+    WikiQualityEvent,
     WikiRevision,
     WikiSupport,
 )
 from douyin_knowledge.policy import evaluate
 from douyin_knowledge.retrieval import answer, search
-from douyin_knowledge.service import ingest, process_source, reevaluate, work_once
+from douyin_knowledge.service import (
+    _validated_claims,
+    ingest,
+    process_source,
+    reevaluate,
+    sync_capture,
+    work_once,
+)
+from douyin_knowledge.wiki import audit, fix
 
 
 @pytest.fixture
@@ -140,6 +153,58 @@ def test_failed_run_is_persisted_and_retried(session):
     job = session.scalar(select(Job).where(Job.source_id == source.id))
     assert job.status == "queued"
     assert job.attempts == 1
+
+
+def test_failed_job_exhausts_retries_and_new_capture_recovers(session):
+    ingest(session, [CapturedSource(external_id="recover", title="Empty")])
+    for attempt in range(3):
+        assert work_once(session)
+        job = session.scalar(select(Job).order_by(Job.id.desc()))
+        assert job.attempts == attempt + 1
+        if attempt < 2:
+            job.available_at = job.locked_at
+            session.commit()
+    assert job.status == "failed"
+    ingest(
+        session,
+        [
+            CapturedSource(
+                external_id="recover", title="Updated", caption="新增了足够详细的可引用描述。"
+            )
+        ],
+    )
+    assert work_once(session)
+    source = session.scalar(select(Source).where(Source.external_id == "recover"))
+    assert source.status == "ready"
+    assert session.get(ProcessingRun, source.current_run_id).result_summary["evidence_count"] == 1
+
+
+def test_sync_history_records_success_and_provider_failure(session):
+    ingest(session, demo()[:1])
+
+    class BrokenProvider:
+        def list_saves(self):
+            raise RuntimeError("sidecar unavailable")
+
+    with pytest.raises(RuntimeError, match="sidecar unavailable"):
+        sync_capture(session, BrokenProvider(), "sidecar")
+    events = session.scalars(select(SyncEvent).order_by(SyncEvent.occurred_at)).all()
+    assert [event.status for event in events] == ["succeeded", "failed"]
+    assert events[1].kind == "sidecar"
+
+
+def test_claim_validation_rejects_empty_quote_and_unquoted_value(session):
+    evidence = Evidence(source_id="source-id", kind="caption", text="这家店人均80港币")
+    evidence.id = "evidence-id"
+    extraction = Extraction(
+        summary="",
+        claims=[
+            ExtractedClaim(evidence_id="evidence-id", quote="", value="100港币"),
+            ExtractedClaim(evidence_id="evidence-id", quote="人均80港币", value="100港币"),
+            ExtractedClaim(evidence_id="evidence-id", quote="人均80港币", value="80港币"),
+        ],
+    )
+    assert [claim.value for claim in _validated_claims(extraction, [evidence])] == ["80港币"]
 
 
 def test_policy_can_hide_previously_processed_source(session):
@@ -280,3 +345,67 @@ def test_resurface_requires_current_evidence(session):
     source.status = "metadata_only"
     session.commit()
     assert resurface(session) == []
+
+
+def test_resync_clears_removed_fixture_annotations(session):
+    record = demo()[0]
+    ingest(session, [record])
+    source = session.scalar(select(Source))
+    assert session.get(SourceAnnotation, source.id).payload
+    ingest(session, [record.model_copy(update={"claims": []})])
+    assert session.get(SourceAnnotation, source.id).payload == []
+    process_source(session, source.id)
+    assert not session.scalar(
+        select(Claim).where(Claim.run_id == source.current_run_id, Claim.entity_id.is_not(None))
+    )
+
+
+def test_wiki_quality_ledger_and_deterministic_repair(session):
+    ingest(session, demo()[:1])
+    while work_once(session):
+        pass
+    page = session.scalar(select(WikiPage))
+    revision = session.scalar(
+        select(WikiRevision).where(
+            WikiRevision.page_id == page.id, WikiRevision.number == page.current_revision
+        )
+    )
+    support = session.scalar(select(WikiSupport).where(WikiSupport.revision_id == revision.id))
+    session.delete(support)
+    session.commit()
+    assert audit(session)[0]["issue"] == "missing_support"
+    event = session.scalar(select(WikiQualityEvent))
+    assert event.status == "open"
+    result = fix(session)
+    session.refresh(event)
+    assert result["remaining"] == []
+    assert page.current_revision == 2
+    assert event.status == "resolved"
+
+
+def test_running_job_is_not_claimed_by_second_worker(session, monkeypatch):
+    ingest(session, demo()[:1])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def pause(_session, _source_id):
+        entered.set()
+        assert release.wait(timeout=5)
+
+    monkeypatch.setattr("douyin_knowledge.service.process_source", pause)
+    outcome = []
+
+    def first_worker():
+        with Session(session.bind) as other:
+            outcome.append(work_once(other))
+
+    worker = threading.Thread(target=first_worker)
+    worker.start()
+    assert entered.wait(timeout=5)
+    assert not work_once(session)
+    release.set()
+    worker.join(timeout=5)
+    assert outcome == [True]
+    job = session.scalar(select(Job))
+    session.refresh(job)
+    assert job.attempts == 1

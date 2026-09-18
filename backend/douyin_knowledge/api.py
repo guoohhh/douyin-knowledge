@@ -17,6 +17,7 @@ from .models import (
     Source,
     SourceCollectionMembership,
     SourceSnapshot,
+    SyncEvent,
     UserState,
     WikiPage,
     WikiRevision,
@@ -24,7 +25,7 @@ from .models import (
     now,
 )
 from .retrieval import answer, search
-from .service import enqueue, ingest, reevaluate, work_once
+from .service import enqueue, ingest, reevaluate, sync_capture, work_once
 
 app = FastAPI(title="Douyin Knowledge")
 app.add_middleware(
@@ -83,9 +84,27 @@ def sync(records: list[CapturedSource], session: Session = Depends(get_session))
 @app.post("/sync/sidecar")
 def sync_sidecar(session: Session = Depends(get_session)):
     try:
-        return ingest(session, SidecarCaptureProvider().list_saves())
+        return sync_capture(session, SidecarCaptureProvider(), "sidecar")
     except Exception as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/sync/status")
+def sync_status(session: Session = Depends(get_session)):
+    return [
+        {
+            "id": event.id,
+            "kind": event.kind,
+            "status": event.status,
+            "total": event.total,
+            "created": event.created,
+            "error": event.error,
+            "occurred_at": event.occurred_at,
+        }
+        for event in session.scalars(
+            select(SyncEvent).order_by(SyncEvent.occurred_at.desc()).limit(20)
+        )
+    ]
 
 
 @app.post("/jobs/run-once")
@@ -176,8 +195,10 @@ def source_detail(source_id: str, session: Session = Depends(get_session)):
                 "id": run.id,
                 "status": run.status,
                 "provider": run.provider,
+                "model_name": run.model_name,
                 "level": run.level,
                 "error": run.error,
+                "result_summary": run.result_summary,
             }
             for run in runs
         ],

@@ -76,6 +76,17 @@ class SourceCollectionMembership(Base):
     collection_name: Mapped[str] = mapped_column(String)
 
 
+class SyncEvent(Base):
+    __tablename__ = "sync_events"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    kind: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    created: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(Text, default="")
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class ProcessingRule(Base):
     __tablename__ = "processing_rules"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
@@ -116,6 +127,8 @@ class ProcessingRun(Base):
     status: Mapped[str] = mapped_column(String, default="running")
     level: Mapped[int] = mapped_column(Integer, default=1)
     provider: Mapped[str] = mapped_column(String, default="local")
+    model_name: Mapped[str] = mapped_column(String, default="")
+    result_summary: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str] = mapped_column(Text, default="")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -201,6 +214,17 @@ class WikiSupport(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
     revision_id: Mapped[str] = mapped_column(ForeignKey("wiki_revisions.id", ondelete="CASCADE"))
     claim_id: Mapped[str] = mapped_column(ForeignKey("claims.id", ondelete="CASCADE"))
+
+
+class WikiQualityEvent(Base):
+    __tablename__ = "wiki_quality_events"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    page_id: Mapped[str] = mapped_column(ForeignKey("wiki_pages.id", ondelete="CASCADE"))
+    issue: Mapped[str] = mapped_column(String)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String, default="open")
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserState(Base):

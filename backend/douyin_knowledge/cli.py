@@ -7,8 +7,9 @@ import typer
 from .capture import FileCaptureProvider, SidecarCaptureProvider
 from .db import SessionLocal
 from .index import rebuild
-from .service import ingest, work_once
-from .wiki import lint
+from .logging_config import configure_logging
+from .service import sync_capture, work_once
+from .wiki import audit, fix
 from .wiki import rebuild as rebuild_wiki
 
 app = typer.Typer()
@@ -17,13 +18,13 @@ app = typer.Typer()
 @app.command()
 def sync_file(path: Path):
     with SessionLocal() as session:
-        typer.echo(ingest(session, FileCaptureProvider(str(path)).list_saves()))
+        typer.echo(sync_capture(session, FileCaptureProvider(str(path)), "file"))
 
 
 @app.command()
 def sync_sidecar():
     with SessionLocal() as session:
-        typer.echo(ingest(session, SidecarCaptureProvider().list_saves()))
+        typer.echo(sync_capture(session, SidecarCaptureProvider(), "sidecar"))
 
 
 @app.command()
@@ -31,20 +32,22 @@ def sync_loop(interval_seconds: int = 300):
     """Poll the configured sidecar for new saves while this process runs."""
     if interval_seconds < 30:
         raise typer.BadParameter("Minimum interval is 30 seconds")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     while True:
         try:
             with SessionLocal() as session:
-                result = ingest(session, SidecarCaptureProvider().list_saves())
+                result = sync_capture(session, SidecarCaptureProvider(), "sidecar")
             typer.echo(result)
-        except Exception:
-            logging.exception("sidecar sync failed")
+        except Exception as exc:
+            logging.getLogger(__name__).error(
+                "sidecar_sync_failed", extra={"error_type": type(exc).__name__}
+            )
         time.sleep(interval_seconds)
 
 
 @app.command()
 def worker(once: bool = False):
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     while True:
         with SessionLocal() as session:
             worked = work_once(session)
@@ -63,7 +66,14 @@ def rebuild_index():
 @app.command()
 def wiki_lint():
     with SessionLocal() as session:
-        typer.echo(lint(session))
+        typer.echo(audit(session))
+
+
+@app.command()
+def wiki_fix():
+    """Recompile inconsistent Wiki pages and record resolution in the quality ledger."""
+    with SessionLocal() as session:
+        typer.echo(fix(session))
 
 
 @app.command()

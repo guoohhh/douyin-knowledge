@@ -75,6 +75,8 @@ function App() {
         <nav>
           <NavLink to="/">提问</NavLink>
           <NavLink to="/library">收藏</NavLink>
+          <NavLink to="/search">搜索</NavLink>
+          <NavLink to="/jobs">处理状态</NavLink>
           <NavLink to="/entities">知识对象</NavLink>
           <NavLink to="/resurface">想做的事</NavLink>
           <NavLink to="/wiki">Wiki</NavLink>
@@ -86,6 +88,8 @@ function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/library" element={<Library />} />
+          <Route path="/search" element={<Search />} />
+          <Route path="/jobs" element={<Jobs />} />
           <Route path="/sources/:id" element={<SourceDetail />} />
           <Route path="/entities" element={<Entities />} />
           <Route path="/resurface" element={<Resurface />} />
@@ -139,6 +143,7 @@ function Home() {
           <span>已处理 {stats.data.ready}</span>
           <span>仅元数据 {stats.data.metadata_only}</span>
           <span>待处理 {stats.data.queued}</span>
+          <span>失败 {stats.data.failed}</span>
         </div>
       )}
       {ask.isPending && <p>检索中…</p>}
@@ -193,6 +198,54 @@ function Library() {
     </>
   );
 }
+function Search() {
+  const [input, setInput] = useState("");
+  const [term, setTerm] = useState("");
+  const results = useQuery<Result[]>({
+    queryKey: ["search", term],
+    queryFn: () => api<Result[]>("/search?q=" + encodeURIComponent(term)),
+    enabled: Boolean(term),
+  });
+  return (
+    <>
+      <p className="eyebrow">SEARCH</p>
+      <h2>搜索已处理的收藏</h2>
+      <form className="ask" onSubmit={(event) => { event.preventDefault(); setTerm(input.trim()); }}>
+        <input value={input} onChange={(event) => setInput(event.target.value)} placeholder="输入关键词、地点或主题" />
+        <button>搜索</button>
+      </form>
+      {results.isPending && term && <p>搜索中…</p>}
+      {results.error && <p className="error">{String(results.error)}</p>}
+      {results.data?.length === 0 && <p>没有找到匹配的已处理收藏。</p>}
+      {results.data?.map((result) => (
+        <section className="card" key={result.source_id}>
+          <h3><Link to={"/sources/" + result.source_id}>{result.title}</Link></h3>
+          <p>{result.summary}</p>
+          <small>匹配方式：{result.methods.join("、")}</small>
+          {result.claims.slice(0, 3).map((claim) => <p key={claim.claim_id}>{claim.text}</p>)}
+        </section>
+      ))}
+    </>
+  );
+}
+function Jobs() {
+  const jobs = query<{ id: string; source_id: string; status: string; attempts: number; error: string }[]>("jobs", "/jobs");
+  return (
+    <>
+      <p className="eyebrow">PROCESSING</p>
+      <h2>处理状态</h2>
+      <p className="muted">此页面显示最近的任务；刷新页面可查看后台 worker 的最新进度。</p>
+      {jobs.data?.length === 0 && <p>暂无处理任务。</p>}
+      {jobs.data?.map((job) => (
+        <div className="row" key={job.id}>
+          <Link to={"/sources/" + job.source_id}>查看来源</Link>
+          <span>{job.status} · 尝试 {job.attempts} 次</span>
+          {job.error && <span className="error">{job.error}</span>}
+        </div>
+      ))}
+    </>
+  );
+}
 function SourceDetail() {
   const { id } = useParams();
   const data = query<{
@@ -217,8 +270,10 @@ function SourceDetail() {
       id: string;
       status: string;
       provider: string;
+      model_name: string;
       level: number;
       error: string;
+      result_summary: { evidence_count?: number; claim_count?: number; entity_count?: number };
     }[];
     snapshots: { id: string; checksum: string; observed_at: string }[];
     policy_decisions: {
@@ -278,7 +333,7 @@ function SourceDetail() {
         <h3>处理记录</h3>
         {d.runs.map((r) => (
           <p key={r.id}>
-            {r.status} · {r.provider} · Level {r.level} {r.error}
+            {r.status} · {r.provider} / {r.model_name} · Level {r.level} · 证据 {r.result_summary.evidence_count ?? 0} · 观点 {r.result_summary.claim_count ?? 0} {r.error}
           </p>
         ))}
       </section>
@@ -438,6 +493,15 @@ function WikiDetail() {
 }
 function Settings() {
   const qc = useQueryClient();
+  const syncHistory = query<{
+    id: string;
+    kind: string;
+    status: string;
+    total: number;
+    created: number;
+    error: string;
+    occurred_at: string;
+  }[]>("sync-status", "/sync/status");
   const rules = query<
     { id: string; dimension: string; value: string; action: string }[]
   >("rules", "/rules");
@@ -450,6 +514,7 @@ function Settings() {
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["rules"] });
     qc.invalidateQueries({ queryKey: ["dashboard"] });
+    qc.invalidateQueries({ queryKey: ["sync-status"] });
   };
   async function add() {
     try {
@@ -504,6 +569,15 @@ function Settings() {
         <button disabled={syncing} onClick={syncSidecar}>
           {syncing ? "同步中…" : "现在同步"}
         </button>
+        <p><Link to="/jobs">查看处理状态与失败原因</Link></p>
+        <h3>最近同步</h3>
+        {syncHistory.data?.length === 0 && <p className="muted">暂无同步记录</p>}
+        {syncHistory.data?.slice(0, 5).map((event) => (
+          <p key={event.id}>
+            {new Date(event.occurred_at).toLocaleString()} · {event.kind} · {event.status} · {event.total} 条（新增 {event.created}）
+            {event.error && <span className="error"> {event.error}</span>}
+          </p>
+        ))}
       </section>
       <section className="card">
         <h3>导入 JSON 收藏</h3>
