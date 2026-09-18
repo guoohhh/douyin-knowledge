@@ -439,12 +439,14 @@ def test_resurface_requires_current_evidence(session):
 
 
 def test_resync_clears_removed_fixture_annotations(session):
-    record = demo()[0]
+    record = demo()[0].model_copy(update={"media_url": "https://example.test/video.mp4"})
     ingest(session, [record])
     source = session.scalar(select(Source))
     assert session.get(SourceAnnotation, source.id).payload
-    ingest(session, [record.model_copy(update={"claims": []})])
+    assert session.scalar(select(SourceAsset).where(SourceAsset.source_id == source.id))
+    ingest(session, [record.model_copy(update={"claims": [], "media_url": ""})])
     assert session.get(SourceAnnotation, source.id).payload == []
+    assert session.scalar(select(SourceAsset).where(SourceAsset.source_id == source.id)) is None
     process_source(session, source.id)
     assert not session.scalar(
         select(Claim).where(Claim.run_id == source.current_run_id, Claim.entity_id.is_not(None))

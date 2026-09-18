@@ -103,18 +103,22 @@ def ingest(session, records: list[CapturedSource], sync_kind: str = "import") ->
             dict.fromkeys(record.collections or ([record.collection] if record.collection else []))
         )
         source.collection = collection_names[0] if collection_names else ""
-        if record.media_url:
-            asset = session.scalar(
-                select(SourceAsset).where(
-                    SourceAsset.source_id == source.id, SourceAsset.kind == "video"
-                )
+        asset = session.scalar(
+            select(SourceAsset).where(
+                SourceAsset.source_id == source.id, SourceAsset.kind == "video"
             )
+        )
+        if record.media_url:
             if asset is None:
                 session.add(
                     SourceAsset(source_id=source.id, kind="video", remote_url=record.media_url)
                 )
             elif asset.remote_url != record.media_url:
                 asset.remote_url, asset.updated_at = record.media_url, now()
+        elif asset is not None:
+            # The current capture no longer advertises this URL. Do not transcribe
+            # stale media from a previous capture during a later processing run.
+            session.delete(asset)
         memberships = session.scalars(
             select(SourceCollectionMembership).where(
                 SourceCollectionMembership.source_id == source.id

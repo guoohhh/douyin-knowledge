@@ -52,7 +52,7 @@ flowchart LR
 
 ## 4. Capture → Answer 的实际流程
 
-1. **Capture / Sync：**文件或 sidecar 提供规范化 `CapturedSource`。按 `(platform, external_id)` 去重，更新当前收藏夹成员关系，保存快照和同步结果。sidecar 的一次成功列表被视为完整快照：原来由 sidecar 同步、现在缺席的来源变成 `removed`，历史仍保留；同步失败不会执行移除判断。
+1. **Capture / Sync：**文件或 sidecar 提供规范化 `CapturedSource`。按 `(platform, external_id)` 去重，更新当前收藏夹成员关系，保存快照和同步结果。新捕获不再提供媒体 URL 时会清除旧的当前媒体地址，避免重处理时误用过期地址。sidecar 的一次成功列表被视为完整快照：原来由 sidecar 同步、现在缺席的来源变成 `removed`，历史仍保留；同步失败不会执行移除判断。
 2. **Policy：**来源规则优先；其余维度的 `always_process` 规则优先于排除规则，排除规则按作者、收藏夹、内容类型、关键词依次选取。决策变化被记录。`metadata_only` 和 `removed` 来源不参与正常检索与 Wiki 当前页。
 3. **Queue：**允许处理的来源进入 SQLite Job 队列。worker 原子领取任务；错误持久化，指数退避，最多尝试三次。Source 内容变化会使旧观点暂时退出当前问答，直到新 Run 成功。
 4. **Understand：**优先使用 caption／提供的 transcript。短 caption 且没有 transcript 时，如有媒体 URL 和可用 API key，可下载不超过 100 MiB 的 HTTPS 视频、用捆绑的 ffmpeg 提取音频并调用兼容的转写端点。转写失败但 caption 仍可用时降级处理并记录原因。抽取可使用配置的聊天模型；无凭据时使用确定性本地规则。处理深度与模型、证据和观点数量保存在 Run 中。
