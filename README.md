@@ -100,4 +100,4 @@ Sync history records successful imports and provider failures; the Settings page
 
 ## Design and implementation notes
 
-The original specifications remain in `docs/`. [Implementation decisions](docs/IMPLEMENTATION.md) records actual V1 scope and differences from the aspirational physical schema. In particular, the current local vector projection uses SQLite JSON instead of LanceDB and a lightweight token hash fallback instead of a semantic model. With an embedding API configured, the same projection stores real model embeddings and searches by cosine similarity.
+The original specifications remain in `docs/`. [Current architecture and review guide](docs/CURRENT_ARCHITECTURE.md) explains the implemented data flow, invariants, operations, verification, and known gaps. [Implementation decisions](docs/IMPLEMENTATION.md) records differences from the aspirational physical schema. In particular, the current local vector projection uses SQLite JSON instead of LanceDB and a lightweight token hash fallback instead of a semantic model. With an embedding API configured, the same projection stores real model embeddings and searches by cosine similarity.
