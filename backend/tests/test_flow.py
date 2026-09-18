@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 
 from douyin_knowledge.ai import ExtractedClaim, Extraction
-from douyin_knowledge.api import resurface
+from douyin_knowledge.api import jobs, resurface, wiki_page
 from douyin_knowledge.capture import CapturedSource
 from douyin_knowledge.db import Base
 from douyin_knowledge.index import rebuild
@@ -93,6 +93,11 @@ def test_end_to_end_and_provenance(session):
         )
     )
     assert session.scalar(select(WikiSupport).where(WikiSupport.revision_id == revision.id))
+    page_detail = wiki_page(page.id, session)
+    assert page_detail["supports"]
+    assert page_detail["supports"][0]["source_title"] == "旺角平价日料推荐"
+    assert all(item["source_id"] for item in page_detail["supports"])
+    assert any(item["source_title"] == "旺角平价日料推荐" for item in jobs(session))
     session.add(UserState(entity_id=entity.id, state="visited", rating=4, note="排队久"))
     session.commit()
     assert (

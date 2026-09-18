@@ -118,11 +118,17 @@ def jobs(session: Session = Depends(get_session)):
         {
             "id": job.id,
             "source_id": job.source_id,
+            "source_title": source.title,
             "status": job.status,
             "attempts": job.attempts,
             "error": job.error,
         }
-        for job in session.scalars(select(Job).order_by(Job.available_at.desc()).limit(100))
+        for job, source in session.execute(
+            select(Job, Source)
+            .join(Source, Job.source_id == Source.id)
+            .order_by(Job.available_at.desc())
+            .limit(100)
+        )
     ]
 
 
@@ -409,9 +415,26 @@ def wiki_page(page_id: str, session: Session = Depends(get_session)):
         if revision
         else []
     )
+    claims = {claim.id: claim for claim in session.scalars(
+        select(Claim).where(Claim.id.in_([support.claim_id for support in supports]))
+    )}
+    sources = {source.id: source for source in session.scalars(
+        select(Source).where(Source.id.in_([claim.source_id for claim in claims.values()]))
+    )}
     return {
         "title": page.title,
         "body": revision.body if revision else "",
         "revision": page.current_revision,
         "claim_ids": [s.claim_id for s in supports],
+        "supports": [
+            {
+                "claim_id": support.claim_id,
+                "claim": claims[support.claim_id].value,
+                "source_id": claims[support.claim_id].source_id,
+                "source_title": sources[claims[support.claim_id].source_id].title,
+            }
+            for support in supports
+            if support.claim_id in claims
+            and claims[support.claim_id].source_id in sources
+        ],
     }
