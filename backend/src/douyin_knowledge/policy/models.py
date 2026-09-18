@@ -11,11 +11,21 @@ if sys.version_info >= (3, 11):
     from enum import StrEnum
 else:
     class StrEnum(str, Enum):
-        """Backport of StrEnum for Python 3.10."""
-        def __new__(cls, value: str) -> "StrEnum":
+        """Backport of StrEnum for Python 3.10.
+
+        ``__str__`` must be the plain string one. Without it, ``Enum.__str__`` wins and
+        ``str(JobType.PROCESS_SOURCE)`` returns "JobType.PROCESS_SOURCE" -- which is
+        exactly what the queue would then write into ``jobs.job_type``, so no handler
+        would ever match on 3.10 while 3.12 worked fine.
+        """
+
+        def __new__(cls, value: str) -> StrEnum:
             obj = str.__new__(cls, value)
             obj._value_ = value
             return obj
+
+        __str__ = str.__str__
+        __format__ = str.__format__
 
 
 class RuleType(StrEnum):
