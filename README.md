@@ -83,6 +83,8 @@ Design and implementation handoff documents:
 - [`docs/PHYSICAL_SCHEMA.md`](docs/PHYSICAL_SCHEMA.md) — concrete SQLite V1 tables, foreign keys, provenance links, Wiki revisions, search/index projections, conversation citations, and migration order.
 - [`docs/TASKS.md`](docs/TASKS.md) — phased implementation plan, acceptance tests, and milestone order. Section 0 records what is actually delivered.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — where the implementation differs from the design docs, with the symbol proving each claim.
+- [`docs/EXPERIMENT_GPT_VS_CLAUDE_V1.md`](docs/EXPERIMENT_GPT_VS_CLAUDE_V1.md) — frozen GPT-vs-Claude implementation experiment, comparative findings, and the rationale for using Claude as the integration base while preserving GPT behavior as reference.
+- [`docs/INTEGRATION_PLAN_V1.md`](docs/INTEGRATION_PLAN_V1.md) — active convergence plan for `integration/v1`: CI gate, Claude integration pass, GPT adversarial audit, remediation, Structured Retrieval vertical slice, and final merge gate.
 - [`AGENTS.md`](AGENTS.md) — repository-level coding-agent rules and non-negotiable architecture invariants.
 
 ## Knowledge architecture at a glance
@@ -139,6 +141,8 @@ The system is intentionally local-first and avoids unnecessary V1 infrastructure
 ## Working on this
 
 Read `AGENTS.md` first; it holds the invariants that must not be quietly renegotiated — the provenance spine, the rule that a Source carries no AI-derived fields, that a Claim is never a global fact, that an uncited wiki statement is a defect.
+
+When working on `integration/v1`, also read `docs/EXPERIMENT_GPT_VS_CLAUDE_V1.md` and `docs/INTEGRATION_PLAN_V1.md`. The experiment document explains why the integrated branch is based on Claude while selectively adopting GPT behavior; the integration plan defines the active work sequence and merge gate.
 
 `docs/TASKS.md` section 0 says what exists. `docs/DECISIONS.md` says where the code and the design docs disagree, and it is the code that wins. If you find an entry in either file that no longer matches reality, fix the document in the same change: a stale status section is read as a description of the system, and it lies.
 
