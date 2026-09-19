@@ -129,6 +129,25 @@ A note on how to read this file. Every entry states a claim about current code a
 
 ---
 
+### DEC-013: The sidecar contract is read off the sidecar, and pruning requires a complete walk
+
+**Decision**: The `douyin` provider's contract is verified against `Evil0ctal/Douyin_TikTok_Download_API`'s own published OpenAPI document and REST guide, not inferred from our fixtures. Membership pruning is gated on a single boolean — did the page walk finish? — isolated in `capture/pagination.py` and defaulting to "no".
+
+**Rationale**: A fixture that agrees with the client proves only that both were written by the same person. Four contract bugs were live simultaneously, none of which any existing test could fail on, because the fixture provider paginates the way the client expected rather than the way the sidecar does:
+
+1. The next cursor was read from `meta["cursor"]`, which is an *object* (`{"next", "has_more"}`); the flat cursor is on `data`. So a dict was assigned where a string belonged and **the walk never advanced past page 1** — a user with more than 20 saved items in a folder would silently see only the first page, and the rest would then be marked as removed from the collection.
+2. `_poll_task` matched states `pending`/`succeeded`. The sidecar emits `queued|running|done|failed`. Every successfully finished task therefore fell through to the error branch, so **the async path could never succeed**.
+3. `health()` probed `/api/v1/health`, which does not exist. That path is served by the console's SPA catch-all and answers `200` with HTML regardless of service state — a health check that cannot fail. Readiness is `/readyz`, which also reports per-component status; `/healthz` is liveness.
+4. `_map_source` wrote `None` into `statistics`, typed `dict[str, int]`, so **any item arriving without a `stats` block failed validation** and took the whole page down with it.
+
+Separately, `list_collections` read only its first page, capping a user at their most recent folders and making every item inside the remainder invisible to the entire system — which presents as an empty library, not an error.
+
+**Consequence**: The pruning rule is now explicit: an incomplete walk never prunes, and "complete" means the provider stated there was no more, not that we stopped asking. A non-advancing cursor, a `has_more` with no cursor, and exceeding the page cap are all hard failures (`ValidationError`, not retryable) rather than silent truncation — the previous code logged a warning on page-cap exhaustion and then pruned against the partial listing. Partial pages are still persisted, because upserts are non-destructive and re-fetching costs an identity; only the destructive step is skipped. `Collection.last_synced_at_ms` is stamped only on a complete walk, since the API and UI present it as when the folder was last fully read.
+
+**Evidence**: `capture/pagination.py`; `capture/douyin_provider.py` module docstring; `tests/unit/test_collection_pagination.py`, `tests/unit/test_sync_pruning.py`, `tests/unit/test_douyin_provider_transport.py`.
+
+---
+
 ## Known gaps
 
 These are true limitations, not deferred decisions. Each is either invisible in normal use or visible and harmless; none is load-bearing for V1 acceptance.
@@ -136,6 +155,8 @@ These are true limitations, not deferred decisions. Each is either invisible in 
 **`QueryPlanner` is dead code.** `retrieval/query_planner.py` implements entity extraction with regex place-name patterns and carries its own `TODO: use an NER model`. It is exported from `retrieval/__init__.py` and instantiated nowhere. The live path resolves follow-ups in `conversation/conversation_manager.py:_resolve_followup` using the previous turn's entities from conversation state, which is what the product actually needed. `Settings.enable_query_enrichment` and `query_planner_model` are likewise read by nothing. Either wire it or delete it; leaving it exported invites someone to assume retrieval does NER.
 
 **Alias resolution has no dedicated test.** See DEC-002.
+
+**Source comments cite a `DEC-C*` numbering that this file does not use.** `db/models/ops.py` (DEC-C1), `db/models/wiki.py` (DEC-C7), `jobs/types.py` (DEC-C8), `search/tokenizer.py` and `retrieval/keyword_search.py` (DEC-C10), and `capture/douyin_provider.py` (DEC-C11) reference decision ids from an earlier scheme; this file numbers DEC-001 onward, and the two sets do not correspond. The comments are still individually accurate about *what* was decided — only the cross-reference dangles. Not renumbered here because it touches unrelated modules during a behavioral pass; new references use the live scheme.
 
 **Wiki conflict handling has no confidence weighting or user override.** See DEC-007.
 

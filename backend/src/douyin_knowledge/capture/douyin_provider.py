@@ -23,7 +23,33 @@ the old ``/api/douyin/web/...`` route names no longer exist (see DEC-C11):
 * Douyin's folder list **takes no author**: its upstream endpoint carries no user id
   and answers only about the session sending it. Passing ``url``/``sec_user_id``
   there is an error, not a no-op. Which session that is comes from ``identity``,
-  configured once, not passed per call.
+  which *is* a per-request query parameter (``identity:manage`` scope) even though we
+  configure it once.
+
+Pagination, verified against the live OpenAPI document and the sidecar's REST guide
+rather than inferred from our own fixtures (DEC-013):
+
+* A list page carries ``data.items``, ``data.cursor``, ``data.has_more``. The same
+  two pagination values are *duplicated* into ``meta.cursor`` as an **object**,
+  ``{"next": ..., "has_more": ...}`` -- not a bare string. Reading ``meta["cursor"]``
+  as the next cursor, as this client previously did, yields a dict where a string
+  belongs, so the walk never advanced past page 1.
+* The cursor is an **opaque string** (<=512 chars). Douyin stringifies a millisecond
+  ``max_cursor``, TikTok an offset. We pass it back verbatim and never parse,
+  increment, or construct one.
+* ``count`` is capped at 50 by the schema, and a cursor is only valid for the query
+  that produced it, so ``count`` must not change mid-walk.
+* ``wait`` is a float with a documented maximum of 30.0; above it the sidecar returns
+  ``400 INVALID_PARAM`` rather than clamping, so we clamp locally instead.
+* Task states are ``queued|running|done|failed``. There is no ``succeeded`` and no
+  ``pending``. A finished task nests its payload at ``data.data`` with pagination at
+  ``data.result_meta.cursor.next``. A *failed* task is still ``HTTP 200`` with
+  ``success: true`` -- the failure lives in ``data.state``, so a client that checks
+  only the envelope reads a failure as a success.
+* Health is ``/healthz`` and readiness ``/readyz``, both **outside** ``/api/v1``,
+  outside the envelope, and unauthenticated. There is no ``/health``: that path hits
+  the console's SPA catch-all and answers ``200`` with HTML whatever the state of the
+  service, which makes it precisely useless as a probe.
 """
 
 from __future__ import annotations
@@ -61,6 +87,26 @@ logger = get_logger(__name__)
 PLATFORM = "douyin"
 API_PREFIX = "/api/v1"
 
+#: The sidecar's ceiling on server-side wait, published on the parameter itself.
+#: Exceeding it is a 400, not a clamp, so we clamp before sending.
+MAX_WAIT_S = 30.0
+
+#: Schema maximum for ``count``. Asking for more is a validation error.
+MAX_PAGE_SIZE = 50
+
+#: Schema maximum for an opaque cursor. A longer one cannot have come from this API.
+MAX_CURSOR_LEN = 512
+
+#: Task states, verbatim from the sidecar's REST guide. Note the absence of
+#: ``succeeded``/``pending``: matching on those names silently never matches, and a
+#: finished task then falls through to the error branch.
+TASK_PENDING_STATES = frozenset({"queued", "running"})
+TASK_DONE_STATE = "done"
+
+#: Page cap for the folder list. Folders are few; needing 50 pages of them at 50 per
+#: page means the cursor is not advancing, and continuing is worse than failing.
+MAX_COLLECTION_PAGES = 50
+
 #: Sidecar error code -> our error class. Codes absent here fall back on the HTTP
 #: status, so a sidecar that adds a code does not become an opaque internal error.
 ERROR_MAP: dict[str, type[DKError]] = {
@@ -84,6 +130,9 @@ ERROR_MAP: dict[str, type[DKError]] = {
     # A changed upstream is NOT retryable: the parser needs updating, and retrying
     # just burns identities against a shape the sidecar cannot read.
     "UPSTREAM_CHANGED": ValidationError,
+    # Task results expire (default 24h). Resubmitting is the documented recovery, so
+    # this is retryable rather than a permanent failure.
+    "TASK_NOT_FOUND": CaptureUnavailable,
 }
 
 
@@ -101,15 +150,21 @@ class DouyinCaptureProvider(CaptureProvider):
         identity: str | None = None,
         wait_s: float = 30.0,
         poll_timeout_s: float = 180.0,
+        poll_interval_s: float = 1.5,
         page_size: int = 50,
         client: httpx.Client | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.identity = identity
-        self.wait_s = wait_s
+        # Clamp rather than trust the caller: the sidecar rejects an over-ceiling wait
+        # with 400 INVALID_PARAM, so an optimistic default would fail every call.
+        self.wait_s = min(float(wait_s), MAX_WAIT_S)
         self.poll_timeout_s = poll_timeout_s
-        self.page_size = page_size
+        # Injectable so tests can exercise the polling loop without sleeping through
+        # it. A test that takes six seconds to check a state machine gets deleted.
+        self.poll_interval_s = poll_interval_s
+        self.page_size = max(1, min(page_size, MAX_PAGE_SIZE))
         headers = {"Accept": "application/json"}
         if api_key:
             headers["X-API-Key"] = api_key
@@ -119,7 +174,7 @@ class DouyinCaptureProvider(CaptureProvider):
             # Generous: the sidecar holds the connection open for `wait` seconds by
             # design, so a short read timeout would abort exactly the calls that are
             # working as intended.
-            timeout=httpx.Timeout(connect=10.0, read=wait_s + 30.0, write=30.0, pool=10.0),
+            timeout=httpx.Timeout(connect=10.0, read=self.wait_s + 30.0, write=30.0, pool=10.0),
         )
 
     def close(self) -> None:
@@ -138,14 +193,7 @@ class DouyinCaptureProvider(CaptureProvider):
         The sidecar's ``message`` is localized and explicitly documented as
         unparseable, so only ``code`` is ever branched on.
         """
-        try:
-            body = response.json()
-        except ValueError:
-            raise CaptureUnavailable(
-                f"sidecar returned non-JSON (HTTP {response.status_code})",
-                status_code=response.status_code,
-                body=response.text[:500],
-            ) from None
+        body = self._json_of(response)
         error = body.get("error") or {}
         code = str(error.get("code") or "")
         exc_type = ERROR_MAP.get(code)
@@ -186,23 +234,49 @@ class DouyinCaptureProvider(CaptureProvider):
                 path=path,
             ) from exc
         if response.status_code == 202:
-            body = response.json()
+            # Not a failure: the wait ceiling expired while the task was still
+            # running, and the work is still queued under this id. Treating it as an
+            # error and resubmitting would spend a second identity for the same answer.
+            body = self._json_of(response)
             task_id = (body.get("data") or {}).get("task_id")
             if not task_id:
                 raise CaptureUnavailable("sidecar accepted the request but named no task")
             return self._poll_task(str(task_id))
-        if response.is_error or not (response.json() or {}).get("success", False):
+        body = self._json_of(response)
+        if response.is_error or not body.get("success", False):
             self._raise_for_envelope(response)
-        body = response.json()
-        return body.get("data"), body.get("meta") or {}
+        return body.get("data"), dict(body.get("meta") or {})
 
-    def _poll_task(self, task_id: str, *, interval_s: float = 1.5) -> tuple[Any, dict[str, Any]]:
+    def _json_of(self, response: httpx.Response) -> dict[str, Any]:
+        """Parse one response body once.
+
+        Every branch below needs the envelope, and ``httpx`` re-decodes on each
+        ``.json()`` call. More to the point, calling it twice and branching on each
+        result separately is how a body can appear to change mid-function.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            raise CaptureUnavailable(
+                f"sidecar returned non-JSON (HTTP {response.status_code})",
+                status_code=response.status_code,
+                body=response.text[:500],
+            ) from None
+        if not isinstance(body, dict):
+            raise CaptureUnavailable(
+                f"sidecar returned a {type(body).__name__}, not an envelope",
+                status_code=response.status_code,
+            )
+        return body
+
+    def _poll_task(self, task_id: str, *, interval_s: float | None = None) -> tuple[Any, dict[str, Any]]:
         """Poll a task the server-side wait did not outlive.
 
         A cold identity pool can take longer than any single ``wait`` the sidecar
         permits, so giving up at the first 202 would make sync fail precisely on a
         fresh install.
         """
+        interval = self.poll_interval_s if interval_s is None else interval_s
         deadline = time.monotonic() + self.poll_timeout_s
         while True:
             if time.monotonic() > deadline:
@@ -210,7 +284,7 @@ class DouyinCaptureProvider(CaptureProvider):
                     f"sidecar task {task_id} did not finish within {self.poll_timeout_s}s",
                     task_id=task_id,
                 )
-            time.sleep(interval_s)
+            time.sleep(interval)
             try:
                 response = self._client.get(f"{API_PREFIX}/tasks/{task_id}")
             except httpx.RequestError as exc:
@@ -219,20 +293,21 @@ class DouyinCaptureProvider(CaptureProvider):
                 ) from exc
             if response.is_error:
                 self._raise_for_envelope(response)
-            body = response.json()
+            body = self._json_of(response)
             if not body.get("success", False):
                 self._raise_for_envelope(response)
+            # A *failed task* is HTTP 200 with `success: true` -- the envelope
+            # describes the lookup, not the work. The state below is the only place the
+            # failure appears, so returning here on the envelope alone would report
+            # every failed capture as an empty success.
             data = body.get("data") or {}
             state = str(data.get("state") or "")
-            if state in ("pending", "running", "queued"):
+            if state in TASK_PENDING_STATES:
                 continue
-            if state == "succeeded":
-                # A finished task nests the payload; an already-shaped envelope does
-                # not. Accept both, like the sidecar's own `unwrap`.
-                result = data.get("result")
-                if isinstance(result, dict) and "data" in result:
-                    return result["data"], dict(result.get("meta") or {})
-                return result, dict(body.get("meta") or {})
+            if state == TASK_DONE_STATE:
+                # A finished task nests one level deeper (`data.data`) and carries its
+                # pagination in a sibling `result_meta`, not in the envelope's `meta`.
+                return data.get("data"), dict(data.get("result_meta") or {})
             error = data.get("error") or {}
             code = str(error.get("code") or "")
             exc_type = ERROR_MAP.get(code, CaptureUnavailable)
@@ -320,12 +395,21 @@ class DouyinCaptureProvider(CaptureProvider):
             availability="available",
             creator=self._map_author(raw["author"]),
             hashtags=raw.get("tags") or [],
+            # Absent counters are omitted, not stored as None or 0. `statistics` is
+            # typed `dict[str, int]`, so a None here fails validation and takes the
+            # whole item down -- and 0 would be a lie: "nobody watched it" and "the
+            # sidecar did not report views" are different facts. Any item arriving
+            # without a `stats` block previously crashed mapping for this reason.
             statistics={
-                "play_count": stats.get("play_count"),
-                "digg_count": stats.get("digg_count"),
-                "comment_count": stats.get("comment_count"),
-                "share_count": stats.get("share_count"),
-                "collect_count": stats.get("collect_count"),
+                key: int(stats[key])
+                for key in (
+                    "play_count",
+                    "digg_count",
+                    "comment_count",
+                    "share_count",
+                    "collect_count",
+                )
+                if isinstance(stats.get(key), (int, float))
             },
             media=self._map_media(raw),
             raw=raw,
@@ -366,17 +450,59 @@ class DouyinCaptureProvider(CaptureProvider):
 
     # ---- provider interface --------------------------------------------
     def health(self) -> ProviderHealth:
-        """Health check: can the sidecar answer?"""
+        """Can the sidecar answer, and are its dependencies up?
+
+        Probes ``/readyz``, not ``/api/v1/health``. Two reasons the old path was worse
+        than merely wrong: there is no ``/health`` route, so it fell through to the
+        console's SPA catch-all and returned ``200`` with an HTML body -- a health check
+        that cannot fail is not a health check. And readiness is the question we
+        actually have: a sidecar whose identity pool or datastore is down will accept
+        our request and then fail it.
+
+        Both endpoints sit outside ``/api/v1``, outside the ``{success, data, ...}``
+        envelope, and outside auth, so this works before a key is configured.
+        """
         try:
-            response = self._client.get(f"{API_PREFIX}/health")
-            ok = response.is_success
-            detail = f"sidecar HTTP {response.status_code}"
-            if ok:
-                body = response.json()
-                detail = body.get("status") or detail
-        except Exception as exc:
-            ok = False
-            detail = f"cannot reach sidecar: {exc}"
+            response = self._client.get("/readyz")
+        except httpx.RequestError as exc:
+            return ProviderHealth(
+                name=self.name,
+                ok=False,
+                detail=f"cannot reach sidecar at {self.base_url}: {exc}",
+                requires_credentials=self.api_key is not None,
+            )
+
+        ok = response.is_success
+        detail = f"sidecar HTTP {response.status_code}"
+        try:
+            body = response.json()
+        except ValueError:
+            # HTML here means we hit the SPA catch-all, i.e. this build has no
+            # /readyz. Report unknown rather than inventing a green light.
+            return ProviderHealth(
+                name=self.name,
+                ok=False,
+                detail=f"sidecar answered /readyz with non-JSON (HTTP {response.status_code})",
+                requires_credentials=self.api_key is not None,
+            )
+
+        if isinstance(body, dict):
+            status = str(body.get("status") or "").strip()
+            components = body.get("components")
+            if isinstance(components, dict):
+                down = sorted(
+                    name
+                    for name, state in components.items()
+                    if isinstance(state, dict) and not state.get("ok", True)
+                )
+                if down:
+                    # 200 with a failed component is still not ready. Naming the
+                    # component is the difference between an actionable report and
+                    # "capture is broken".
+                    ok = False
+                    status = f"{status or 'degraded'} (down: {', '.join(down)})"
+            detail = status or detail
+
         return ProviderHealth(
             name=self.name,
             ok=ok,
@@ -384,30 +510,114 @@ class DouyinCaptureProvider(CaptureProvider):
             requires_credentials=self.api_key is not None,
         )
 
+    @staticmethod
+    def _read_pagination(
+        data: Any, meta: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], str | None, bool]:
+        """Read ``(items, next_cursor, has_more)`` out of one list response.
+
+        The sidecar publishes the same two pagination values twice, in two shapes:
+        flat on ``data`` and nested under ``meta.cursor`` as an object. ``data`` is
+        preferred because it is the documented primary location and is present on both
+        the direct and the task-result paths; ``meta.cursor`` is the fallback, which is
+        what the task path fills via ``result_meta``.
+
+        ``has_more`` is only trusted when the response actually states it. Defaulting a
+        missing flag to ``True`` would spin, and defaulting a *present* ``True`` to
+        ``False`` would silently truncate -- so absence in both locations means "last
+        page", and that is the only safe default given a cursor we cannot interpret.
+        """
+        node = data if isinstance(data, dict) else {}
+        items = node.get("items")
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            raise ValidationError(
+                f"sidecar page carried {type(items).__name__} where an items list belongs",
+                got=type(items).__name__,
+            )
+
+        meta_cursor = meta.get("cursor")
+        # `meta.cursor` is an object. A bare string here means the contract moved, and
+        # coercing it would resurrect exactly the bug this method exists to fix.
+        nested = meta_cursor if isinstance(meta_cursor, dict) else {}
+
+        raw_cursor = node.get("cursor", nested.get("next"))
+        next_cursor = None if raw_cursor is None else str(raw_cursor)
+        if next_cursor is not None and len(next_cursor) > MAX_CURSOR_LEN:
+            raise ValidationError(
+                f"sidecar cursor exceeds the {MAX_CURSOR_LEN}-char contract maximum",
+                length=len(next_cursor),
+            )
+        # An empty-string cursor is not a usable cursor. Passing it back would re-fetch
+        # page 1 forever while `has_more` kept saying there is more.
+        if not next_cursor:
+            next_cursor = None
+
+        raw_more = node.get("has_more", nested.get("has_more"))
+        has_more = bool(raw_more) if raw_more is not None else False
+        return [item for item in items if isinstance(item, dict)], next_cursor, has_more
+
     def list_collections(self) -> list[CapturedCollection]:
-        """GET /{platform}/user/collections.
+        """GET /{platform}/user/collections, walked to completion.
 
         Note: this endpoint on Douyin takes **no author** and answers only about the
-        session sending it, which the sidecar identifies via the `identity` config.
+        session sending it, which the sidecar identifies via `identity`.
+
+        This endpoint is paginated too. Reading only its first page silently caps a
+        user at their 20 most recent folders, and every item in the folders beyond that
+        is then invisible to the whole system -- a data-loss bug that looks like an
+        empty library rather than an error. Cursor discipline matches
+        `walk_collection_sources`: a repeated cursor is a fault, not an ending.
         """
-        data, _meta = self._get(f"/{self.platform}/user/collections", {})
-        items = (data or {}).get("items") or []
-        return [self._map_collection(raw) for raw in items]
+        collections: list[CapturedCollection] = []
+        cursor: str | None = None
+        seen: set[str] = set()
+        for _ in range(MAX_COLLECTION_PAGES):
+            data, meta = self._get(
+                f"/{self.platform}/user/collections",
+                {"cursor": cursor, "count": self.page_size},
+            )
+            items, next_cursor, has_more = self._read_pagination(data, meta)
+            collections.extend(self._map_collection(raw) for raw in items)
+            if not has_more or next_cursor is None:
+                return collections
+            if next_cursor in seen:
+                raise ValidationError(
+                    "sidecar repeated a folder-list cursor; the walk cannot advance",
+                    cursor_repeated=True,
+                )
+            seen.add(next_cursor)
+            cursor = next_cursor
+        raise ValidationError(
+            f"folder list exceeded {MAX_COLLECTION_PAGES} pages; refusing to keep walking",
+            pages=MAX_COLLECTION_PAGES,
+        )
 
     def list_collection_sources(
         self, external_collection_id: str, *, cursor: str | None = None, limit: int = 50
     ) -> SourcePage:
-        """GET /{platform}/collection/posts."""
+        """GET /{platform}/collection/posts.
+
+        One page only: the walk lives in `walk_collection_sources`, so that the
+        decision about what counts as a *complete* traversal -- the thing membership
+        pruning depends on -- is made in one testable place rather than per provider.
+        """
         data, meta = self._get(
             f"/{self.platform}/collection/posts",
-            {"collection_id": external_collection_id, "cursor": cursor, "count": limit},
+            {
+                "collection_id": external_collection_id,
+                "cursor": cursor,
+                # A cursor is only valid for the query that produced it, so the page
+                # size must not drift mid-walk. Clamped because >50 is a 400.
+                "count": max(1, min(limit, MAX_PAGE_SIZE)),
+            },
         )
-        items = (data or {}).get("items") or []
-        sources = [self._map_source(raw) for raw in items]
+        items, next_cursor, has_more = self._read_pagination(data, meta)
         return SourcePage(
-            sources=sources,
-            next_cursor=meta.get("cursor"),
-            has_more=bool(meta.get("has_more", False)),
+            sources=[self._map_source(raw) for raw in items],
+            next_cursor=next_cursor,
+            has_more=has_more,
         )
 
     def fetch_source(self, external_id: str) -> CapturedSource:

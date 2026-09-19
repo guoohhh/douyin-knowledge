@@ -18,6 +18,11 @@ Three behaviors matter more than they look:
   and "what did I have saved in March" is a question this system is supposed to
   answer.
 
+* **Absence is only concluded from a complete listing.** Marking memberships absent
+  is the one destructive thing here, so it is gated on ``prune_missing``, which
+  ``sync_collection`` sets only when the page walk finished. See
+  ``capture/pagination.py`` for why that boolean is isolated.
+
 * **Snapshots accumulate only on change.** Each *different* payload becomes a
   `SourceSnapshot`, which is how a caption edit or a price change in the
   description stays visible after the fact.
@@ -31,6 +36,11 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
+from douyin_knowledge.capture.pagination import (
+    DEFAULT_MAX_PAGES,
+    CollectionWalker,
+    log_walk,
+)
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.core.text import content_hash
 from douyin_knowledge.db.models.capture import (
@@ -100,6 +110,12 @@ class CaptureSyncService:
     # -------------------------------------------------------------- collections
 
     def upsert_collection(self, captured: CapturedCollection) -> Collection:
+        """Record the folder itself. Deliberately does *not* stamp
+        `last_synced_at_ms`: this runs before the page walk, so stamping here would
+        mean "we started reading it", while the API and UI present the field as when
+        the collection was last successfully read through. `sync_sources` sets it, and
+        only on a complete listing.
+        """
         existing = self.session.scalars(
             select(Collection).where(
                 Collection.platform == self.platform,
@@ -114,7 +130,6 @@ class CaptureSyncService:
                 name=captured.name,
                 description=captured.description,
                 raw_json=self._raw_of(captured),
-                last_synced_at_ms=now_ms(),
             )
             self.session.add(collection)
             self.session.flush()
@@ -122,7 +137,6 @@ class CaptureSyncService:
 
         existing.name = captured.name
         existing.description = captured.description or existing.description
-        existing.last_synced_at_ms = now_ms()
         return existing
 
     def upsert_creator(self, captured: CapturedCreator) -> Creator:
@@ -185,7 +199,11 @@ class CaptureSyncService:
         if collection is not None and prune_missing:
             stats.memberships_removed += self._mark_absent(collection, seen_ids)
 
-        if collection is not None:
+        if collection is not None and prune_missing:
+            # Only a complete listing earns this timestamp. `prune_missing` already
+            # means "this batch is the whole collection", and stamping it after a
+            # partial walk would report a full sync that never happened -- which is
+            # also what the UI shows the user as "last updated".
             collection.last_synced_at_ms = now_ms()
 
         self.session.flush()
@@ -198,35 +216,45 @@ class CaptureSyncService:
         captured_collection: CapturedCollection,
         *,
         page_limit: int = 50,
-        max_pages: int = 200,
+        max_pages: int = DEFAULT_MAX_PAGES,
         stats: SyncStats | None = None,
     ) -> SyncStats:
-        """Walk a provider collection to completion and sync every page.
+        """Walk a provider collection and sync it, pruning only on a complete walk.
 
-        Pruning is applied only after the *last* page, because a mid-walk prune
-        would mark everything not yet seen as removed. `max_pages` bounds the
-        walk so a provider returning a non-advancing cursor cannot loop forever.
+        The `try/finally` is the point of this method. Whatever ends the walk --
+        a provider-stated end, a network failure on page 3, a cursor that stops
+        advancing -- the pages already fetched get persisted, and pruning happens
+        only if the walk is `safe_to_prune`. Upserts are idempotent and
+        non-destructive, so keeping partial pages costs nothing and saves re-fetching
+        them; marking memberships absent from a partial listing, by contrast, is
+        unrecoverable without a full successful re-sync.
+
+        An exception still propagates. The job that called us should fail and retry:
+        a sync that swallowed a mid-walk failure would report success over a library
+        it only partly read.
         """
         stats = stats or SyncStats()
         collection = self.upsert_collection(captured_collection)
+        walker = CollectionWalker(
+            provider,
+            captured_collection.external_collection_id,
+            page_limit=page_limit,
+            max_pages=max_pages,
+        )
 
-        collected: list[CapturedSource] = []
-        cursor: str | None = None
-        for _ in range(max_pages):
-            page = provider.list_collection_sources(
-                captured_collection.external_collection_id, cursor=cursor, limit=page_limit
+        try:
+            for _page_sources in walker.pages():
+                pass
+        finally:
+            prune = walker.walk.safe_to_prune
+            self.sync_sources(
+                walker.sources,
+                collection=collection,
+                prune_missing=prune,
+                stats=stats,
             )
-            collected.extend(page.sources)
-            if not page.has_more or not page.next_cursor or page.next_cursor == cursor:
-                break
-            cursor = page.next_cursor
-        else:
-            logger.warning(
-                "collection_walk_truncated",
-                extra={"collection": captured_collection.external_collection_id},
-            )
+            log_walk(walker.walk, pruned=prune)
 
-        self.sync_sources(collected, collection=collection, prune_missing=True, stats=stats)
         stats.collections += 1
         return stats
 
