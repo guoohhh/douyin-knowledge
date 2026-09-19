@@ -120,6 +120,10 @@ class Settings(BaseSettings):
     processor_version: str = "0.1.0"
     knowledge_schema_version: str = "knowledge-v1"
     media_retention: Literal["cache", "retained"] = "cache"
+    media_download_timeout_s: float = 120.0
+    # 200 MiB. A short-form clip is single-digit MiB; this is a runaway guard, not a
+    # budget, and it is enforced mid-stream rather than from Content-Length.
+    media_max_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
 
     # ---- worker ----------------------------------------------------------
     worker_poll_interval_s: float = 1.0

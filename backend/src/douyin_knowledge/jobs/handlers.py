@@ -26,6 +26,9 @@ from douyin_knowledge.core.errors import DKError, ValidationError
 from douyin_knowledge.extraction.orchestrator import ProcessingOrchestrator
 from douyin_knowledge.jobs.registry import HandlerRegistry, JobContext
 from douyin_knowledge.jobs.types import JobType, Priority
+from douyin_knowledge.media.downloader import MediaDownloader
+from douyin_knowledge.media.service import MediaAcquisitionService
+from douyin_knowledge.media.store import MediaStore
 from douyin_knowledge.observability import get_logger
 from douyin_knowledge.policy.evaluator import PolicyEvaluator
 from douyin_knowledge.policy.models import PolicyAction, PolicyDecision
@@ -182,6 +185,23 @@ def handle_process_source(ctx: JobContext) -> None:
     outcome = orchestrator.process_source(ctx.session, source_id, target_level=target_level)
     ctx.emit("processed", outcome.status, **outcome.as_dict())
 
+    if "asr_skipped_media_not_downloaded" in outcome.notes:
+        # The orchestrator is the authority on whether it wanted media and lacked it, so
+        # the trigger is its own note rather than a second copy of the level rules here.
+        #
+        # This cannot ping-pong with `handle_acquire_media`: a successful acquisition
+        # removes the note, and an unsuccessful one leaves the assets `failed` or
+        # `unavailable`, which produces a *different* note and no further enqueue.
+        result = ctx.queue.enqueue(
+            JobType.ACQUIRE_MEDIA,
+            source_id=source_id,
+            payload={"source_id": source_id, "target_level": target_level},
+            dedupe_key=f"acquire_media:{source_id}",
+            priority=Priority.BULK,
+        )
+        if result.created:
+            ctx.emit("media_acquisition_enqueued", "transcription needs local media")
+
     if outcome.status not in ("succeeded", "partial"):
         return
 
@@ -205,6 +225,71 @@ def handle_reprocess_source(ctx: JobContext) -> None:
     """Re-run extraction at a possibly higher level. A run is a new version, never a
     mutation, so this is the same call path as first processing (DB-004)."""
     handle_process_source(ctx)
+
+
+# ----------------------------------------------------------------------- media
+
+
+def _acquisition_service(ctx: JobContext) -> MediaAcquisitionService:
+    ctx.settings.ensure_directories()
+    store = MediaStore(ctx.settings.media_dir)
+    downloader = MediaDownloader(
+        store,
+        timeout_s=ctx.settings.media_download_timeout_s,
+        max_bytes=ctx.settings.media_max_bytes,
+    )
+    return MediaAcquisitionService(
+        ctx.session, store, downloader, max_attempts=ctx.settings.job_max_attempts
+    )
+
+
+def handle_acquire_media(ctx: JobContext) -> None:
+    """Download the media a source needs for transcription, then resume processing.
+
+    Policy is re-checked here and not merely trusted from the enqueuing job: this is the
+    most expensive step in the system, and a user who excluded a creator while the queue
+    was draining should not be billed for its bandwidth. That is the same reasoning as
+    ``_apply_policy`` in ``handle_process_source``, applied to a costlier resource.
+    """
+    source_id = ctx.job.source_id or _require(ctx.payload, "source_id")
+
+    allowed, decision = _apply_policy(ctx, source_id)
+    if not allowed:
+        ctx.emit(
+            "media_skipped_by_policy",
+            decision.reason_code,
+            action=str(decision.action),
+            rule_id=decision.rule_id,
+        )
+        return
+
+    service = _acquisition_service(ctx)
+    results = service.acquire_for_source(source_id)
+    if not results:
+        ctx.emit("media_nothing_to_acquire", "no pending transcribable assets")
+        return
+
+    ctx.emit(
+        "media_acquired",
+        f"{sum(1 for r in results if r.ready)} ready of {len(results)}",
+        results=[r.as_dict() for r in results],
+    )
+
+    if not any(r.ready for r in results):
+        # Every candidate was permanently unavailable. Reprocessing would reach the
+        # identical "no local media" conclusion, so the chain stops here rather than
+        # burning a run to restate it. The asset rows carry the reason.
+        return
+
+    # Resume the ladder now that there is something to transcribe. Keyed on the run
+    # trigger rather than the source alone so a later acquisition can re-arm it.
+    ctx.queue.enqueue(
+        JobType.PROCESS_SOURCE,
+        source_id=source_id,
+        payload={"target_level": ctx.payload.get("target_level")},
+        dedupe_key=f"process_source_after_media:{source_id}",
+        priority=Priority.NORMAL,
+    )
 
 
 # --------------------------------------------------------------------- indexing
@@ -301,6 +386,7 @@ def register_default_handlers(registry: HandlerRegistry | None = None) -> Handle
     registry = registry or HandlerRegistry()
     registry.register(JobType.SYNC_COLLECTIONS, handle_sync_collections)
     registry.register(JobType.SYNC_COLLECTION_SOURCES, handle_sync_collection_sources)
+    registry.register(JobType.ACQUIRE_MEDIA, handle_acquire_media)
     registry.register(JobType.PROCESS_SOURCE, handle_process_source)
     registry.register(JobType.REPROCESS_SOURCE, handle_reprocess_source)
     registry.register(JobType.REBUILD_FTS, handle_rebuild_fts)

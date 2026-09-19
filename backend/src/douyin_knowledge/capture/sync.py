@@ -41,6 +41,7 @@ from douyin_knowledge.capture.pagination import (
     CollectionWalker,
     log_walk,
 )
+from douyin_knowledge.config import get_settings
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.core.text import content_hash
 from douyin_knowledge.db.models.capture import (
@@ -52,6 +53,7 @@ from douyin_knowledge.db.models.capture import (
     SourceSnapshot,
 )
 from douyin_knowledge.db.models.processing import EvidenceUnit
+from douyin_knowledge.media.store import MediaStore, url_fingerprint
 from douyin_knowledge.observability.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -77,6 +79,7 @@ class SyncStats:
     sources_unchanged: int = 0
     snapshots: int = 0
     assets: int = 0
+    assets_superseded: int = 0
     memberships_removed: int = 0
     subtitles_captured: int = 0
     source_ids: list[str] = field(default_factory=list)
@@ -103,9 +106,19 @@ class CaptureSyncService:
     to the sync session, not to every payload.
     """
 
-    def __init__(self, session: Session, *, platform: str = "douyin") -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        platform: str = "douyin",
+        media_store: MediaStore | None = None,
+    ) -> None:
         self.session = session
         self.platform = platform
+        # Sync never downloads; it only needs the store to *name* local destinations and
+        # to delete superseded files. Defaulted so the many callers that do not care
+        # about media paths stay unchanged.
+        self.media_store = media_store or MediaStore(get_settings().media_dir)
 
     # -------------------------------------------------------------- collections
 
@@ -343,17 +356,25 @@ class CaptureSyncService:
                     stats.subtitles_captured += 1
                 continue
 
-            storage_key = media.url or f"{source.platform}/{source.external_id}/{media.kind}"
+            if not media.url:
+                # No URL and no inline text: there is nothing to record and nothing to
+                # fetch. A row here would be a permanent `unavailable` placeholder that
+                # every acquisition pass has to re-examine and reject.
+                continue
+
+            fingerprint = url_fingerprint(media.url)
             existing = self.session.scalars(
                 select(SourceAsset).where(
                     SourceAsset.source_id == source.id,
                     SourceAsset.asset_type == media.kind,
-                    SourceAsset.storage_key == storage_key,
+                    SourceAsset.remote_url_fingerprint == fingerprint,
                 )
             ).first()
             if existing is not None:
+                self._refresh_asset_url(existing, media.url)
                 continue
 
+            self._replace_stale_assets(source, media.kind, fingerprint, stats)
             self.session.add(
                 SourceAsset(
                     source_id=source.id,
@@ -361,7 +382,19 @@ class CaptureSyncService:
                     # 'cache' means: safe to delete and re-fetch. Nothing here is
                     # irreplaceable, because the URLs are provider-signed anyway.
                     retention_class="cache",
-                    storage_key=storage_key,
+                    storage_key=self.media_store.build_storage_key(
+                        platform=source.platform,
+                        external_id=source.external_id,
+                        asset_type=media.kind,
+                        url=media.url,
+                        mime_type=media.mime_type,
+                    ),
+                    remote_url=media.url,
+                    remote_url_fingerprint=fingerprint,
+                    # Recorded, not fetched. Acquisition is a separate job so a sync of a
+                    # thousand items does not block on a thousand downloads, and so the
+                    # processing policy gets to veto the cost first (DEC-014).
+                    download_state=SourceAsset.DOWNLOAD_PENDING,
                     mime_type=media.mime_type,
                     byte_size=media.byte_size,
                     duration_ms=media.duration_ms,
@@ -370,6 +403,49 @@ class CaptureSyncService:
                 )
             )
             stats.assets += 1
+
+    def _refresh_asset_url(self, asset: SourceAsset, url: str) -> None:
+        """Update the signed URL without disturbing local state.
+
+        The fingerprint matched, so this is the same remote file re-signed. Overwriting
+        `download_state` here would discard a good local copy on every sync and make
+        ASR re-run forever; only `remote_url` is allowed to move.
+        """
+        if asset.remote_url != url:
+            asset.remote_url = url
+            self.session.flush()
+
+    def _replace_stale_assets(
+        self, source: Source, kind: str, fingerprint: str, stats: SyncStats
+    ) -> None:
+        """Retire same-kind assets whose remote file is no longer the current one.
+
+        A different fingerprint for the same source and kind means the provider is now
+        pointing at different content -- re-uploaded, re-encoded, or replaced. The old
+        local file is stale: keeping it `ready` would let ASR transcribe the superseded
+        video and attach that evidence to the current source. So the bytes go and the
+        row is marked `unavailable`, which is terminal and keeps it out of the
+        acquisition queue while preserving the historical record that it existed.
+
+        Legacy rows with a NULL fingerprint (pre-DEC-014) are retired too: their
+        `storage_key` was a URL, so there is no trustworthy local file behind them.
+        """
+        stale = self.session.scalars(
+            select(SourceAsset).where(
+                SourceAsset.source_id == source.id,
+                SourceAsset.asset_type == kind,
+                SourceAsset.remote_url_fingerprint.is_distinct_from(fingerprint),
+            )
+        ).all()
+        for asset in stale:
+            if asset.download_state == SourceAsset.DOWNLOAD_UNAVAILABLE:
+                continue
+            self.media_store.delete(asset.storage_key)
+            asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
+            asset.download_error = "superseded by a newer asset for this source"
+            stats.assets_superseded += 1
+        if stale:
+            self.session.flush()
 
     def _store_subtitle_evidence(
         self, source: Source, text: str, language: str | None

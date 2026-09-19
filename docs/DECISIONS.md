@@ -148,6 +148,26 @@ Separately, `list_collections` read only its first page, capping a user at their
 
 ---
 
+### DEC-014: A media asset's remote URL, its local path, and whether it was fetched are three different columns
+
+**Decision**: `SourceAsset` separates `remote_url` (where the bytes came from), `storage_key` (a machine-independent relative path under `DK_DATA_DIR/media` naming where they live locally), and `download_state` (whether they are actually on disk). Acquisition is its own job type, `acquire_media`, placed between capture and processing. Asset identity across re-signing is a `remote_url_fingerprint` over **host and path only**.
+
+**Rationale**: `capture/sync.py` wrote `storage_key = media.url`, i.e. the provider's absolute signed URL, into a field the orchestrator resolves as `media_dir / storage_key`. Joining a directory with a URL yields a path that cannot exist, so every real source silently recorded `asr_skipped_media_not_downloaded` — silently because a missing transcript is not a run failure. No test could catch it: fixtures carry an inline `native_subtitle`, so demo mode reaches level 2 without ever asking for media. One column cannot carry three meanings, which is why this is a schema change and not the field rename the old gap note contemplated.
+
+Fingerprinting host and path only is the load-bearing subtlety. Douyin re-signs media URLs on every capture, so a fingerprint over the whole URL would report "content changed" on every sync and re-download everything forever. The cost is that two assets on the same source with the same `asset_type`, distinguished purely by query parameters, would collide — the narrow and unlikely case, whereas re-signing is the guaranteed one.
+
+Acquisition is a separate job so that a sync of a thousand items does not block on a thousand downloads, each download carries its own retry budget, and the Processing Policy gets to veto the spend. Policy is re-evaluated inside the handler rather than trusted from whoever enqueued it: this is the most expensive step in the system, and a user who excludes a creator while the queue drains must not be billed for the bandwidth.
+
+**Consequence**: A matched fingerprint means the same remote file was re-signed, so only `remote_url` moves; overwriting `download_state` there would discard a good local copy on every sync and make ASR re-run forever. A *changed* fingerprint means the upload was genuinely replaced, so the stale local file is deleted and its row marked `unavailable` — terminal, which keeps it out of the acquisition queue while preserving the historical record. Leaving it `ready` would let ASR transcribe superseded content and attach that evidence to the current source.
+
+Downloads are HTTPS-only with the scheme re-checked at every redirect hop (httpx's own follower would happily follow `https → http`), redirects are walked manually under a hard hop limit, and the byte cap is enforced mid-stream rather than trusted from `Content-Length`. Bytes land in a `.part` file and are atomically replaced into position, because a half-written file that *looks* present would be handed to ASR and its garbage stored as evidence. `MediaDownloadFailed` is retryable; `MediaTooLarge` and `MediaAssetGone` subclass `ValidationError` and are not, so the queue's existing taxonomy decides retry policy rather than the downloader.
+
+This safety envelope is the one clear win from the GPT implementation, reimplemented inside this data model rather than copied. Three adaptations were deliberate: GPT downloaded into a `TemporaryDirectory` inside the transcribe call, so every retry re-fetched and a crash left nothing resumable; it raised bare `ValueError`/`RuntimeError`, which this queue would classify non-retryable and fail permanently; and it wrote straight to the destination. Its `ffmpeg` transcode step and its caption-based `should_transcribe` heuristic were **not** adopted — `ffmpeg` is not a declared dependency, and cheap triage belongs to the content-type policy work.
+
+**Evidence**: `media/store.py`, `media/downloader.py`, `media/service.py`; `migrations/versions/0003_media_acquisition_state.py`; `jobs/handlers.py:handle_acquire_media`; `tests/unit/test_media_store.py`, `test_media_downloader.py`, `test_media_acquisition.py`, `test_media_jobs.py`, `test_media_migration_backfill.py`, `test_media_asr_closes_loop.py`.
+
+---
+
 ## Known gaps
 
 These are true limitations, not deferred decisions. Each is either invisible in normal use or visible and harmless; none is load-bearing for V1 acceptance.
@@ -162,7 +182,7 @@ These are true limitations, not deferred decisions. Each is either invisible in 
 
 **Media retention is configured but coarse.** `media_retention` chooses a policy for all sources; per-collection retention is not implemented.
 
-**`storage_key` holds the provider's absolute URL, so ASR never runs on real media.** `capture/sync.py` writes the remote URL into `SourceAsset.storage_key` instead of a path under `DK_DATA_DIR/media`. Level 2 on the `douyin` provider therefore has nothing local to transcribe. Demo mode is unaffected and reaches level 2, because the fixtures carry an inline `native_subtitle` and never need ASR — which is exactly why the whole test suite stays green while the real-provider path is broken. Fixing it means deciding where download belongs (its own job, most likely) rather than renaming a field.
+**Audio is handed to ASR without transcoding.** The downloaded file goes to the provider as-is, so a container the ASR backend cannot read fails at transcription rather than being converted first. `ffmpeg` is not a declared dependency and making it one is a packaging decision, not a bug fix; see DEC-014.
 
 **A failed run loses its partial output, and only says so in a count.** The worker's `session_scope` rolls back on any exception, so evidence, mentions, claims and chunks produced before a failure are destroyed and must be re-derived — at the cost of re-running paid ASR and extraction — on retry. The *audit* now survives (see below), and records how much was discarded in `processing_runs.config_json.discarded_partial_output`, but the work itself does not. Making a retry cheap needs checkpoint/resume: per-level completion tracking, idempotent re-entry, and a staleness rule for when cached evidence must be discarded anyway because `processor_version` or the model set changed. That is a design change, not a bug fix, and it is not in V1.
 

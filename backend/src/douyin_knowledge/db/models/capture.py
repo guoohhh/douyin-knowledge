@@ -121,7 +121,27 @@ class SourceAsset(Base):
     __table_args__ = (
         Index("ix_source_assets_source_type", "source_id", "asset_type"),
         Index("ix_source_assets_retention_expires", "retention_class", "expires_at_ms"),
+        # The acquisition worker's query is "which assets still need bytes?", scoped by
+        # state. Without this it is a full scan of every asset ever recorded.
+        Index("ix_source_assets_download_state", "download_state"),
+        # Dedupe lookup on sync: one row per remote file per source and type. Not
+        # UNIQUE -- a legacy row from before DEC-014 has a NULL fingerprint, and
+        # several of those on one source would collide under a unique constraint.
+        Index(
+            "ix_source_assets_identity",
+            "source_id",
+            "asset_type",
+            "remote_url_fingerprint",
+        ),
     )
+
+    #: ``download_state`` vocabulary. Deliberately not an enum column: SQLite would not
+    #: enforce it anyway, and a new state should not require a migration.
+    DOWNLOAD_PENDING = "pending"
+    DOWNLOAD_READY = "ready"
+    DOWNLOAD_FAILED = "failed"
+    DOWNLOAD_UNAVAILABLE = "unavailable"
+    DOWNLOAD_SKIPPED = "skipped"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True, default=lambda: new_id("ast"))
     source_id: Mapped[str] = mapped_column(
@@ -129,7 +149,21 @@ class SourceAsset(Base):
     )
     asset_type: Mapped[str] = mapped_column(Text, nullable=False)
     retention_class: Mapped[str] = mapped_column(Text, nullable=False, default="cache")
+    # A *local, relative* path under DK_DATA_DIR/media -- never the provider's URL, and
+    # never absolute (AGENTS s14). Naming the destination is not the same as having
+    # fetched it; `download_state` answers that (DEC-014).
     storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    # Where the bytes come from. Provider-signed and short-lived, so this is refreshed
+    # on every capture while `storage_key` stays put.
+    remote_url: Mapped[str | None] = mapped_column(Text)
+    # Hash of the *stable* part of remote_url (host+path). Identity of the remote file
+    # across re-signing, and the dedupe key for "is this the asset we already have?".
+    remote_url_fingerprint: Mapped[str | None] = mapped_column(Text)
+    download_state: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    download_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    downloaded_at_ms: Mapped[int | None] = mapped_column(Integer)
+    # Kept as text, not a code: it is shown to a human asking why ASR never ran.
+    download_error: Mapped[str | None] = mapped_column(Text)
     mime_type: Mapped[str | None] = mapped_column(Text)
     byte_size: Mapped[int | None] = mapped_column(Integer)
     sha256: Mapped[str | None] = mapped_column(Text)

@@ -37,6 +37,9 @@ from douyin_knowledge.db.models.processing import (
 from douyin_knowledge.extraction.claim_extractor import ClaimExtractor
 from douyin_knowledge.extraction.entity_extractor import EntityExtractor
 from douyin_knowledge.extraction.entity_resolver import EntityResolver
+from douyin_knowledge.media.downloader import MediaDownloader
+from douyin_knowledge.media.service import MediaAcquisitionService
+from douyin_knowledge.media.store import MediaStore
 from douyin_knowledge.observability.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -400,22 +403,33 @@ class ProcessingOrchestrator:
         self, session: Session, source: Source, run: ProcessingRun, outcome: ProcessingOutcome
     ) -> list[EvidenceUnit]:
         assert self.asr_provider is not None
-        audio = session.scalars(
-            select(SourceAsset).where(
-                SourceAsset.source_id == source.id,
-                SourceAsset.asset_type.in_(["audio", "video"]),
-            )
-        ).first()
-        if audio is None:
+        store = MediaStore(self.settings.media_dir)
+        service = MediaAcquisitionService(
+            session,
+            store,
+            # ASR never downloads. Acquisition is its own job so the cost is visible,
+            # retryable, and gated by policy before it is spent (DEC-014); this call
+            # only asks which already-local file to transcribe.
+            MediaDownloader(store),
+        )
+        candidates = service.transcribable_assets(source.id)
+        if not candidates:
             outcome.notes.append("asr_skipped_no_media")
             return []
 
-        # storage_key is a local path only once the media has been downloaded;
-        # a remote URL means the fetch step has not run, so ASR is not possible.
-        local = self.settings.media_dir / audio.storage_key
-        if not local.exists():
-            outcome.notes.append("asr_skipped_media_not_downloaded")
+        audio = service.local_asset_for_asr(source.id)
+        if audio is None:
+            # Distinguish "never fetched" from "fetching failed": the first is a queue
+            # that has not drained, the second needs a human to look. Collapsing both
+            # into one note is what let the storage_key bug hide for so long.
+            states = {a.download_state for a in candidates}
+            if states & {SourceAsset.DOWNLOAD_FAILED, SourceAsset.DOWNLOAD_UNAVAILABLE}:
+                outcome.notes.append("asr_skipped_media_unavailable")
+            else:
+                outcome.notes.append("asr_skipped_media_not_downloaded")
             return []
+
+        local = store.resolve(audio.storage_key)
 
         try:
             response = self.asr_provider.transcribe(str(local))

@@ -29,6 +29,7 @@ else:
 class JobType(StrEnum):
     SYNC_COLLECTIONS = "sync_collections"
     SYNC_COLLECTION_SOURCES = "sync_collection_sources"
+    ACQUIRE_MEDIA = "acquire_media"
     PROCESS_SOURCE = "process_source"
     ENRICH_SOURCE = "enrich_source"
     REPROCESS_SOURCE = "reprocess_source"
