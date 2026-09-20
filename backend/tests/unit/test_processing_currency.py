@@ -9,13 +9,47 @@ Related: superseded runs cannot leak into current retrieval/wiki/answers.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from douyin_knowledge.ai.adapters.mock_adapter import MockStructuredModel
+from douyin_knowledge.capture.models import CapturedCreator, CapturedMedia, CapturedSource
+from douyin_knowledge.capture.sync import CaptureSyncService
+from douyin_knowledge.config import Settings
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.policy import SourceProcessingState
 from douyin_knowledge.db.models.processing import EvidenceUnit, ProcessingRun
+from douyin_knowledge.extraction.orchestrator import ProcessingOrchestrator
+
+SUBTITLE = "在中环有一家好运茶餐厅，叉烧饭人均八十块钱。"
+
+
+def _processed_source(session: Session, settings: Settings) -> Source:
+    """One source taken through a real successful run, so the pointer is real."""
+    service = CaptureSyncService(session)
+    service.sync_sources(
+        [
+            CapturedSource(
+                platform="douyin",
+                external_id="s_currency_real",
+                title="一家茶餐厅",
+                creator=CapturedCreator(external_creator_id="c_cur", display_name="阿明"),
+                media=[CapturedMedia(kind="subtitle", text=SUBTITLE, language="zh")],
+            )
+        ]
+    )
+    source = session.scalars(
+        select(Source).where(Source.external_id == "s_currency_real")
+    ).one()
+    ProcessingOrchestrator(settings, structured_model=MockStructuredModel()).process_source(
+        session, source.id, target_level=2
+    )
+    session.flush()
+    return source
 
 
 @pytest.fixture
@@ -82,30 +116,63 @@ def _evidence(session: Session, source: Source, run: ProcessingRun, text: str) -
 
 
 class TestFailedReprocessingPreservesCurrentRun:
-    def test_failed_run_does_not_displace_successful_current_run(
-        self, session: Session, source: Source, state: SourceProcessingState
+    def test_failed_reprocessing_leaves_the_prior_run_current(
+        self, session: Session, settings: Settings
     ) -> None:
         """A reprocessing failure must not break retrieval/wiki/citations.
 
-        Before this behavior: reprocessing starts, fails at level 0, advances the pointer
-        anyway, and the source vanishes from search because it now points at a run with no
-        evidence.
+        This drives the real orchestrator rather than hand-writing rows: the pointer is only
+        trustworthy if the code that *moves* it declines to move it on failure. An earlier
+        version of this test created a failed run by hand and asserted the pointer had not
+        changed, which nothing in the test could have changed -- it passed no matter how
+        `_advance_currency` behaved.
         """
-        # Initial successful run
+        source = _processed_source(session, settings)
+        state = session.get(SourceProcessingState, source.id)
+        assert state is not None
+        first_run_id = state.current_processing_run_id
+        assert first_run_id is not None
+        assert state.processing_status == "processed"
+
+        # Reprocess with an extractor that fails part-way through.
+        orchestrator = ProcessingOrchestrator(settings, structured_model=MockStructuredModel())
+        with patch.object(
+            orchestrator.entity_extractor,
+            "extract_from_evidence",
+            side_effect=RuntimeError("model exploded"),
+        ):
+            with pytest.raises(RuntimeError):
+                orchestrator.process_source(session, source.id, target_level=2)
+
+        # The orchestrator re-raises for the worker's rollback; the pointer it wrote before
+        # the failure is the one that must survive.
+        session.expire(state)
+        assert state.current_processing_run_id == first_run_id, (
+            "a failed reprocess must leave the prior successful run current"
+        )
+
+        failed = session.scalars(
+            select(ProcessingRun).where(
+                ProcessingRun.source_id == source.id, ProcessingRun.status == "failed"
+            )
+        ).all()
+        assert len(failed) == 1, "the failure is still recorded for audit"
+        assert failed[0].id != first_run_id
+
+    def test_failed_run_does_not_displace_successful_current_run(
+        self, session: Session, source: Source, state: SourceProcessingState
+    ) -> None:
+        """The same invariant stated directly on the pointer, for the hand-built fixtures."""
         run1 = _run(session, source, status="succeeded", achieved_level=2)
         _evidence(session, source, run1, "好运茶餐厅人均八十块")
 
-        # Mark it current
         state.current_processing_run_id = run1.id
         state.processing_status = "succeeded"
         session.flush()
 
-        # Reprocessing attempt fails
         _run(session, source, status="failed", achieved_level=0)
-        # No evidence created for failed run
         session.flush()
 
-        # The current pointer must not have moved
         session.expire(state)
         assert state.current_processing_run_id == run1.id
         assert state.processing_status == "succeeded"
