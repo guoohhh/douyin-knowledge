@@ -464,13 +464,15 @@ class CaptureSyncService:
         eligible as current ASR input. This handles complete media disappearance, not
         just replacement (video A → video B), which `_replace_stale_assets` covers.
         """
-        disappeared = self.session.scalars(
-            select(SourceAsset).where(
-                SourceAsset.source_id == source.id,
-                SourceAsset.asset_type.notin_(current_kinds) if current_kinds else True,
-                SourceAsset.download_state != SourceAsset.DOWNLOAD_UNAVAILABLE,
-            )
-        ).all()
+        stmt = select(SourceAsset).where(
+            SourceAsset.source_id == source.id,
+            SourceAsset.download_state != SourceAsset.DOWNLOAD_UNAVAILABLE,
+        )
+        if current_kinds:
+            # An empty `current_kinds` means the capture carried no media at all, so
+            # every existing asset has disappeared and no exclusion filter applies.
+            stmt = stmt.where(SourceAsset.asset_type.notin_(current_kinds))
+        disappeared = self.session.scalars(stmt).all()
         for asset in disappeared:
             self.media_store.delete(asset.storage_key)
             asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
