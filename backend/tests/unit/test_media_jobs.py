@@ -227,3 +227,58 @@ class TestChaining:
         assert asset is not None
         assert asset.download_attempts == 1
         assert asset.download_error is not None
+
+
+class TestFailurePersistence:
+    def test_retryable_failure_persists_across_worker_rollback(
+        self,
+        session: Session,
+        settings: Settings,
+        seeded: Source,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Retryable download failure state must survive the worker's transaction rollback.
+
+        The production Worker executes the handler inside session_scope(). If the handler
+        raises, that transaction rolls back before _record_failure() opens a fresh
+        transaction. The current unit test calls handle_acquire_media() directly in one
+        test Session, so it does not prove the failure state survives the real worker
+        rollback.
+
+        This test goes through the real Worker.run_once() path to ensure attempts/error
+        are genuinely durable after the handler transaction rolled back.
+        """
+        from douyin_knowledge.db import session_scope
+        from douyin_knowledge.jobs.handlers import register_default_handlers
+        from douyin_knowledge.jobs.worker import Worker
+
+        def flaky(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503)
+
+        patch_transport(monkeypatch, flaky)
+
+        # Enqueue the job in a committed transaction
+        with session.begin_nested():
+            queue = JobQueue(session)
+            queue.enqueue(
+                JobType.ACQUIRE_MEDIA,
+                source_id=seeded.id,
+                payload={"source_id": seeded.id, "target_level": 2},
+            )
+        session.commit()
+
+        # Run the worker - this will claim, execute, fail, rollback, then record failure
+        worker = Worker(register_default_handlers(), settings=settings, name="test")
+        worked = worker.run_once()
+        assert worked, "worker should have claimed the job"
+
+        # Open a fresh session to verify the failure state persisted
+        with session_scope() as fresh_session:
+            asset = fresh_session.scalars(
+                select(SourceAsset).where(SourceAsset.source_id == seeded.id)
+            ).first()
+            assert asset is not None
+            assert asset.download_attempts == 1, "attempt counter must survive rollback"
+            assert asset.download_error is not None, "error message must survive rollback"
+            assert "503" in asset.download_error or "Service Unavailable" in asset.download_error
+

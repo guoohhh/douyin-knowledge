@@ -46,9 +46,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 #: Actions under which a source's knowledge must not reach normal retrieval, the wiki, or
-#: current answers. ``metadata_only`` is deliberately *not* here: it caps how deep
-#: extraction goes, and whatever was legitimately extracted stays citable.
-HIDDEN_ACTIONS = frozenset({PolicyAction.EXCLUDE.value})
+#: current answers. ``metadata_only`` stops before knowledge processing, so its content was
+#: never actually understood (PROCESSING_POLICY §12). ``exclude`` is a hard block. Both
+#: preserve historical runs/evidence/claims if they exist, so rule reversal restores
+#: eligibility without reprocessing, but while the rule is active neither may be cited.
+HIDDEN_ACTIONS = frozenset({PolicyAction.EXCLUDE.value, PolicyAction.METADATA_ONLY.value})
 
 
 @dataclass(frozen=True)

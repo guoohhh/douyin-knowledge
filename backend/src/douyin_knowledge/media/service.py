@@ -26,10 +26,38 @@ from douyin_knowledge.observability import get_logger
 
 logger = get_logger(__name__)
 
+#: Attribute name for audit replay on retryable exceptions. Same constant as orchestrator.
+AUDIT_REPLAY_ATTR = "dk_audit_replay"
+
 # Asset kinds worth fetching for transcription. Images are excluded: OCR/Vision is
 # explicitly out of scope for this pass, so downloading covers would cost bandwidth for
 # a capability that does not exist yet.
 TRANSCRIBABLE_TYPES = ("audio", "video")
+
+
+@dataclass(frozen=True)
+class AssetFailureAudit:
+    """Retryable download failure state, in plain values, ready to re-apply after rollback.
+
+    When MediaAcquisitionService.acquire() raises a retryable exception, the handler's
+    transaction rolls back before _record_failure() opens a fresh one. Without this audit,
+    the attempts counter and error message written in the doomed transaction are lost.
+    Carried out on the exception and applied by the worker's failure boundary.
+    """
+
+    asset_id: str
+    download_attempts: int
+    download_error: str
+
+    def apply(self, session: Session) -> None:
+        """Re-apply the failure state that was rolled back with the handler transaction."""
+        asset = session.get(SourceAsset, self.asset_id)
+        if asset is None:
+            return
+        asset.download_attempts = self.download_attempts
+        asset.download_state = SourceAsset.DOWNLOAD_FAILED
+        asset.download_error = self.download_error
+        session.flush()
 
 
 @dataclass(slots=True)
@@ -164,6 +192,15 @@ class MediaAcquisitionService:
                 "media_acquire_failed",
                 extra={"asset_id": asset.id, "attempts": asset.download_attempts},
             )
+            # Attach audit replay so the failure state survives the worker's rollback.
+            # The handler's transaction rolls back on exception, but _record_failure()
+            # opens a fresh one and calls audit.apply() to restore attempts/error.
+            audit = AssetFailureAudit(
+                asset_id=asset.id,
+                download_attempts=asset.download_attempts,
+                download_error=asset.download_error,
+            )
+            setattr(exc, AUDIT_REPLAY_ATTR, audit)
             # Re-raised so the queue applies its own retry policy rather than this
             # service inventing a second one. The row already records the attempt, so
             # the failure is observable even if the job is never retried.

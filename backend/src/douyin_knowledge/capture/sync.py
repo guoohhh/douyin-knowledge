@@ -350,6 +350,9 @@ class CaptureSyncService:
         level-2 `EvidenceUnit` directly. This is why the demo reaches level 2
         without ffmpeg or an ASR key.
         """
+        # Track which asset types are present in this capture
+        current_kinds: set[str] = set()
+
         for media in captured.media:
             if media.kind == "subtitle" and media.text:
                 if self._store_subtitle_evidence(source, media.text, media.language):
@@ -362,6 +365,7 @@ class CaptureSyncService:
                 # every acquisition pass has to re-examine and reject.
                 continue
 
+            current_kinds.add(media.kind)
             fingerprint = url_fingerprint(media.url)
             existing = self.session.scalars(
                 select(SourceAsset).where(
@@ -404,6 +408,9 @@ class CaptureSyncService:
             )
             stats.assets += 1
 
+        # Retire assets whose type disappeared entirely from the new capture
+        self._retire_disappeared_assets(source, current_kinds, stats)
+
     def _refresh_asset_url(self, asset: SourceAsset, url: str) -> None:
         """Update the signed URL without disturbing local state.
 
@@ -445,6 +452,31 @@ class CaptureSyncService:
             asset.download_error = "superseded by a newer asset for this source"
             stats.assets_superseded += 1
         if stale:
+            self.session.flush()
+
+    def _retire_disappeared_assets(
+        self, source: Source, current_kinds: set[str], stats: SyncStats
+    ) -> None:
+        """Retire assets whose type is no longer present in the authoritative capture.
+
+        When a source initially has video A (downloaded and ready), but a later
+        authoritative capture contains no video at all, the old asset must not remain
+        eligible as current ASR input. This handles complete media disappearance, not
+        just replacement (video A → video B), which `_replace_stale_assets` covers.
+        """
+        disappeared = self.session.scalars(
+            select(SourceAsset).where(
+                SourceAsset.source_id == source.id,
+                SourceAsset.asset_type.notin_(current_kinds) if current_kinds else True,
+                SourceAsset.download_state != SourceAsset.DOWNLOAD_UNAVAILABLE,
+            )
+        ).all()
+        for asset in disappeared:
+            self.media_store.delete(asset.storage_key)
+            asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
+            asset.download_error = "media type disappeared from authoritative capture"
+            stats.assets_superseded += 1
+        if disappeared:
             self.session.flush()
 
     def _store_subtitle_evidence(

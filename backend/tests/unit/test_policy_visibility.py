@@ -186,13 +186,14 @@ def test_reindexing_after_reversal_restores_the_index(
     assert not HybridRetriever(session).retrieve(QUERY, limit=5).is_empty()
 
 
-def test_metadata_only_stays_citable(
+def test_metadata_only_removes_from_retrieval(
     session: Session, settings: Settings, indexed: Source
 ) -> None:
-    """`metadata_only` caps extraction depth; it is not a visibility change.
+    """`metadata_only` stops before knowledge processing; content was never understood.
 
-    Folding it into the hidden set would quietly delete whatever had already been
-    extracted from view, which is a different product decision than the one asked for.
+    PROCESSING_POLICY §12: "metadata_only sources should not appear in normal AI knowledge
+    answers because their content was never actually understood." This is distinct from
+    `exclude` semantically, but both are HIDDEN_ACTIONS for retrieval/wiki/answers.
     """
     repo = PolicyRepository(session)
     rule = repo.save_rule(
@@ -209,4 +210,88 @@ def test_metadata_only_stays_citable(
     )
     PolicyReconciler(session, repo).reconcile_rule(rule.id)
 
+    assert HybridRetriever(session).retrieve(QUERY, limit=5).is_empty()
+
+
+def test_metadata_only_preserves_history_for_reversal(
+    session: Session, settings: Settings, indexed: Source
+) -> None:
+    """metadata_only -> process does not require reprocessing if already processed.
+
+    A source processed, then switched to metadata_only, then back to process should still
+    have its original runs/evidence/claims intact. History is preserved, only visibility
+    changes.
+    """
+    runs_before = {r.id for r in session.scalars(select(ProcessingRun)).all()}
+    evidence_before = {e.id for e in session.scalars(select(EvidenceUnit)).all()}
+    claims_before = {c.id for c in session.scalars(select(Claim)).all()}
+    assert runs_before and evidence_before
+
+    repo = PolicyRepository(session)
+    rule = repo.save_rule(
+        ProcessingRule(
+            id="",
+            name="shallow",
+            is_enabled=True,
+            rule_type=RuleType.SOURCE,
+            action=PolicyAction.METADATA_ONLY,
+            priority=0,
+            target_source_id=indexed.id,
+            origin="user",
+        )
+    )
+    reconciler = PolicyReconciler(session, repo)
+    reconciler.reconcile_rule(rule.id)
+
+    # While metadata_only, not retrievable
+    assert HybridRetriever(session).retrieve(QUERY, limit=5).is_empty()
+
+    # Reverse the rule
+    affected = reconciler.affected_source_ids(rule.id)
+    repo.delete_rule(rule.id)
+    reconciler.reconcile_sources(affected)
+
+    # History intact, retrieval restored
+    assert {r.id for r in session.scalars(select(ProcessingRun)).all()} == runs_before
+    assert {e.id for e in session.scalars(select(EvidenceUnit)).all()} == evidence_before
+    assert {c.id for c in session.scalars(select(Claim)).all()} == claims_before
     assert not HybridRetriever(session).retrieve(QUERY, limit=5).is_empty()
+
+
+def test_metadata_only_source_still_discoverable_via_explicit_metadata_search(
+    session: Session, settings: Settings, indexed: Source
+) -> None:
+    """metadata_only sources hidden from knowledge retrieval, visible in metadata search.
+
+    PROCESSING_POLICY §12: "basic metadata search may still allow queries such as:
+    Show me videos I skipped from creator X"
+    """
+    repo = PolicyRepository(session)
+    rule = repo.save_rule(
+        ProcessingRule(
+            id="",
+            name="shallow",
+            is_enabled=True,
+            rule_type=RuleType.SOURCE,
+            action=PolicyAction.METADATA_ONLY,
+            priority=0,
+            target_source_id=indexed.id,
+            origin="user",
+        )
+    )
+    PolicyReconciler(session, repo).reconcile_rule(rule.id)
+
+    # Not in knowledge retrieval
+    assert HybridRetriever(session).retrieve(QUERY, limit=5).is_empty()
+
+    # But the Source row still exists and is queryable by metadata
+    from douyin_knowledge.db.models.policy import SourceProcessingState
+
+    state = session.get(SourceProcessingState, indexed.id)
+    assert state is not None
+    assert state.current_policy_action == PolicyAction.METADATA_ONLY.value
+
+    # The source itself is still in the database
+    source = session.get(Source, indexed.id)
+    assert source is not None
+    assert source.title == "一家茶餐厅"
