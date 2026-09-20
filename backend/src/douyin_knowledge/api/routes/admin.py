@@ -29,6 +29,7 @@ from douyin_knowledge.db.models.search import SearchDocument, VectorDocument
 from douyin_knowledge.db.models.wiki import WikiLintFinding, WikiPage, WikiRevision
 from douyin_knowledge.jobs.types import JobType, Priority
 from douyin_knowledge.policy.models import PolicyAction, ProcessingRule, RuleType
+from douyin_knowledge.policy.reconciler import PolicyReconciler
 
 router = APIRouter()
 
@@ -354,7 +355,15 @@ def list_rules(
 
 
 @router.post("/policy/rules", status_code=201)
-def create_rule(request: RuleRequest, policy: PolicyRepositoryDep) -> dict[str, Any]:
+def create_rule(
+    request: RuleRequest, policy: PolicyRepositoryDep, db: DbSession
+) -> dict[str, Any]:
+    """Create a rule and immediately apply it to sources that already exist.
+
+    Reconciling here rather than leaving it to a background job is what makes the rule feel
+    like a setting instead of a request: a user who excludes a creator expects that
+    creator's videos to be gone from search by the time the page re-renders (DEC-015).
+    """
     rule = ProcessingRule(
         id="",  # assigned by the database default
         name=request.name,
@@ -368,14 +377,47 @@ def create_rule(request: RuleRequest, policy: PolicyRepositoryDep) -> dict[str, 
         matcher_json=request.matcher,
         origin="user",
     )
-    return _rule_payload(policy.save_rule(rule))
+    saved = policy.save_rule(rule)
+    summary = PolicyReconciler(db, policy).reconcile_rule(saved.id)
+    return {**_rule_payload(saved), "reconciled": summary.as_dict()}
+
+
+@router.patch("/policy/rules/{rule_id}")
+def set_rule_enabled(
+    rule_id: str, enabled: bool, policy: PolicyRepositoryDep, db: DbSession
+) -> dict[str, Any]:
+    """Enable or disable a rule. Disabling is the reversible form of deleting it."""
+    reconciler = PolicyReconciler(db, policy)
+    # The affected set is read from the rule's target, which disabling does not change,
+    # so order does not matter here the way it does for delete.
+    updated = policy.set_rule_enabled(rule_id, enabled)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="rule not found")
+    summary = reconciler.reconcile_rule(rule_id)
+    return {**_rule_payload(updated), "reconciled": summary.as_dict()}
 
 
 @router.delete("/policy/rules/{rule_id}")
-def delete_rule(rule_id: str, policy: PolicyRepositoryDep) -> dict[str, Any]:
+def delete_rule(rule_id: str, policy: PolicyRepositoryDep, db: DbSession) -> dict[str, Any]:
+    reconciler = PolicyReconciler(db, policy)
+    # Order is load-bearing: the affected set comes from the rule's target, and after the
+    # delete there is no target to read. Computing it afterwards would fall back to a
+    # whole-corpus walk, which is correct but needlessly expensive on a large library.
+    affected = reconciler.affected_source_ids(rule_id)
     if not policy.delete_rule(rule_id):
         raise HTTPException(status_code=404, detail="rule not found")
-    return {"id": rule_id, "deleted": True}
+    summary = reconciler.reconcile_sources(affected)
+    return {"id": rule_id, "deleted": True, "reconciled": summary.as_dict()}
+
+
+@router.post("/policy/reconcile")
+def reconcile_policy(policy: PolicyRepositoryDep, db: DbSession) -> dict[str, Any]:
+    """Re-apply every enabled rule across the corpus.
+
+    A repair operation. Nothing should need it in normal use, but policy state is derived
+    and derived state is worth being able to rebuild.
+    """
+    return PolicyReconciler(db, policy).reconcile_all().as_dict()
 
 
 @router.get("/policy/decisions")

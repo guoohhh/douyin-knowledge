@@ -168,6 +168,26 @@ This safety envelope is the one clear win from the GPT implementation, reimpleme
 
 ---
 
+### DEC-015: Exclusion is a visibility change projected onto `SourceProcessingState`, not a deletion
+
+**Decision**: The Processing Policy's verdict for a source is materialised on `source_processing_state.current_policy_action` (with `current_policy_decision_id` pointing at the decision that produced it), and the three read paths that assemble current knowledge — `retrieval/retriever.py`, `search/indexer.py`, `wiki/builder.py` — filter on it in addition to `current_processing_run_id`. A `PolicyReconciler` re-evaluates affected sources whenever a rule is created, patched, deleted, or applied at processing time. Nothing is deleted: runs, evidence, mentions and claims stay on disk and simply stop being reachable.
+
+**Rationale**: both columns existed from the first migration with nothing reading or writing either one. Policy was purely a pre-processing gate, so excluding a source that had *already* been processed had no observable effect whatsoever — its chunks stayed in the index, its evidence stayed citable, and its claims kept feeding wiki statements. The gate is necessary but not sufficient, because a rule is a statement about a library, not about a moment in a queue.
+
+Writing the verdict onto the state row rather than evaluating rules inside each read path is what makes exclusion take effect at query time instead of at the next reindex, which is what "immediately disappears from normal retrieval" requires. It also gives the gate and the reconciler a single shared answer; without the projection in `jobs/handlers.py`, a source excluded at processing time would still read `process` in its state while retrieval filtered on the state.
+
+**Consequence**: `HIDDEN_ACTIONS` contains `exclude` only. `metadata_only` caps how deep extraction goes; whatever was legitimately extracted under it stays citable, because retroactively hiding it would be a different product decision than the one the user made. Reversal — deleting or disabling the rule — restores eligibility with no reprocessing, and the run/evidence/claim id sets are identical before and after.
+
+`affected_source_ids` is computed from a rule's *target*, not its action, so disabling an exclude rule affects exactly the sources it used to name. It must be called **before** a delete, because afterwards there is no target to read and the call degrades to a whole-corpus walk — correct but needlessly expensive on a large library. Collection rules deliberately include past memberships, so an item pulled out of a folder also stops being governed by that folder's rule. A decision row is recorded only when the action actually changes, otherwise every rule edit would bury the "why is this hidden?" audit under "still eligible" noise.
+
+The indexer refuses to *write* excluded sources rather than relying on the reader's filter. That is redundant by design: a single dropped filter in one read path should not be able to resurface excluded content through the keyword or vector route. Reindexing after a reversal puts the source back, since nothing was destroyed.
+
+This is the GPT implementation's product semantics — a rule change reaches back over the existing library — adapted to this data model rather than copied. GPT enforced exclusion by not writing the data in the first place, which is unavailable here and undesirable: it makes reversal lossy and destroys the audit trail the brief requires to survive.
+
+**Evidence**: `policy/reconciler.py`; the policy filter in `retrieval/retriever.py`, `search/indexer.py`, `wiki/builder.py`; `_apply_policy` in `jobs/handlers.py`; `api/routes/admin.py` (rule create/patch/delete plus `POST /policy/reconcile`); `cli/commands_query.py` (`policy exclude`, `policy reconcile`); `tests/unit/test_policy_retroactive.py`, `test_policy_visibility.py`, `test_policy_queued_and_api.py`, `tests/test_api.py:TestPolicyReconciliation`.
+
+---
+
 ## Known gaps
 
 These are true limitations, not deferred decisions. Each is either invisible in normal use or visible and harmless; none is load-bearing for V1 acceptance.

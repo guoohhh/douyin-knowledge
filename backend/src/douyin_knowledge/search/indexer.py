@@ -32,6 +32,7 @@ from douyin_knowledge.db.models.processing import RetrievalChunk
 from douyin_knowledge.db.models.search import SearchDocument, VectorDocument
 from douyin_knowledge.db.models.wiki import WikiPage, WikiRevision
 from douyin_knowledge.observability.logging import get_logger
+from douyin_knowledge.policy.reconciler import HIDDEN_ACTIONS
 from douyin_knowledge.search.tokenizer import TOKENIZER_VERSION, segment_for_index
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -93,11 +94,17 @@ class IndexStats:
 def _current_run_ids(session: Session, source_ids: Sequence[str] | None = None) -> dict[str, str]:
     """Map source_id -> current_processing_run_id, skipping sources with no run.
 
-    This is the currency filter from DB-004 in its most reusable form.
+    This is the currency filter from DB-004 in its most reusable form, plus the policy
+    filter: an excluded source must not be indexed, or it would resurface through the
+    keyword and vector paths even though retrieval's own filter rejects it (DEC-015).
+    Reindexing after a reversal puts it back, since nothing was deleted.
     """
     stmt = select(
         SourceProcessingState.source_id, SourceProcessingState.current_processing_run_id
-    ).where(SourceProcessingState.current_processing_run_id.is_not(None))
+    ).where(
+        SourceProcessingState.current_processing_run_id.is_not(None),
+        SourceProcessingState.current_policy_action.not_in(sorted(HIDDEN_ACTIONS)),
+    )
     if source_ids:
         stmt = stmt.where(SourceProcessingState.source_id.in_(list(source_ids)))
     return {row[0]: row[1] for row in session.execute(stmt) if row[1]}

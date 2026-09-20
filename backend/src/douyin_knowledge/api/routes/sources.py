@@ -25,9 +25,10 @@ from douyin_knowledge.db.models.capture import (
     SourceCollectionMembership,
 )
 from douyin_knowledge.db.models.entities import Claim, EntityMention
-from douyin_knowledge.db.models.policy import SourceProcessingState
+from douyin_knowledge.db.models.policy import PolicyDecision, ProcessingRule, SourceProcessingState
 from douyin_knowledge.db.models.processing import EvidenceUnit, ProcessingRun, RetrievalChunk
 from douyin_knowledge.jobs.types import JobType, Priority
+from douyin_knowledge.policy.reconciler import HIDDEN_ACTIONS
 
 router = APIRouter()
 
@@ -173,6 +174,11 @@ def _source_summary(source: Source, state: SourceProcessingState | None) -> dict
             "achieved_level": state.achieved_level if state else 0,
             "current_processing_run_id": state.current_processing_run_id if state else None,
             "last_success_at_ms": state.last_success_at_ms if state else None,
+            # Surfaced because a processed source can still be absent from every answer:
+            # the policy action, not the run pointer, decides visibility (DEC-015). A list
+            # that showed only "processed" would make that look like a retrieval bug.
+            "policy_action": state.current_policy_action if state else None,
+            "excluded": bool(state and state.current_policy_action in HIDDEN_ACTIONS),
         },
     }
 
@@ -300,9 +306,28 @@ def get_source(source_id: str, db: DbSession) -> dict[str, Any]:
         )
     )
 
+    # A hidden source has to be able to explain itself, otherwise the only honest reading
+    # of this page is "processed, but mysteriously absent from every answer" (DEC-015).
+    decision: PolicyDecision | None = None
+    if state and state.current_policy_decision_id:
+        decision = db.get(PolicyDecision, state.current_policy_decision_id)
+    rule_name: str | None = None
+    if decision and decision.rule_id:
+        rule = db.get(ProcessingRule, decision.rule_id)
+        rule_name = rule.name if rule else None
+
     summary = _source_summary(source, state)
     summary.update(
         {
+            "policy": {
+                "action": state.current_policy_action if state else "process",
+                "decision_id": decision.id if decision else None,
+                "reason_code": decision.reason_code if decision else None,
+                "phase": decision.phase if decision else None,
+                "rule_id": decision.rule_id if decision else None,
+                "rule_name": rule_name,
+                "decided_at_ms": decision.created_at_ms if decision else None,
+            },
             "collections": [
                 {"id": cid, "name": name}
                 for cid, name in db.execute(

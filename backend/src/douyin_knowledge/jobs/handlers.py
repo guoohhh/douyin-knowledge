@@ -22,6 +22,7 @@ from douyin_knowledge.ai.registry import (
 from douyin_knowledge.capture.registry import get_capture_provider
 from douyin_knowledge.capture.sync import CaptureSyncService
 from douyin_knowledge.config import Settings
+from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.core.errors import DKError, ValidationError
 from douyin_knowledge.extraction.orchestrator import ProcessingOrchestrator
 from douyin_knowledge.jobs.registry import HandlerRegistry, JobContext
@@ -130,13 +131,28 @@ def _apply_policy(ctx: JobContext, source_id: str) -> tuple[bool, PolicyDecision
     while a bulk sync is still draining expects the queued items to respect it.
     """
     from douyin_knowledge.db.models.capture import Source
+    from douyin_knowledge.db.models.policy import SourceProcessingState
 
     source = ctx.session.get(Source, source_id)
     if source is None:
         raise JobPayloadError("source not found", source_id=source_id)
 
-    evaluator = PolicyEvaluator(PolicyRepository(ctx.session))
-    return evaluator.should_process(source)
+    repository = PolicyRepository(ctx.session)
+    allowed, decision = PolicyEvaluator(repository).should_process(source)
+
+    # Project the verdict onto the state row so the gate and the reconciler cannot
+    # disagree. Without this, a source excluded at processing time would still read
+    # `process` in its state, and retrieval filters on the state (DEC-015).
+    state = ctx.session.get(SourceProcessingState, source_id)
+    if state is None:
+        state = SourceProcessingState(source_id=source_id)
+        ctx.session.add(state)
+    state.current_policy_action = decision.action.value
+    state.current_policy_decision_id = decision.id
+    state.updated_at_ms = now_ms()
+    ctx.session.flush()
+
+    return allowed, decision
 
 
 def _orchestrator(settings: Settings) -> ProcessingOrchestrator:

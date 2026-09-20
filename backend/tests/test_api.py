@@ -557,3 +557,141 @@ class TestFrontendMount:
 
     def test_disabled_setting_leaves_the_banner(self, client: TestClient) -> None:
         assert client.get("/").json()["api_prefix"] == "/api"
+
+
+class TestPolicyReconciliation:
+    """Rule changes must reach sources that were already processed (P0-3, DEC-015).
+
+    These run against `populated`, a corpus synced, processed and indexed through the real
+    queue, because the behaviour under test is precisely what happens to *existing*
+    knowledge when policy changes -- a fresh database cannot exhibit it.
+    """
+
+    def _processed_source_id(self, client: TestClient) -> str:
+        sources = client.get(
+            "/api/sources", params={"processing_status": "processed"}
+        ).json()["sources"]
+        assert sources, "the fixture must have processed something"
+        return sources[0]["id"]
+
+    def test_creating_an_exclude_rule_hides_the_source(self, populated: TestClient) -> None:
+        source_id = self._processed_source_id(populated)
+
+        response = populated.post(
+            "/api/admin/policy/rules",
+            json={"rule_type": "source", "action": "exclude", "target_source_id": source_id},
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["reconciled"]["now_hidden"] == 1
+
+    def test_deleting_the_rule_reverses_it(self, populated: TestClient) -> None:
+        source_id = self._processed_source_id(populated)
+        created = populated.post(
+            "/api/admin/policy/rules",
+            json={"rule_type": "source", "action": "exclude", "target_source_id": source_id},
+        ).json()
+
+        response = populated.delete(f"/api/admin/policy/rules/{created['id']}")
+
+        assert response.status_code == 200
+        assert response.json()["reconciled"]["now_visible"] == 1
+
+    def test_disabling_the_rule_reverses_it(self, populated: TestClient) -> None:
+        """Disable is the reversible form of delete and must behave identically."""
+        source_id = self._processed_source_id(populated)
+        created = populated.post(
+            "/api/admin/policy/rules",
+            json={"rule_type": "source", "action": "exclude", "target_source_id": source_id},
+        ).json()
+
+        response = populated.patch(
+            f"/api/admin/policy/rules/{created['id']}", params={"enabled": False}
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["is_enabled"] is False
+        assert body["reconciled"]["now_visible"] == 1
+
+    def test_excluded_source_stops_being_cited(self, populated: TestClient) -> None:
+        """The user-visible payoff: the answer stops citing what was excluded."""
+        before = populated.post("/api/conversations/ask", json={"query": "有哪些茶餐厅"})
+        assert before.status_code == 200, before.text
+        cited_before = {c["source_id"] for c in before.json().get("citations", [])}
+        assert cited_before, "the fixture must cite something for this test to mean anything"
+        # Exclude a source the answer actually cited, not merely one that was processed.
+        source_id = sorted(cited_before)[0]
+
+        populated.post(
+            "/api/admin/policy/rules",
+            json={"rule_type": "source", "action": "exclude", "target_source_id": source_id},
+        )
+
+        after = populated.post("/api/conversations/ask", json={"query": "有哪些茶餐厅"})
+        cited_after = {c["source_id"] for c in after.json().get("citations", [])}
+        assert source_id not in cited_after
+
+    def test_history_survives_exclusion(self, populated: TestClient) -> None:
+        """Exclusion is a visibility change: the source and its evidence are still there."""
+        source_id = self._processed_source_id(populated)
+        populated.post(
+            "/api/admin/policy/rules",
+            json={"rule_type": "source", "action": "exclude", "target_source_id": source_id},
+        )
+
+        detail = populated.get(f"/api/sources/{source_id}").json()
+
+        assert detail["evidence"], "evidence must not be deleted by a policy change"
+        assert detail["id"] == source_id
+        assert detail["processing"]["status"] == "processed", "the run pointer survives"
+
+    def test_detail_explains_why_a_source_is_hidden(self, populated: TestClient) -> None:
+        """A processed-but-absent source is indistinguishable from a bug unless it says why."""
+        source_id = self._processed_source_id(populated)
+        before = populated.get(f"/api/sources/{source_id}").json()
+        assert before["processing"]["excluded"] is False
+        assert before["processing"]["policy_action"] == "process"
+
+        rule = populated.post(
+            "/api/admin/policy/rules",
+            json={
+                "rule_type": "source",
+                "action": "exclude",
+                "target_source_id": source_id,
+                "name": "不看这条",
+            },
+        ).json()
+
+        detail = populated.get(f"/api/sources/{source_id}").json()
+
+        assert detail["processing"]["excluded"] is True
+        assert detail["processing"]["policy_action"] == "exclude"
+        assert detail["policy"]["action"] == "exclude"
+        assert detail["policy"]["rule_id"] == rule["id"]
+        assert detail["policy"]["rule_name"] == "不看这条"
+        assert detail["policy"]["decision_id"], "the decision pointer must resolve"
+
+    def test_list_marks_excluded_sources(self, populated: TestClient) -> None:
+        source_id = self._processed_source_id(populated)
+        populated.post(
+            "/api/admin/policy/rules",
+            json={"rule_type": "source", "action": "exclude", "target_source_id": source_id},
+        )
+
+        items = populated.get("/api/sources", params={"limit": 100}).json()["sources"]
+        by_id = {item["id"]: item for item in items}
+
+        assert by_id[source_id]["processing"]["excluded"] is True
+        others = [i for sid, i in by_id.items() if sid != source_id]
+        assert others, "the fixture must hold more than one source"
+        assert all(i["processing"]["excluded"] is False for i in others)
+
+    def test_reconcile_endpoint_rebuilds_derived_state(self, populated: TestClient) -> None:
+        response = populated.post("/api/admin/policy/reconcile")
+
+        assert response.status_code == 200
+        assert "reevaluated" in response.json()
+
+    def test_deleting_an_unknown_rule_is_404(self, client: TestClient) -> None:
+        assert client.delete("/api/admin/policy/rules/rule_nope").status_code == 404

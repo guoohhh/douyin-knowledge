@@ -17,6 +17,21 @@ export interface ProcessingState {
   achieved_level: number
   current_processing_run_id: string | null
   last_success_at_ms: number | null
+  // A source can be fully processed and still contribute nothing to answers, because the
+  // Processing Policy hides it. `excluded` is the API's own verdict, not a value derived
+  // from `policy_action` in the client, so the two cannot drift apart.
+  policy_action: string | null
+  excluded: boolean
+}
+
+export interface PolicyStatus {
+  action: string
+  decision_id: string | null
+  reason_code: string | null
+  phase: string | null
+  rule_id: string | null
+  rule_name: string | null
+  decided_at_ms: number | null
 }
 
 export interface SourceSummary {
@@ -56,6 +71,7 @@ export interface ProcessingRunRow {
 }
 
 export interface SourceDetail extends SourceSummary {
+  policy: PolicyStatus
   evidence: EvidenceUnit[]
   chunks: { id: string; text: string | null; chunk_type: string | null }[]
   // Null rather than [] when the source produced none, so components must not assume

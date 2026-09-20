@@ -67,6 +67,16 @@ export function SourcePage() {
         </p>
       </div>
 
+      {item.processing.excluded && (
+        <p className="notice">
+          这条已被处理策略排除：它的证据和结论仍然保存在库里，但不会出现在检索、回答和百科中。
+          {item.policy.rule_name || item.policy.rule_id
+            ? `　规则：${item.policy.rule_name ?? item.policy.rule_id}`
+            : ''}
+          　删除或停用该规则即可恢复，不需要重新处理。
+        </p>
+      )}
+
       <div className="figures">
         <div className="figure">
           <div className="figure__value">{statusLabel(item.processing.status)}</div>

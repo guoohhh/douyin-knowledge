@@ -40,6 +40,7 @@ from douyin_knowledge.db.models.wiki import (
     WikiSupport,
 )
 from douyin_knowledge.observability.logging import get_logger
+from douyin_knowledge.policy.reconciler import HIDDEN_ACTIONS
 from douyin_knowledge.wiki.composer import (
     PAGE_TYPE_ENTITY,
     PAGE_TYPE_TOPIC,
@@ -140,11 +141,21 @@ class WikiBuilder:
     # ------------------------------------------------------------ currency
 
     def _current_runs(self) -> dict[str, str]:
+        """Current run per source, restricted to sources policy allows.
+
+        The wiki is a derived view, so an excluded source must stop contributing statements
+        the next time a page is composed. Because the wiki is rebuildable rather than a
+        source of truth, reversing the exclusion and recomposing restores the statement
+        without any of the underlying claims having been touched (DEC-015).
+        """
         rows = self.session.execute(
             select(
                 SourceProcessingState.source_id,
                 SourceProcessingState.current_processing_run_id,
-            ).where(SourceProcessingState.current_processing_run_id.is_not(None))
+            ).where(
+                SourceProcessingState.current_processing_run_id.is_not(None),
+                SourceProcessingState.current_policy_action.not_in(sorted(HIDDEN_ACTIONS)),
+            )
         )
         return {row[0]: row[1] for row in rows if row[1]}
 

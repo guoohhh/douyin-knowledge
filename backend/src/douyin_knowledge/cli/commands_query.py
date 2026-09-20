@@ -264,7 +264,10 @@ def policy_exclude(
 
     _ready()
     with session_scope() as session:
-        rule = PolicyRepository(session).save_rule(
+        from douyin_knowledge.policy.reconciler import PolicyReconciler
+
+        repository = PolicyRepository(session)
+        rule = repository.save_rule(
             ProcessingRule(
                 id="",
                 name=name or ("exclude creator" if creator_id else "exclude source"),
@@ -276,4 +279,63 @@ def policy_exclude(
                 target_source_id=source_id,
             )
         )
+        summary = PolicyReconciler(session, repository).reconcile_rule(rule.id)
         console.print(f"[green]added rule[/green] {rule.id}")
+        console.print(
+            f"reconciled {summary.reevaluated} source(s); "
+            f"{summary.now_hidden} newly hidden, {summary.now_visible} newly visible"
+        )
+        if summary.now_hidden:
+            console.print("[dim]run `dk reindex` to drop them from the search index[/dim]")
+
+
+@policy_app.command("delete")
+def policy_delete(rule_id: Annotated[str, typer.Argument(help="Rule id from `dk policy list`.")]) -> None:
+    """Delete a rule and restore whatever it was hiding.
+
+    The CLI could add an exclude rule but not take one back, which left the reversibility
+    claim (DEC-015) unreachable without the API. Deleting a rule loses no history: the
+    sources it hid become eligible again with their existing runs and evidence intact.
+    """
+    from douyin_knowledge.db import session_scope
+    from douyin_knowledge.policy.reconciler import PolicyReconciler
+    from douyin_knowledge.policy.repository import PolicyRepository
+
+    _ready()
+    with session_scope() as session:
+        repository = PolicyRepository(session)
+        reconciler = PolicyReconciler(session, repository)
+        # Ordering matters: the affected set is read off the rule's target, which is gone
+        # once the rule is deleted. See the same note in the admin route.
+        affected = reconciler.affected_source_ids(rule_id)
+        if not repository.delete_rule(rule_id):
+            fail(f"no rule with id {rule_id!r}")
+        summary = reconciler.reconcile_sources(affected)
+        console.print(f"[green]deleted rule[/green] {rule_id}")
+        console.print(
+            f"reconciled {summary.reevaluated} source(s); "
+            f"{summary.now_hidden} newly hidden, {summary.now_visible} newly visible"
+        )
+        if summary.now_visible:
+            console.print("[dim]run `dk reindex` to put them back in the search index[/dim]")
+
+
+@policy_app.command("reconcile")
+def policy_reconcile() -> None:
+    """Re-apply every enabled rule to the whole corpus.
+
+    A repair command. Policy state on each source is derived from the rules, and derived
+    state should always be rebuildable from its inputs.
+    """
+    from douyin_knowledge.db import session_scope
+    from douyin_knowledge.policy.reconciler import PolicyReconciler
+    from douyin_knowledge.policy.repository import PolicyRepository
+
+    _ready()
+    with session_scope() as session:
+        repository = PolicyRepository(session)
+        summary = PolicyReconciler(session, repository).reconcile_all()
+        console.print(
+            f"reevaluated {summary.reevaluated}, changed {summary.changed} "
+            f"({summary.now_hidden} hidden, {summary.now_visible} visible)"
+        )
