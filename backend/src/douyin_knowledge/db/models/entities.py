@@ -159,6 +159,8 @@ class Claim(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     valid_from_ms: Mapped[int | None] = mapped_column(Integer)
     valid_to_ms: Mapped[int | None] = mapped_column(Integer)
+    grounding_status: Mapped[str | None] = mapped_column(Text)
+    grounding_json: Mapped[Any | None] = mapped_column(JsonText)
     created_at_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=now_ms)
 
 

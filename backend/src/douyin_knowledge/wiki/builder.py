@@ -39,6 +39,7 @@ from douyin_knowledge.db.models.wiki import (
     WikiRevision,
     WikiSupport,
 )
+from douyin_knowledge.extraction.grounding import is_assertable
 from douyin_knowledge.observability.logging import get_logger
 from douyin_knowledge.policy.reconciler import HIDDEN_ACTIONS
 from douyin_knowledge.wiki.composer import (
@@ -160,7 +161,13 @@ class WikiBuilder:
         return {row[0]: row[1] for row in rows if row[1]}
 
     def _live_claims(self, stmt) -> list[Claim]:
-        """Run a claim query and keep only rows from each source's current run."""
+        """Claims from each source's current run that are safe to state as facts.
+
+        Grounding is filtered here rather than at extraction time because the wiki is
+        derived and rebuildable: a claim the validator could only downgrade stays in SQLite
+        as the record of what the model produced, but a page that rendered it would present
+        an unverified span as knowledge with a citation attached (P1-2, DEC-017).
+        """
         current = self._current_runs()
         if not current:
             return []
@@ -171,6 +178,7 @@ class WikiBuilder:
             claim
             for claim in self.session.scalars(stmt)
             if current.get(claim.source_id) == claim.processing_run_id
+            and is_assertable(claim.grounding_status)
         ]
 
     def claims_for_entity(self, entity_id: str) -> list[Claim]:

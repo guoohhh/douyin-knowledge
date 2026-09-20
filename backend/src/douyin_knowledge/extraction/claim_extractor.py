@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from douyin_knowledge.core.text import normalize_identity, truncate
 from douyin_knowledge.db.models.entities import Claim, ClaimEvidence
+from douyin_knowledge.extraction.grounding import GroundingValidator
 from douyin_knowledge.observability.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -36,6 +37,11 @@ logger = get_logger(__name__)
 
 VALUE_TYPES = ("text", "number", "boolean", "json", "duration", "date")
 CLAIM_KINDS = ("attribute", "measurement", "evaluation", "relation", "event")
+#: Statuses that must never reach the database. A context mismatch is structural -- the
+#: model named evidence from another source -- and an unsupported literal value is the
+#: failure mode that makes a wrong number look cited. Both are drops, not downgrades.
+_HARD_REJECTIONS = frozenset({"rejected_context", "rejected_span", "rejected_value"})
+
 PROVENANCE_TYPES = (
     "creator_statement",  # the creator asserts it directly
     "creator_opinion",  # hedged or clearly subjective
@@ -92,8 +98,16 @@ _PROMPT = """你从短视频文本中抽取结构化断言(claim)。
 class ClaimExtractor:
     """Turns evidence text into `Claim` + `ClaimEvidence` rows."""
 
-    def __init__(self, structured_model: StructuredModel) -> None:
+    def __init__(
+        self,
+        structured_model: StructuredModel,
+        *,
+        validator: GroundingValidator | None = None,
+    ) -> None:
         self.model = structured_model
+        # Injected so a caller can supply a stricter validator; the default is the one
+        # that enforces P1-2's contract.
+        self.validator = validator or GroundingValidator()
 
     def extract_from_evidence(
         self,
@@ -114,6 +128,8 @@ class ClaimExtractor:
 
         attribution = creator_name or "unknown_creator"
         claims: list[Claim] = []
+        rejected = 0
+        downgraded = 0
 
         for unit in evidence_units:
             text = unit.normalized_text or unit.raw_text
@@ -130,6 +146,54 @@ class ClaimExtractor:
                 )
                 if claim is None:
                     continue
+
+                # Grounding is checked *before* the claim is durable. A model that names a
+                # real evidence id is not thereby telling the truth about what that evidence
+                # says, and a stored claim is what the wiki and cited answers are built from,
+                # so an unsupported value would arrive with a real source attached (P1-2).
+                verdict = self.validator.validate(
+                    unit,
+                    expected_source_id=source_id,
+                    evidence_span=payload.get("evidence_span"),
+                    value_type=claim.value_type,
+                    value_text=claim.value_text,
+                    value_number=claim.value_number,
+                )
+                if verdict.status in _HARD_REJECTIONS:
+                    rejected += 1
+                    logger.info(
+                        "claim_rejected_ungrounded",
+                        extra={
+                            "evidence_id": unit.id,
+                            "predicate": claim.predicate,
+                            "status": verdict.status,
+                            "reason": verdict.reason,
+                        },
+                    )
+                    continue
+
+                claim.grounding_status = verdict.status
+                claim.grounding_json = {
+                    "reason": verdict.reason,
+                    "span_offset": verdict.span_offset,
+                }
+                if verdict.confidence_cap is not None:
+                    # Downgraded rather than dropped: the assertion may still be a fair
+                    # reading of the evidence even when the quoted span is not, and the row
+                    # is the audit trail for what the model produced. It is kept out of the
+                    # wiki and out of cited answers by `is_assertable`, not by this cap --
+                    # nothing downstream reads `confidence`. The invented span is stripped
+                    # so no later reader mistakes it for verified text.
+                    downgraded += 1
+                    if isinstance(claim.value_json, dict):
+                        claim.value_json = {
+                            k: v for k, v in claim.value_json.items() if k != "evidence_span"
+                        } or None
+                    claim.confidence = min(
+                        verdict.confidence_cap,
+                        claim.confidence if claim.confidence is not None else 1.0,
+                    )
+
                 session.add(claim)
                 session.flush()  # need claim.id for the evidence link
                 session.add(
@@ -143,7 +207,16 @@ class ClaimExtractor:
 
         logger.info(
             "claims_extracted",
-            extra={"source_id": source_id, "run_id": processing_run_id, "count": len(claims)},
+            extra={
+                "source_id": source_id,
+                "run_id": processing_run_id,
+                "count": len(claims),
+                # Counted rather than merely logged per claim: "how much did the model make
+                # up?" is a question about a run, and a run that rejected most of its claims
+                # is a signal about the model or the prompt, not about this source.
+                "rejected_ungrounded": rejected,
+                "downgraded_ungrounded": downgraded,
+            },
         )
         return claims
 

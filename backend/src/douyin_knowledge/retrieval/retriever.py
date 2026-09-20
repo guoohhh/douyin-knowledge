@@ -27,6 +27,7 @@ from douyin_knowledge.db.models.processing import (
     RetrievalChunk,
     RetrievalChunkEvidence,
 )
+from douyin_knowledge.extraction.grounding import is_assertable
 from douyin_knowledge.observability.logging import get_logger
 from douyin_knowledge.policy.reconciler import HIDDEN_ACTIONS
 from douyin_knowledge.retrieval.keyword_search import KeywordSearcher
@@ -359,6 +360,9 @@ class HybridRetriever:
             claim
             for claim in claims
             if current.get(claim.source_id) == claim.processing_run_id
+            # An answer cites the claims it returns, so a downgraded one would arrive
+            # wearing the same citation as a verified one (P1-2, DEC-017).
+            and is_assertable(claim.grounding_status)
         ]
 
     # ------------------------------------------------------------- utilities

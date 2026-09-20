@@ -208,6 +208,28 @@ Adapted from the GPT implementation rather than copied. GPT's `cheap_semantic_ty
 
 ---
 
+### DEC-017: Claim grounding is validated before storage, and downgraded claims stay out of derived output
+
+**Decision**: Every model-produced claim is validated by `extraction/grounding.py` before it is written to SQLite. The validator checks that the cited evidence belongs to the claim's source, that a quoted span occurs in the evidence text after normalization, and that literal numeric values are supported. Context mismatches, hallucinated spans missing from the evidence, and unsupported numbers are rejected outright. Claims with an invented span but a plausible assertion are downgraded: stored with `grounding_status="downgraded"` and excluded from the wiki and cited answers by `is_assertable()`, which the wiki builder and retriever both call.
+
+**Rationale**: before this validator, a model that named a real `evidence_id` was trusted. A claim asserting "人均80块" citing evidence that says "人均800块" was stored, and its provenance chain `Claim → ClaimEvidence → EvidenceUnit → Source` made it citable — the wrong number would reach the wiki wearing a real citation. Separately, a model quoting a span that does not appear anywhere in the evidence had that invented text stored in `value_json["evidence_span"]`, which is the audit trail for why a claim is considered grounded but could later become a rendered quotation if a future UI surfaces it.
+
+GPT's validator was a one-line filter: `quote in evidence.text and value in quote`. That shape is correct but the implementation is brittle for CJK: ASR punctuation and model quotes differ (full-width vs half-width commas, trailing periods added or dropped), whitespace collapses inconsistently, and spoken numbers are transcribed as Chinese numerals while the claim stores Arabic digits. Substring matching rejects all of those as hallucinations. This version normalizes (NFKC, punctuation stripped, whitespace collapsed, casefolded) before matching, and parses common Chinese numerals (八十 → 80) so a transcript saying "人均八十块" supports `value_number=80`.
+
+**Consequence**: `grounding_status` has four rejection states and one valid state. `rejected_context` (evidence from another source), `rejected_span` (empty evidence text), and `rejected_value` (unsupported literal number) are hard rejections — the claim never reaches SQLite, the counter `rejected_ungrounded` increments, and a structured log is emitted. `downgraded` (missing or hallucinated span, but assertion may still be fair) stores the claim with `confidence` capped at 0.5 and the span stripped from `value_json`, increments `downgraded_ungrounded`, and records the verdict in `grounding_json`. `valid` passes and records where the span matched (`span_offset`).
+
+A `downgraded` claim is kept as the audit trail for what the model produced — the per-run counters answer "how much did the model make up?" — but `is_assertable(claim.grounding_status)` returns `False`, so it is filtered out by `wiki/builder.py:_live_claims` and `retrieval/retriever.py:_claims_for_chunks`. That makes downgrade observable: a claim with an invented span does not render on a wiki page identically to a verified one. Capping confidence was the first attempt and was decorative — nothing downstream reads `confidence`, so the cap changed nothing the user could see.
+
+`None` is treated as assertable on purpose: claims written before migration 0005 carry no verdict, and treating "not yet validated" as "failed validation" would silently empty the wiki on upgrade. Pre-existing claims are grandfathered until the source is reprocessed.
+
+Value types `boolean`, `date`, `duration`, and `json` are exempt from the literal substring test. A `recommended=true` claim is a derived classification of "我推荐大家去试试", not a quotation of the English word "true", and demanding the latter appear in a Chinese transcript rejects every `recommended` claim in the demo corpus. This exemption was added after the first live demo run dropped 2 of 4 claims and took a wiki page with it — a defect caught by measurement rather than by tests, because the test corpus scripted its own claim payloads and never hit the real extraction prompt.
+
+Adapted from the GPT implementation rather than copied. GPT's shape — validate before storing, and filter the ungrounded — was adopted. Its implementation was not: GPT filtered silently (dropped claims vanish from the extraction log with no counter, no per-claim reason, and no distinction between a bad span and a bad number), and its substring test could not handle the CJK normalization or numeral cases this validator was built to tolerate. The asymmetry between hard rejection and downgrade, the recorded verdicts, the `is_assertable` predicate, and the grandfathering of pre-0005 claims are all new.
+
+**Evidence**: `extraction/grounding.py`, `extraction/claim_extractor.py`; `db/models/entities.py:Claim.grounding_status` and `.grounding_json`; `migrations/versions/0005_claim_grounding.py`; `wiki/builder.py:_live_claims`, `retrieval/retriever.py:_claims_for_chunks`; `tests/unit/test_claim_grounding.py`.
+
+---
+
 ## Known gaps
 
 These are true limitations, not deferred decisions. Each is either invisible in normal use or visible and harmless; none is load-bearing for V1 acceptance.
