@@ -188,6 +188,26 @@ This is the GPT implementation's product semantics — a rule change reaches bac
 
 ---
 
+### DEC-016: Content type is derived, cached, cue-first state — and never enough on its own to skip a source
+
+**Decision**: A source's semantic content type is computed by `policy/triage.py` from a single assembled `SourceSignal` (`policy/signal.py`), cached in its own `source_triage` table keyed on the signal's fingerprint, and consumed by `RuleType.SEMANTIC` rules during a second evaluation pass that runs **only** when the deterministic metadata pass reached no verdict *and* at least one enabled semantic rule exists. Classification is deterministic cue matching by default; one structured model call is attempted only when cues are inconclusive, a semantic rule needs the answer, `enable_triage_model_fallback` is on, and the provider is not `mock`.
+
+**Rationale**: two independent defects made the documented policy surface a fiction. `RuleType.SEMANTIC` was accepted, stored, listed and enabled, but could never match anything, because no content-type label existed anywhere in the system. Separately, the hashtag rule documented in `PROCESSING_POLICY.md` §5.5 could never fire either: hashtags are captured into `CapturedSource.hashtags` and joined by a `text_signal()` method that nothing calls, surviving only inside `SourceSnapshot.raw_json`, while the matcher read `Source.caption_raw`. Both failed silently and expensively — the user believes they are skipping variety clips while paying to process every one of them.
+
+Ordering is the whole point. An exclusion that only fires after ASR has run has already spent the money it was meant to save, so the shape is `metadata → deterministic policy → cheap triage when needed → semantic policy → expensive processing only if allowed`. The short-circuit when no semantic rule is enabled is the cost control, not an optimisation detail.
+
+**Consequence**: confidence is asymmetric on purpose. Entertainment labels need a stronger cue showing than `knowledge`, and cue ties break toward `knowledge` — that is, toward processing — because wrongly skipping loses knowledge silently while wrongly processing only wastes one call. `ContentType.UNKNOWN` can never satisfy a semantic matcher, so a classifier miss cannot become data loss; for the same reason the admin API rejects `content_types: ["unknown"]` with a 422, alongside unknown labels, rather than storing a rule that would never match.
+
+The cache is keyed on `SourceSignal.fingerprint` rather than a timestamp, so a recaption invalidates the label and a creator rename does not (creator name is deliberately excluded from the fingerprint). A cached `unknown` reached without a model is recomputed if a model later becomes available. `CheapTriage.model_calls` exists so a test can assert that **no** model call happened. `policy/factory.py` centralises the wiring because a rule's effect must not depend on which surface evaluated it — the job gate, the reconciler, the API and the CLI all get the same evaluator, and a whole-corpus reconcile stays model-less.
+
+The label is derived state in its own table, not a column on the spine, and triage stays out of the capture path: `GET /api/sources` reads the cache table directly and never classifies on demand, so browsing cannot cost money. `null` and `"unknown"` are kept distinct through the API and the frontend types — never classified is not the same as classified and inconclusive.
+
+Adapted from the GPT implementation rather than copied. GPT's `cheap_semantic_type` is a three-label keyword function called at ingest that writes a `semantic_type` column on `sources`, with rules matched by a flat `dimension`/`value` pair. The product semantics — skip entertainment before paying for it — were adopted. The implementation was not: this version covers all six entertainment labels plus `knowledge` and `unknown`, treats the label as invalidatable cached state rather than a permanent column, and adds the model escalation path and the cost short-circuit that GPT had no notion of.
+
+**Evidence**: `policy/signal.py`, `policy/triage.py`, `policy/triage_service.py`, `policy/factory.py`; `migrations/versions/0004_source_triage.py`; `db/models/policy.py:SourceTriage`; the two-pass `evaluate` in `policy/evaluator.py`; `enable_triage_model_fallback` in `config/settings.py`; `_check_semantic_matcher` in `api/routes/admin.py`; the `triage` block and `content_type` filter in `api/routes/sources.py`; `tests/unit/test_policy_triage.py`, `test_policy_semantic_rules.py`.
+
+---
+
 ## Known gaps
 
 These are true limitations, not deferred decisions. Each is either invisible in normal use or visible and harmless; none is load-bearing for V1 acceptance.

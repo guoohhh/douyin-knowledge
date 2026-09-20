@@ -385,6 +385,54 @@ class TestAdmin:
         assert client.delete(f"/api/admin/policy/rules/{rule_id}").status_code == 200
         assert client.delete(f"/api/admin/policy/rules/{rule_id}").status_code == 404
 
+    def test_a_semantic_rule_needs_real_content_types(self, client: TestClient) -> None:
+        """A typo here would fail silently and expensively (DEC-016).
+
+        The rule would be stored, listed and shown as enabled while matching nothing, so
+        the user believes they are skipping variety clips and pays to process every one.
+        """
+        base = {"rule_type": "semantic", "action": "exclude"}
+
+        typo = client.post(
+            "/api/admin/policy/rules", json={**base, "matcher": {"content_types": ["varity_clip"]}}
+        )
+        assert typo.status_code == 422, typo.text
+
+        empty = client.post("/api/admin/policy/rules", json={**base, "matcher": {}})
+        assert empty.status_code == 422
+
+        # `unknown` is rejected too: it means triage could not tell, and letting it drive
+        # an exclusion would turn every classifier miss into silent data loss.
+        unknown = client.post(
+            "/api/admin/policy/rules", json={**base, "matcher": {"content_types": ["unknown"]}}
+        )
+        assert unknown.status_code == 422
+
+        ok = client.post(
+            "/api/admin/policy/rules",
+            json={**base, "matcher": {"content_types": ["variety_clip"], "min_confidence": 0.8}},
+        )
+        assert ok.status_code == 201, ok.text
+
+    def test_sources_expose_their_triage_label(self, populated: TestClient) -> None:
+        """The label has to be visible, or a user cannot tell why a rule would apply.
+
+        Unclassified reads as `null` rather than `"unknown"`: the demo corpus has no
+        semantic rules, so nothing has been classified, and that is a different statement
+        from "classified and inconclusive" (DEC-016).
+        """
+        listing = populated.get("/api/sources", params={"limit": 5}).json()["sources"]
+        assert listing
+        assert all(s["triage"]["content_type"] is None for s in listing)
+
+        detail = populated.get(f"/api/sources/{listing[0]['id']}").json()
+        assert detail["triage"]["content_type"] is None
+
+        # Filtering on a label nothing carries returns nothing rather than everything.
+        filtered = populated.get("/api/sources", params={"content_type": "movie_clip"}).json()
+        assert filtered["total"] == 0
+        assert filtered["sources"] == []
+
     def test_decisions_are_recorded_during_processing(self, populated: TestClient) -> None:
         decisions = populated.get("/api/admin/policy/decisions").json()["decisions"]
         assert decisions, "every processed source should carry an explainable decision"

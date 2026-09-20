@@ -72,10 +72,21 @@ class ReconcileSummary:
 class PolicyReconciler:
     """Re-applies current policy to sources that already exist."""
 
-    def __init__(self, session: Session, repository: PolicyRepository) -> None:
+    def __init__(
+        self,
+        session: Session,
+        repository: PolicyRepository,
+        *,
+        evaluator: PolicyEvaluator | None = None,
+    ) -> None:
         self.session = session
         self.repository = repository
-        self.evaluator = PolicyEvaluator(repository, session)
+        # Accepting an evaluator lets callers hand in one built by `policy.factory`, so a
+        # reconciliation reaches the same verdict the processing gate would. The default
+        # keeps the module usable without settings, and deliberately has no triage model:
+        # a whole-corpus reconcile is the last place to start issuing per-source model
+        # calls unasked.
+        self.evaluator = evaluator or PolicyEvaluator(repository, session)
 
     # ------------------------------------------------------------------ public
 

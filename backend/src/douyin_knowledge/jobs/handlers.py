@@ -31,9 +31,8 @@ from douyin_knowledge.media.downloader import MediaDownloader
 from douyin_knowledge.media.service import MediaAcquisitionService
 from douyin_knowledge.media.store import MediaStore
 from douyin_knowledge.observability import get_logger
-from douyin_knowledge.policy.evaluator import PolicyEvaluator
+from douyin_knowledge.policy.factory import build_evaluator
 from douyin_knowledge.policy.models import PolicyAction, PolicyDecision
-from douyin_knowledge.policy.repository import PolicyRepository
 from douyin_knowledge.retrieval.vector_store import VectorStore
 from douyin_knowledge.search import indexer
 from douyin_knowledge.wiki.updater import WikiUpdater
@@ -137,8 +136,10 @@ def _apply_policy(ctx: JobContext, source_id: str) -> tuple[bool, PolicyDecision
     if source is None:
         raise JobPayloadError("source not found", source_id=source_id)
 
-    repository = PolicyRepository(ctx.session)
-    allowed, decision = PolicyEvaluator(repository).should_process(source)
+    # Built through the factory so the gate and the reconciler agree on whether triage may
+    # call a model; otherwise a rule's effect would depend on which surface evaluated it.
+    evaluator = build_evaluator(ctx.session, ctx.settings)
+    allowed, decision = evaluator.should_process(source)
 
     # Project the verdict onto the state row so the gate and the reconciler cannot
     # disagree. Without this, a source excluded at processing time would still read

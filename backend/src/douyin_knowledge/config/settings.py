@@ -125,6 +125,13 @@ class Settings(BaseSettings):
     # budget, and it is enforced mid-stream rather than from Content-Length.
     media_max_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
 
+    # ---- policy triage ---------------------------------------------------
+    #: Let cheap triage fall back to one structured model call when its cue matching is
+    #: inconclusive *and* a semantic rule needs the answer. Off by default: the point of
+    #: content-type policy is to spend less, and a classifier that quietly starts billing
+    #: because a key appeared in the environment is the wrong default (DEC-016).
+    enable_triage_model_fallback: bool = False
+
     # ---- worker ----------------------------------------------------------
     worker_poll_interval_s: float = 1.0
     worker_lease_ttl_s: int = 600

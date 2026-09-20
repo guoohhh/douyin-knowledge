@@ -2,7 +2,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { api } from '../api/client'
-import { actionLabel, date, dateTime, duration, errorMessage, statusLabel, timecode } from '../lib/format'
+import {
+  actionLabel,
+  contentTypeLabel,
+  date,
+  dateTime,
+  duration,
+  errorMessage,
+  statusLabel,
+  timecode,
+} from '../lib/format'
 
 export function SourcePage() {
   const { sourceId = '' } = useParams()
@@ -90,6 +99,15 @@ export function SourcePage() {
             </span>
           </div>
           <div className="figure__label">已达深度 / 目标</div>
+        </div>
+        <div className="figure">
+          <div className="figure__value">{contentTypeLabel(item.triage.content_type)}</div>
+          <div className="figure__label">
+            内容类型
+            {item.triage.confidence !== null ? (
+              <span className="faint">　{Math.round(item.triage.confidence * 100)}%</span>
+            ) : null}
+          </div>
         </div>
         <div className="figure">
           <div className="figure__value">{item.evidence.length}</div>

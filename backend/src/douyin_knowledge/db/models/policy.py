@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import ForeignKey, Index, Integer, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from douyin_knowledge.core.clock import now_ms
@@ -89,3 +89,29 @@ class SourceProcessingState(Base):
     last_success_at_ms: Mapped[int | None] = mapped_column(Integer)
     last_error_json: Mapped[dict[str, Any] | None] = mapped_column(JsonText)
     updated_at_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=now_ms)
+
+
+class SourceTriage(Base):
+    """Cached cheap content-type classification (DEC-016).
+
+    Derived state: one row per source, recomputable from the source's own metadata, and
+    keyed to the metadata it was computed from by ``signal_fingerprint`` so an unchanged
+    re-sync neither reclassifies nor re-pays for a model call.
+
+    No history. A triage label is a routing hint, not knowledge (PROCESSING_POLICY.md
+    5.4), and the decision it influenced is already recorded in ``policy_decisions``.
+    """
+
+    __tablename__ = "source_triage"
+    __table_args__ = (Index("ix_source_triage_content_type", "content_type"),)
+
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True
+    )
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    method: Mapped[str] = mapped_column(Text, nullable=False)
+    model_name: Mapped[str | None] = mapped_column(Text)
+    cues_json: Mapped[dict[str, Any] | None] = mapped_column(JsonText)
+    signal_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    computed_at_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=now_ms)

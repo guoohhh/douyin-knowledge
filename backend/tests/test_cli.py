@@ -11,6 +11,7 @@ than sharing a session with the fixtures.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 
 import pytest
@@ -248,6 +249,64 @@ class TestPolicy:
         why = runner.invoke(app, ["policy", "why", source_id])
         assert "exclude" in why.output
         assert "source_rule_matched" in why.output
+
+    def test_delete_restores_what_a_rule_was_hiding(self, corpus: Settings) -> None:
+        """Reversibility, from the terminal (DEC-015).
+
+        The CLI could add an exclude rule but not take one back, which left the central
+        claim -- that exclusion is a visibility change, not a deletion -- unverifiable
+        without the API. Nothing is reprocessed: the same run id comes back.
+        """
+        from sqlalchemy import select
+
+        from douyin_knowledge.db.models.capture import Source
+        from douyin_knowledge.db.models.policy import ProcessingRule, SourceProcessingState
+
+        with session_scope() as session:
+            source_id = session.scalars(select(Source.id)).first()
+            run_before = session.get(SourceProcessingState, source_id).current_processing_run_id
+
+        assert runner.invoke(app, ["policy", "exclude", "--source", source_id]).exit_code == 0
+        with session_scope() as session:
+            state = session.get(SourceProcessingState, source_id)
+            assert state.current_policy_action == "exclude"
+            rule_id = session.scalars(select(ProcessingRule.id)).first()
+
+        result = runner.invoke(app, ["policy", "delete", rule_id])
+        assert result.exit_code == 0, result.output
+        assert "newly visible" in result.output
+
+        with session_scope() as session:
+            state = session.get(SourceProcessingState, source_id)
+            assert state.current_policy_action == "process"
+            assert state.current_processing_run_id == run_before, (
+                "restoring visibility must not have cost a reprocess"
+            )
+
+        assert runner.invoke(app, ["policy", "delete", rule_id]).exit_code != 0
+
+    def test_triage_labels_the_corpus_without_a_model(self, corpus: Settings) -> None:
+        """`dk policy triage` answers "how much of this is entertainment?" for free.
+
+        Triage is otherwise lazy -- nothing classifies until a semantic rule asks -- so
+        this command exists to let a user look before writing the rule. It must not create
+        runs, change visibility, or make a model call (DEC-016).
+        """
+        from douyin_knowledge.db.models.policy import SourceTriage
+
+        result = runner.invoke(app, ["policy", "triage", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["classified"] > 0
+        assert payload["model_calls"] == 0
+        assert sum(payload["by_content_type"].values()) == payload["classified"]
+
+        with session_scope() as session:
+            assert session.query(SourceTriage).count() == payload["classified"]
+
+        # --model without a configured fallback refuses rather than quietly running
+        # cue-only and reporting a full pass.
+        assert runner.invoke(app, ["policy", "triage", "--model"]).exit_code != 0
 
     def test_exclude_requires_exactly_one_target(self, cli_env: Settings) -> None:
         assert runner.invoke(app, ["policy", "exclude"]).exit_code != 0

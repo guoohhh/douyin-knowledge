@@ -51,6 +51,26 @@ export const PROCESSING_LABELS: Record<string, string> = {
 export const statusLabel = (status: string) => PROCESSING_LABELS[status] ?? status
 
 /**
+ * Cheap triage labels (DEC-016).
+ *
+ * `unknown` is worded as an admission rather than a category: it means triage ran and
+ * could not tell, which is why such a source is still processed instead of skipped.
+ */
+export const CONTENT_TYPE_LABELS: Record<string, string> = {
+  movie_clip: '影视剪辑',
+  variety_clip: '综艺片段',
+  music_clip: '音乐/MV',
+  meme: '搞笑段子',
+  sports_highlight: '体育集锦',
+  other_entertainment: '其他娱乐',
+  knowledge: '知识内容',
+  unknown: '暂未判定',
+}
+
+export const contentTypeLabel = (value: string | null | undefined) =>
+  value ? (CONTENT_TYPE_LABELS[value] ?? value) : '未分类'
+
+/**
  * Knowledge scope, explained rather than named.
  *
  * `personal_first` is the default for an unmarked question (RET-003), so its wording has

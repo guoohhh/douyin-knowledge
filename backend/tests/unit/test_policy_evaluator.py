@@ -275,9 +275,15 @@ class TestMetadataMatcher:
         """A rule saved with no conditions is a half-finished edit, not "match all"."""
         assert not self._match(evaluator, repository, source, {})
 
-    def test_semantic_rules_stay_inert(
+    def test_a_semantic_rule_with_no_matcher_still_does_nothing(
         self, evaluator: PolicyEvaluator, repository: PolicyRepository, source: Source
     ) -> None:
+        """Semantic rules match now (DEC-016), but an empty matcher is a half-saved edit.
+
+        This test used to assert that *all* semantic rules were inert. That is no longer
+        true; what remains true, and matters more, is that a rule carrying no conditions
+        cannot switch off the pipeline.
+        """
         repository.save_rule(_rule(rule_type=RuleType.SEMANTIC, priority=100))
         assert evaluator.evaluate(source).action == PolicyAction.PROCESS
 

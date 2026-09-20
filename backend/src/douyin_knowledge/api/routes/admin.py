@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 
 from douyin_knowledge.api.deps import (
@@ -30,6 +30,7 @@ from douyin_knowledge.db.models.wiki import WikiLintFinding, WikiPage, WikiRevis
 from douyin_knowledge.jobs.types import JobType, Priority
 from douyin_knowledge.policy.models import PolicyAction, ProcessingRule, RuleType
 from douyin_knowledge.policy.reconciler import PolicyReconciler
+from douyin_knowledge.policy.triage import ContentType
 
 router = APIRouter()
 
@@ -325,6 +326,33 @@ class RuleRequest(BaseModel):
     target_creator_id: str | None = None
     target_collection_id: str | None = None
     matcher: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _check_semantic_matcher(self) -> RuleRequest:
+        """Reject a semantic rule whose labels are not real content types.
+
+        A typo here fails silently and expensively: the rule is stored, listed, shown as
+        enabled, and never matches, so the user believes they are skipping variety clips
+        while paying to process every one of them. Better a 422 at write time (DEC-016).
+        """
+        if self.rule_type != "semantic":
+            return self
+        matcher = self.matcher or {}
+        raw = matcher.get("content_types")
+        wanted = [raw] if isinstance(raw, str) else list(raw or [])
+        if not wanted:
+            raise ValueError("a semantic rule needs matcher.content_types")
+        known = {str(c) for c in ContentType}
+        unknown = sorted({str(c) for c in wanted} - known)
+        if unknown:
+            raise ValueError(
+                f"unknown content_types {unknown}; known values are {sorted(known)}"
+            )
+        if str(ContentType.UNKNOWN) in {str(c) for c in wanted}:
+            # `unknown` means triage could not tell. Letting it drive an exclusion would
+            # turn every classifier miss into silent data loss.
+            raise ValueError("content_types cannot include 'unknown'")
+        return self
 
 
 def _rule_payload(rule: ProcessingRule) -> dict[str, Any]:

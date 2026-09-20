@@ -34,6 +34,16 @@ export interface PolicyStatus {
   decided_at_ms: number | null
 }
 
+export interface TriageInfo {
+  // `null` means never classified; `'unknown'` means classified and the classifier could
+  // not tell. Collapsing the two would hide whether triage has run at all.
+  content_type: string | null
+  confidence: number | null
+  method: string | null
+  model_name: string | null
+  computed_at_ms: number | null
+}
+
 export interface SourceSummary {
   id: string
   platform: string
@@ -49,6 +59,7 @@ export interface SourceSummary {
   duration_ms: number | null
   availability: string
   processing: ProcessingState
+  triage: TriageInfo
   collections?: { id: string; name: string | null }[]
 }
 

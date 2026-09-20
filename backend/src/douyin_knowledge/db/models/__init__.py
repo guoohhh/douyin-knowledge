@@ -35,6 +35,7 @@ from douyin_knowledge.db.models.policy import (
     PolicyDecision,
     ProcessingRule,
     SourceProcessingState,
+    SourceTriage,
 )
 from douyin_knowledge.db.models.processing import (
     EvidenceUnit,
@@ -99,6 +100,7 @@ __all__ = [
     "SourceAsset",
     "SourceCollectionMembership",
     "SourceProcessingState",
+    "SourceTriage",
     "SourceSnapshot",
     "Topic",
     "UserAnnotation",

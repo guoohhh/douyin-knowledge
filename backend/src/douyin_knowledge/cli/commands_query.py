@@ -339,3 +339,69 @@ def policy_reconcile() -> None:
             f"reevaluated {summary.reevaluated}, changed {summary.changed} "
             f"({summary.now_hidden} hidden, {summary.now_visible} visible)"
         )
+
+
+@policy_app.command("triage")
+def policy_triage(
+    limit: Annotated[int, typer.Option(help="How many unclassified sources to label.")] = 200,
+    force: Annotated[bool, typer.Option("--force", help="Recompute even if cached.")] = False,
+    model: Annotated[
+        bool, typer.Option("--model", help="Allow the model fallback when cues are inconclusive.")
+    ] = False,
+    json_out: JsonOpt = False,
+) -> None:
+    """Classify sources into content types without processing them.
+
+    Triage normally runs lazily, only when a semantic rule needs an answer, so a library
+    with no such rules carries no labels at all (DEC-016). That is the right default for
+    cost but the wrong one for deciding *whether* to write a rule: you cannot ask "how
+    much of my collection is movie clips?" until something has looked. This command is
+    that look, and it is deliberately separate from processing — it reads metadata only,
+    creates no runs, and changes no source's visibility.
+    """
+    from sqlalchemy import select
+
+    from douyin_knowledge.db import session_scope
+    from douyin_knowledge.db.models.capture import Source
+    from douyin_knowledge.policy.factory import build_triage
+
+    _ready()
+    with session_scope() as session:
+        service = build_triage(session)
+        if model and service.triage.model is None:
+            # Better to refuse than to quietly run cue-only and report a full pass: the
+            # caller asked for the escalation path and would read the labels as stronger
+            # evidence than they are.
+            fail(
+                "no triage model available; set DK_ENABLE_TRIAGE_MODEL_FALLBACK=1 "
+                "and a non-mock DK_AI_PROVIDER"
+            )
+        sources = list(
+            session.scalars(
+                select(Source)
+                .where(Source.locally_deleted_at_ms.is_(None))
+                .order_by(Source.saved_at_ms.desc().nullslast())
+                .limit(limit)
+            )
+        )
+        counts: dict[str, int] = {}
+        for source in sources:
+            result = service.classify(source, allow_model=model, force=force)
+            counts[str(result.content_type)] = counts.get(str(result.content_type), 0) + 1
+
+        by_type = dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+        payload: dict[str, object] = {
+            "classified": len(sources),
+            "model_calls": len(service.triage.model_calls),
+            "by_content_type": by_type,
+        }
+        if json_out:
+            emit(payload, as_json=True)
+            return
+        table = Table(title=f"triage: {len(sources)} source(s)")
+        table.add_column("content type")
+        table.add_column("count", justify="right")
+        for label, count in by_type.items():
+            table.add_row(label, str(count))
+        console.print(table)
+        console.print(f"[dim]model calls: {len(service.triage.model_calls)}[/dim]")

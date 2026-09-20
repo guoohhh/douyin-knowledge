@@ -25,7 +25,12 @@ from douyin_knowledge.db.models.capture import (
     SourceCollectionMembership,
 )
 from douyin_knowledge.db.models.entities import Claim, EntityMention
-from douyin_knowledge.db.models.policy import PolicyDecision, ProcessingRule, SourceProcessingState
+from douyin_knowledge.db.models.policy import (
+    PolicyDecision,
+    ProcessingRule,
+    SourceProcessingState,
+    SourceTriage,
+)
 from douyin_knowledge.db.models.processing import EvidenceUnit, ProcessingRun, RetrievalChunk
 from douyin_knowledge.jobs.types import JobType, Priority
 from douyin_knowledge.policy.reconciler import HIDDEN_ACTIONS
@@ -149,7 +154,36 @@ def _state_map(db: DbSession, source_ids: list[str]) -> dict[str, SourceProcessi
     return {row.source_id: row for row in rows}
 
 
-def _source_summary(source: Source, state: SourceProcessingState | None) -> dict[str, Any]:
+def _triage_map(db: DbSession, source_ids: list[str]) -> dict[str, SourceTriage]:
+    """Batched so a page of 100 sources costs one query, not 100 (DEC-016).
+
+    Read straight from the cache table rather than through `TriageService`: a list view
+    must never classify on demand. Classification belongs to the policy gate, and a GET
+    that silently triggered it would make browsing cost money.
+    """
+    if not source_ids:
+        return {}
+    rows = db.scalars(select(SourceTriage).where(SourceTriage.source_id.in_(source_ids))).all()
+    return {row.source_id: row for row in rows}
+
+
+def _triage_block(triage: SourceTriage | None) -> dict[str, Any]:
+    return {
+        # `null` and `"unknown"` mean different things and the UI needs to tell them apart:
+        # never classified, versus classified and the classifier could not tell (DEC-016).
+        "content_type": triage.content_type if triage else None,
+        "confidence": triage.confidence if triage else None,
+        "method": triage.method if triage else None,
+        "model_name": triage.model_name if triage else None,
+        "computed_at_ms": triage.computed_at_ms if triage else None,
+    }
+
+
+def _source_summary(
+    source: Source,
+    state: SourceProcessingState | None,
+    triage: SourceTriage | None = None,
+) -> dict[str, Any]:
     return {
         "id": source.id,
         "platform": source.platform,
@@ -180,6 +214,7 @@ def _source_summary(source: Source, state: SourceProcessingState | None) -> dict
             "policy_action": state.current_policy_action if state else None,
             "excluded": bool(state and state.current_policy_action in HIDDEN_ACTIONS),
         },
+        "triage": _triage_block(triage),
     }
 
 
@@ -190,6 +225,9 @@ def list_sources(
     creator: str | None = None,
     collection_id: str | None = None,
     processing_status: str | None = None,
+    content_type: str | None = Query(
+        default=None, description="Filter on the cheap triage label, e.g. `movie_clip`"
+    ),
     q: str | None = Query(default=None, description="Substring match on title/caption"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -215,6 +253,12 @@ def list_sources(
         stmt = stmt.join(
             SourceProcessingState, SourceProcessingState.source_id == Source.id
         ).where(SourceProcessingState.processing_status == processing_status)
+    if content_type:
+        # Inner join on purpose: an unclassified source is not a member of any content
+        # type, and returning it under a specific label would misreport what triage knows.
+        stmt = stmt.join(SourceTriage, SourceTriage.source_id == Source.id).where(
+            SourceTriage.content_type == content_type
+        )
     if q:
         needle = f"%{q}%"
         stmt = stmt.where(Source.title.ilike(needle) | Source.caption_raw.ilike(needle))
@@ -232,12 +276,14 @@ def list_sources(
         .limit(limit)
     ).all()
 
-    states = _state_map(db, [r.id for r in rows])
+    ids = [r.id for r in rows]
+    states = _state_map(db, ids)
+    triages = _triage_map(db, ids)
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "sources": [_source_summary(r, states.get(r.id)) for r in rows],
+        "sources": [_source_summary(r, states.get(r.id), triages.get(r.id)) for r in rows],
     }
 
 
@@ -316,7 +362,7 @@ def get_source(source_id: str, db: DbSession) -> dict[str, Any]:
         rule = db.get(ProcessingRule, decision.rule_id)
         rule_name = rule.name if rule else None
 
-    summary = _source_summary(source, state)
+    summary = _source_summary(source, state, db.get(SourceTriage, source_id))
     summary.update(
         {
             "policy": {
