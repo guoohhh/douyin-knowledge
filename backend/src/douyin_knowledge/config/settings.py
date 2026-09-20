@@ -104,7 +104,6 @@ class Settings(BaseSettings):
     # gpt-4o-mini, and the provenance record lied about which model produced a claim.
     triage_model: str | None = None
     extraction_model: str | None = None
-    query_planner_model: str | None = None
     answer_model: str | None = None
     wiki_router_model: str | None = None
     wiki_integration_model: str | None = None
@@ -223,7 +222,6 @@ class Settings(BaseSettings):
     _ROLE_KIND: ClassVar[dict[str, str]] = {
         "triage": "chat",
         "extraction": "chat",
-        "query_planner": "chat",
         "answer": "chat",
         "wiki_router": "chat",
         "wiki_integration": "chat",

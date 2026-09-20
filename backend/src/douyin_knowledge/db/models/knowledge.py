@@ -18,6 +18,10 @@ class KnowledgeItem(Base):
 
     Currency is derived from ``source_processing_state.current_processing_run_id``;
     there is deliberately no ``is_current`` flag to drift out of sync.
+
+    NOTE: The write path for this table is not implemented. The schema exists but no
+    code currently creates KnowledgeItem rows. This is scaffolding for a future feature,
+    not a working abstraction.
     """
 
     __tablename__ = "knowledge_items"

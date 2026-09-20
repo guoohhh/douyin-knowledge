@@ -31,15 +31,12 @@ class JobType(StrEnum):
     SYNC_COLLECTION_SOURCES = "sync_collection_sources"
     ACQUIRE_MEDIA = "acquire_media"
     PROCESS_SOURCE = "process_source"
-    ENRICH_SOURCE = "enrich_source"
     REPROCESS_SOURCE = "reprocess_source"
-    CLEANUP_CACHE = "cleanup_cache"
     REBUILD_FTS = "rebuild_fts"
     REBUILD_VECTORS = "rebuild_vectors"
     WIKI_INTEGRATE = "wiki_integrate"
     WIKI_LINT = "wiki_lint"
     WIKI_MAINTAIN = "wiki_maintain"
-    EXPORT_MARKDOWN = "export_markdown"
 
 
 class JobStatus(StrEnum):

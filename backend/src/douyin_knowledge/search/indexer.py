@@ -213,7 +213,12 @@ def collect_entity_candidates(session: Session) -> list[IndexCandidate]:
 
 
 def collect_wiki_candidates(session: Session) -> list[IndexCandidate]:
-    """Current wiki revisions only — history is not searchable."""
+    """Current wiki revisions only — history is not searchable.
+
+    NOTE: Wiki documents are indexed but not yet retrieved. HybridRetriever currently
+    only retrieves DOC_TYPE_CHUNK documents. This indexer does real work and should not
+    be removed, but the retrieval path that reads these documents is not implemented.
+    """
     stmt = (
         select(WikiPage, WikiRevision)
         .join(WikiRevision, WikiRevision.page_id == WikiPage.id)

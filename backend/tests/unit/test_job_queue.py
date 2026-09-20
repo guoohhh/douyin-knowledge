@@ -51,7 +51,7 @@ def test_claim_respects_priority_then_fifo(session: Session) -> None:
 
 def test_claim_skips_future_jobs(session: Session) -> None:
     q = JobQueue(session)
-    q.enqueue(JobType.CLEANUP_CACHE, dedupe_key="later", available_at_ms=now_ms() + 60_000)
+    q.enqueue(JobType.REBUILD_FTS, dedupe_key="later", available_at_ms=now_ms() + 60_000)
     assert q.claim() is None
 
 
@@ -127,10 +127,10 @@ def test_worker_runs_handler_and_marks_success(engine, settings: Settings) -> No
         ctx.emit("progress", "halfway")
 
     registry = HandlerRegistry()
-    registry.register(JobType.EXPORT_MARKDOWN, handler)
+    registry.register(JobType.WIKI_MAINTAIN, handler)
 
     with session_scope() as s:
-        JobQueue(s).enqueue(JobType.EXPORT_MARKDOWN, payload={"value": "hi"}, dedupe_key="w1")
+        JobQueue(s).enqueue(JobType.WIKI_MAINTAIN, payload={"value": "hi"}, dedupe_key="w1")
 
     worker = Worker(registry, settings=settings, name="test-worker")
     assert worker.run_once() is True
