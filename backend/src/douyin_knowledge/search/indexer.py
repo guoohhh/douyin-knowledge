@@ -27,12 +27,11 @@ from douyin_knowledge.core.text import content_hash, normalize_ws
 from douyin_knowledge.db.dml import execute_rowcount
 from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.entities import Entity, EntityAlias
-from douyin_knowledge.db.models.policy import SourceProcessingState
 from douyin_knowledge.db.models.processing import RetrievalChunk
 from douyin_knowledge.db.models.search import SearchDocument, VectorDocument
 from douyin_knowledge.db.models.wiki import WikiPage, WikiRevision
+from douyin_knowledge.knowledge.eligibility import current_eligible_runs
 from douyin_knowledge.observability.logging import get_logger
-from douyin_knowledge.policy.reconciler import HIDDEN_ACTIONS
 from douyin_knowledge.search.tokenizer import TOKENIZER_VERSION, segment_for_index
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -99,15 +98,7 @@ def _current_run_ids(session: Session, source_ids: Sequence[str] | None = None) 
     keyword and vector paths even though retrieval's own filter rejects it (DEC-015).
     Reindexing after a reversal puts it back, since nothing was deleted.
     """
-    stmt = select(
-        SourceProcessingState.source_id, SourceProcessingState.current_processing_run_id
-    ).where(
-        SourceProcessingState.current_processing_run_id.is_not(None),
-        SourceProcessingState.current_policy_action.not_in(sorted(HIDDEN_ACTIONS)),
-    )
-    if source_ids:
-        stmt = stmt.where(SourceProcessingState.source_id.in_(list(source_ids)))
-    return {row[0]: row[1] for row in session.execute(stmt) if row[1]}
+    return current_eligible_runs(session, source_ids)
 
 
 def collect_chunk_candidates(

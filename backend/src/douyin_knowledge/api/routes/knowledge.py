@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 
 from douyin_knowledge.api.deps import DbSession, RetrieverDep, WikiUpdaterDep
 from douyin_knowledge.db.models.capture import Source
@@ -21,7 +21,6 @@ from douyin_knowledge.db.models.entities import (
     EntityAlias,
     EntityMention,
 )
-from douyin_knowledge.db.models.policy import SourceProcessingState
 from douyin_knowledge.db.models.processing import EvidenceUnit
 from douyin_knowledge.db.models.wiki import (
     WikiLink,
@@ -30,39 +29,23 @@ from douyin_knowledge.db.models.wiki import (
     WikiRevision,
     WikiSupport,
 )
+from douyin_knowledge.knowledge.eligibility import eligible_claims
 
 router = APIRouter()
 
 STATUS_ACTIVE = "active"
 
 
-def _current_run_ids(db: DbSession) -> dict[str, str]:
-    """source_id -> current run id. Every claim read goes through this (DB-004)."""
-    rows = db.execute(
-        select(
-            SourceProcessingState.source_id,
-            SourceProcessingState.current_processing_run_id,
-        ).where(SourceProcessingState.current_processing_run_id.is_not(None))
-    ).all()
-    return {source_id: run_id for source_id, run_id in rows}
+def _live_claims(db: DbSession, stmt: Select[tuple[Claim]]) -> list[Claim]:
+    """Claims this surface may present, per the shared eligibility rule.
 
-
-def _live_claims(db: DbSession, stmt) -> list[Claim]:
-    """Filter a claim query down to the current run of each non-deleted source."""
-    current = _current_run_ids(db)
-    if not current:
-        return []
-    deleted = set(
-        db.scalars(
-            select(Source.id).where(Source.locally_deleted_at_ms.is_not(None))
-        ).all()
-    )
-    return [
-        claim
-        for claim in db.scalars(stmt)
-        if claim.source_id not in deleted
-        and current.get(claim.source_id) == claim.processing_run_id
-    ]
+    This used to filter on the run pointer alone, which made entity pages and claim counts
+    the one place an excluded or `metadata_only` source stayed visible after it had already
+    vanished from Ask and search, and the one place a downgraded claim was still stated as
+    fact. Both filters now come from `knowledge.eligibility` so this surface cannot drift
+    from the retriever and the wiki again.
+    """
+    return eligible_claims(db, stmt)
 
 
 # -------------------------------------------------------------------- entities

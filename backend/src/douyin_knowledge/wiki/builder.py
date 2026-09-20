@@ -25,23 +25,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.core.text import content_hash, normalize_identity
-from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.entities import Claim, Entity, EntityAlias
 from douyin_knowledge.db.models.knowledge import Topic
-from douyin_knowledge.db.models.policy import SourceProcessingState
 from douyin_knowledge.db.models.wiki import (
     WikiLink,
     WikiPage,
     WikiRevision,
     WikiSupport,
 )
-from douyin_knowledge.extraction.grounding import is_assertable
+from douyin_knowledge.knowledge.eligibility import current_eligible_runs, eligible_claims
 from douyin_knowledge.observability.logging import get_logger
-from douyin_knowledge.policy.reconciler import HIDDEN_ACTIONS
 from douyin_knowledge.wiki.composer import (
     PAGE_TYPE_ENTITY,
     PAGE_TYPE_TOPIC,
@@ -149,37 +146,18 @@ class WikiBuilder:
         source of truth, reversing the exclusion and recomposing restores the statement
         without any of the underlying claims having been touched (DEC-015).
         """
-        rows = self.session.execute(
-            select(
-                SourceProcessingState.source_id,
-                SourceProcessingState.current_processing_run_id,
-            ).where(
-                SourceProcessingState.current_processing_run_id.is_not(None),
-                SourceProcessingState.current_policy_action.not_in(sorted(HIDDEN_ACTIONS)),
-            )
-        )
-        return {row[0]: row[1] for row in rows if row[1]}
+        return current_eligible_runs(self.session)
 
-    def _live_claims(self, stmt) -> list[Claim]:
+    def _live_claims(self, stmt: Select[tuple[Claim]]) -> list[Claim]:
         """Claims from each source's current run that are safe to state as facts.
 
-        Grounding is filtered here rather than at extraction time because the wiki is
+        Grounding is filtered rather than checked at extraction time because the wiki is
         derived and rebuildable: a claim the validator could only downgrade stays in SQLite
         as the record of what the model produced, but a page that rendered it would present
-        an unverified span as knowledge with a citation attached (P1-2, DEC-017).
+        an unverified span as knowledge with a citation attached (P1-2, DEC-017). The rule
+        is shared with retrieval and the Knowledge API via `knowledge.eligibility`.
         """
-        current = self._current_runs()
-        if not current:
-            return []
-        stmt = stmt.join(Source, Source.id == Claim.source_id).where(
-            Source.locally_deleted_at_ms.is_(None)
-        )
-        return [
-            claim
-            for claim in self.session.scalars(stmt)
-            if current.get(claim.source_id) == claim.processing_run_id
-            and is_assertable(claim.grounding_status)
-        ]
+        return eligible_claims(self.session, stmt)
 
     def claims_for_entity(self, entity_id: str) -> list[Claim]:
         """Claims where the entity is the subject *or* the object.

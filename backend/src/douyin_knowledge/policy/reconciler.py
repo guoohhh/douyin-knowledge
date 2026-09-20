@@ -36,7 +36,7 @@ from douyin_knowledge.db.models.capture import Source, SourceCollectionMembershi
 from douyin_knowledge.db.models.policy import SourceProcessingState
 from douyin_knowledge.observability import get_logger
 from douyin_knowledge.policy.evaluator import PolicyEvaluator
-from douyin_knowledge.policy.models import PolicyAction, RuleType
+from douyin_knowledge.policy.models import HIDDEN_ACTIONS, RuleType
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -45,12 +45,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-#: Actions under which a source's knowledge must not reach normal retrieval, the wiki, or
-#: current answers. ``metadata_only`` stops before knowledge processing, so its content was
-#: never actually understood (PROCESSING_POLICY §12). ``exclude`` is a hard block. Both
-#: preserve historical runs/evidence/claims if they exist, so rule reversal restores
-#: eligibility without reprocessing, but while the rule is active neither may be cited.
-HIDDEN_ACTIONS = frozenset({PolicyAction.EXCLUDE.value, PolicyAction.METADATA_ONLY.value})
+# `HIDDEN_ACTIONS` now lives in `policy.models`, the dependency-free module, so that this
+# one can drive a wiki recompile without forming
+# reconciler -> wiki.builder -> knowledge.eligibility -> reconciler. It is imported above
+# and re-exported in `__all__` because the retriever, indexer and existing tests already
+# reach for it at this path.
 
 
 @dataclass(frozen=True)
@@ -61,6 +60,10 @@ class ReconcileSummary:
     changed: int = 0
     now_hidden: int = 0
     now_visible: int = 0
+    #: Current wiki pages recomposed so they stop presenting a newly hidden source (or
+    #: start presenting a newly visible one). Reported because "the rule applied but the
+    #: wiki still shows it" is otherwise indistinguishable from a bug.
+    wiki_pages_recompiled: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -68,6 +71,7 @@ class ReconcileSummary:
             "changed": self.changed,
             "now_hidden": self.now_hidden,
             "now_visible": self.now_visible,
+            "wiki_pages_recompiled": self.wiki_pages_recompiled,
         }
 
 
@@ -151,7 +155,10 @@ class PolicyReconciler:
         pass would bury the answer to "why is this hidden?" under a run of identical
         "still eligible" rows, and every rule edit reconciles more sources than it changes.
         """
-        reevaluated = changed = now_hidden = now_visible = 0
+        reevaluated = changed = now_hidden = now_visible = pages_recompiled = 0
+        # Only sources whose visibility actually moved need a wiki recompile. Recomposing
+        # for every re-evaluated source would rewrite the whole wiki on any rule edit.
+        changed_source_ids: list[str] = []
 
         for source_id in dict.fromkeys(source_ids):
             source = self.session.get(Source, source_id)
@@ -177,19 +184,71 @@ class PolicyReconciler:
             is_hidden = action in HIDDEN_ACTIONS
             if is_hidden and not was_hidden:
                 now_hidden += 1
+                changed_source_ids.append(source_id)
             elif was_hidden and not is_hidden:
                 now_visible += 1
+                changed_source_ids.append(source_id)
 
         self.session.flush()
+        if changed_source_ids:
+            pages_recompiled = self._reproject_wiki(changed_source_ids)
         summary = ReconcileSummary(
             reevaluated=reevaluated,
             changed=changed,
             now_hidden=now_hidden,
             now_visible=now_visible,
+            wiki_pages_recompiled=pages_recompiled,
         )
         if changed:
             logger.info("policy reconciled", extra=summary.as_dict())
         return summary
+
+    # ------------------------------------------------------- wiki projection
+
+    def _reproject_wiki(self, source_ids: list[str]) -> int:
+        """Recompose the current wiki pages the changed sources could appear on.
+
+        Retrieval and the Knowledge API recompute from the spine on every read, so their
+        policy filter bites immediately. The wiki does not: a committed ``WikiRevision``
+        keeps its text and its ``WikiSupport`` rows until something recompiles it, so
+        without this a newly excluded source stayed on the page as *current* knowledge,
+        cited, after it had already vanished from Ask and from entity pages.
+
+        Recompiling is chosen over marking pages stale because the composer already applies
+        the eligibility rule, so the correct page is one `build_for_entities` call away,
+        whereas a stale flag would need every wiki read path to learn about it and would
+        leave the user with a blank page instead of a correct shorter one. Composition is
+        deterministic and local -- no model calls -- and the set is narrowed to the pages
+        the changed sources actually mention, not the whole wiki.
+
+        History is untouched: `build_for_entities` commits a *new* revision and demotes the
+        previous one, so the old text remains in `wiki_revisions` for the audit trail.
+        """
+        from douyin_knowledge.db.models.entities import EntityMention
+        from douyin_knowledge.wiki.builder import WikiBuilder
+
+        entity_ids = list(
+            dict.fromkeys(
+                row[0]
+                for row in self.session.execute(
+                    select(EntityMention.resolved_entity_id).where(
+                        EntityMention.source_id.in_(source_ids),
+                        EntityMention.resolved_entity_id.is_not(None),
+                    )
+                )
+                if row[0]
+            )
+        )
+        if not entity_ids:
+            return 0
+
+        stats = WikiBuilder(self.session).build_for_entities(entity_ids)
+        recompiled = len([o for o in stats.outcomes if o.page_id])
+        logger.info(
+            "policy reprojected onto wiki",
+            extra={"entities": len(entity_ids), "pages": recompiled},
+        )
+        return recompiled
 
     # ----------------------------------------------------------------- helpers
 

@@ -21,15 +21,14 @@ from sqlalchemy import select
 
 from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.entities import Claim, ClaimEvidence
-from douyin_knowledge.db.models.policy import SourceProcessingState
 from douyin_knowledge.db.models.processing import (
     EvidenceUnit,
     RetrievalChunk,
     RetrievalChunkEvidence,
 )
 from douyin_knowledge.extraction.grounding import is_assertable
+from douyin_knowledge.knowledge.eligibility import current_eligible_runs
 from douyin_knowledge.observability.logging import get_logger
-from douyin_knowledge.policy.reconciler import HIDDEN_ACTIONS
 from douyin_knowledge.retrieval.keyword_search import KeywordSearcher
 from douyin_knowledge.search.indexer import DOC_TYPE_CHUNK, DOC_TYPE_SOURCE
 
@@ -132,22 +131,13 @@ class HybridRetriever:
     def _current_runs(self) -> dict[str, str]:
         """Source id -> current run id, for sources policy currently allows.
 
-        Both filters belong here rather than at the call sites. Currency answers "is this
-        the newest successful extraction?" and policy answers "may this source be cited at
-        all?"; a chunk needs both to be true, and this is the one place every retrieval path
-        passes through. Excluding here is also why exclusion needs no deletes: the rows stay
-        on disk and simply stop being reachable (DEC-015).
+        Currency answers "is this the newest successful extraction?" and policy answers
+        "may this source be cited at all?"; a chunk needs both. The rule itself lives in
+        `knowledge.eligibility` so retrieval, the wiki and the Knowledge API share one
+        definition. Excluding here is also why exclusion needs no deletes: the rows stay on
+        disk and simply stop being reachable (DEC-015).
         """
-        rows = self.session.execute(
-            select(
-                SourceProcessingState.source_id,
-                SourceProcessingState.current_processing_run_id,
-            ).where(
-                SourceProcessingState.current_processing_run_id.is_not(None),
-                SourceProcessingState.current_policy_action.not_in(sorted(HIDDEN_ACTIONS)),
-            )
-        )
-        return {row[0]: row[1] for row in rows if row[1]}
+        return current_eligible_runs(self.session)
 
     def _current_chunk_ids(self, source_ids: Sequence[str] | None = None) -> set[str]:
         """Chunk ids belonging to each source's current run, excluding deleted sources."""
