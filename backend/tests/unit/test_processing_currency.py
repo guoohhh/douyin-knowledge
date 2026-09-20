@@ -10,7 +10,6 @@ Related: superseded runs cannot leak into current retrieval/wiki/answers.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from douyin_knowledge.core.clock import now_ms
@@ -102,7 +101,7 @@ class TestFailedReprocessingPreservesCurrentRun:
         session.flush()
 
         # Reprocessing attempt fails
-        run2 = _run(session, source, status="failed", achieved_level=0)
+        _run(session, source, status="failed", achieved_level=0)
         # No evidence created for failed run
         session.flush()
 
