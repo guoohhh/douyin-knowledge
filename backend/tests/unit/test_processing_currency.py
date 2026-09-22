@@ -203,7 +203,7 @@ class TestSupersededRunsDoNotLeakIntoCurrent:
         self, session: Session, source: Source, state: SourceProcessingState
     ) -> None:
         """Wiki must not compose claims from a superseded run."""
-        from douyin_knowledge.db.models.entities import Claim, Entity
+        from douyin_knowledge.db.models.entities import Claim, ClaimEvidence, Entity
         from douyin_knowledge.wiki.builder import WikiBuilder
 
         entity = Entity(
@@ -250,6 +250,21 @@ class TestSupersededRunsDoNotLeakIntoCurrent:
 
         state.current_processing_run_id = run2.id
         state.processing_status = "succeeded"
+        session.flush()
+
+        # Both claims need same-source evidence (eligibility rule 6). This test is about
+        # run currency, so neither claim may be excluded for lacking provenance instead.
+        for claim, label in ((claim1, "run1"), (claim2, "run2")):
+            evidence = EvidenceUnit(
+                source_id=source.id,
+                kind="asr",
+                raw_text="好运茶餐厅人均",
+                normalized_text="好运茶餐厅人均",
+                content_hash=f"h_{label}_price",
+            )
+            session.add(evidence)
+            session.flush()
+            session.add(ClaimEvidence(claim_id=claim.id, evidence_id=evidence.id))
         session.flush()
 
         # Wiki builder must see only run2's claim

@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select
 
 from douyin_knowledge.conversation.answer_generator import AnswerGenerator, GeneratedAnswer
-from douyin_knowledge.conversation.citation_builder import CitationBuilder
+from douyin_knowledge.conversation.citation_builder import CitationBuilder, CitationSet
 from douyin_knowledge.conversation.scope import ScopeDecision, classify_scope
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.core.text import truncate
@@ -240,12 +240,22 @@ class ConversationManager:
                 "plan": plan.as_dict(),
                 "parser": plan_diagnostics.get("parser_attempts"),
                 "plan_error": plan_diagnostics.get("plan_error"),
+                "refused": plan_diagnostics.get("refused"),
             },
         )
         self.session.add(user_message)
         self.session.flush()
 
-        if decision.uses_collection and plan.is_structured:
+        refused = plan_diagnostics.get("refused")
+        if refused is not None:
+            # A refused condition skips retrieval entirely. Running the unstructured path
+            # would search the raw text of a query whose meaning we just admitted we cannot
+            # express -- 不是日料 matches 日料 -- so the honest answer is to say which
+            # condition V1 cannot apply, not to answer a nearby question instead.
+            result = self._empty_result(resolved_query)
+            result.diagnostics["refused"] = dict(refused)
+            citation_set = CitationSet()
+        elif decision.uses_collection and plan.is_structured:
             # Structured path: hard constraints select the result set, similarity only ranks
             # it. `source_ids` goes *into* execution rather than being applied to its output.
             # Filtering afterwards only cleaned up `chunks` and `claims`, while
@@ -260,10 +270,7 @@ class ConversationManager:
             )
             citation_set = self.citations.build(result)
         else:
-            from douyin_knowledge.conversation.citation_builder import CitationSet
-            from douyin_knowledge.retrieval.retriever import RetrievalResult
-
-            result = RetrievalResult(query=resolved_query)
+            result = self._empty_result(resolved_query)
             citation_set = CitationSet()
 
         answer = self.generator.generate(resolved_query, result, citation_set, decision)
@@ -311,6 +318,12 @@ class ConversationManager:
             citations=citation_set.as_list(),
         )
 
+    @staticmethod
+    def _empty_result(query: str) -> Any:
+        from douyin_knowledge.retrieval.retriever import RetrievalResult
+
+        return RetrievalResult(query=query)
+
     def _next_state(
         self,
         previous: dict[str, Any],
@@ -320,6 +333,16 @@ class ConversationManager:
     ) -> dict[str, Any]:
         """Carry forward just enough to resolve the next follow-up."""
         entity_names: list[str] = []
+        # Structured matches first, and in rank order. A structured answer lists entities
+        # that qualified out of `EntityUserState` or a claim constraint, and a user-state-only
+        # plan produces matches with no claims at all -- so deriving follow-up context from
+        # `claims` alone left 第二家呢 unresolvable after exactly the answers that were
+        # presented as a numbered list of entities.
+        structured = getattr(result, "structured", None)
+        for match in getattr(structured, "matches", []) or []:
+            name = (getattr(match.entity, "canonical_name", "") or "").strip()
+            if name and name not in entity_names:
+                entity_names.append(name)
         for claim in getattr(result, "claims", []):
             subject = (claim.subject_text or "").strip()
             if subject and subject not in entity_names:

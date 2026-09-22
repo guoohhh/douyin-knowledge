@@ -131,7 +131,21 @@ class RetrievalResult:
         return seen
 
     def is_empty(self) -> bool:
-        return not self.chunks and not self.claims
+        """Whether there is nothing to answer from.
+
+        Structured matches count, for the same reason they count in `source_ids` above.
+        A user-state-only plan (我想去的店) qualifies entities out of `EntityUserState`
+        and derives no claim constraints, so it produces matches with empty `supports`
+        and therefore no chunks and no claims. Judging emptiness on chunks and claims
+        alone called that a no-result and told the user 收藏里没有匹配这个说法的内容 --
+        false, because the entity was found and did qualify. UserState is user-authored
+        state with its own lifetime (DEC-018); it does not need a creator claim behind
+        it to be real, so a match without claims is a thin answer, not an absent one.
+        """
+        return not self.chunks and not self.claims and not self._has_structured_matches()
+
+    def _has_structured_matches(self) -> bool:
+        return self.structured is not None and bool(self.structured.matches)
 
 
 class HybridRetriever:

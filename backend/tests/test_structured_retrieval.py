@@ -22,7 +22,7 @@ assertions are meaningful rather than vacuous.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from douyin_knowledge.core.clock import now_ms
@@ -796,6 +796,38 @@ class TestEligibilityImplementationsAgree:
             predicate="price_per_person", number=80, grounding_status=None,
         ).id
 
+        # Rule 6: no evidence from the claim's own source. Neither case can arise from a
+        # normal write -- the grounding validator returns `rejected_context` rather than
+        # persist a claim backed by another source -- so both are built the healthy way and
+        # then broken, which is exactly how they would appear in a corrupted database.
+        bare_entity = corpus.entity("无凭屋")
+        bare_source, bare_run = corpus.source("无凭屋 探店")
+        bare_claim = corpus.claim(
+            bare_entity, bare_source, bare_run, predicate="price_per_person", number=80
+        )
+        ids["no_evidence"] = bare_claim.id
+        corpus.session.execute(
+            delete(ClaimEvidence).where(ClaimEvidence.claim_id == bare_claim.id)
+        )
+
+        crossed_entity = corpus.entity("借凭屋")
+        crossed_source, crossed_run = corpus.source("借凭屋 探店")
+        crossed_claim = corpus.claim(
+            crossed_entity, crossed_source, crossed_run,
+            predicate="price_per_person", number=80,
+        )
+        ids["cross_source_evidence"] = crossed_claim.id
+        corpus.session.execute(
+            delete(ClaimEvidence).where(ClaimEvidence.claim_id == crossed_claim.id)
+        )
+        foreign_evidence = corpus.session.scalars(
+            select(EvidenceUnit).where(EvidenceUnit.source_id == source.id)
+        ).first()
+        assert foreign_evidence is not None
+        corpus.session.add(
+            ClaimEvidence(claim_id=crossed_claim.id, evidence_id=foreign_evidence.id)
+        )
+
         corpus.session.flush()
         return ids
 
@@ -826,6 +858,8 @@ class TestEligibilityImplementationsAgree:
             "superseded",
             "downgraded",
             "rejected_span",
+            "no_evidence",
+            "cross_source_evidence",
         ):
             assert all_five_rules[key] not in selected, f"{key} must not be eligible"
 

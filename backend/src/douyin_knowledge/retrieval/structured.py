@@ -40,6 +40,7 @@ from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.entities import Claim, Entity
 from douyin_knowledge.db.models.policy import SourceProcessingState
 from douyin_knowledge.db.models.userstate import EntityUserState
+from douyin_knowledge.extraction.entity_resolver import EntityResolver
 from douyin_knowledge.extraction.grounding import is_assertable
 from douyin_knowledge.knowledge.eligibility import apply_claim_eligibility
 from douyin_knowledge.observability.logging import get_logger
@@ -120,6 +121,24 @@ class ConstraintSupport:
     @property
     def has_conflict(self) -> bool:
         return bool(self.conflicting_values)
+
+    def merge_with(self, other: ConstraintSupport) -> None:
+        """Merge `other`'s claims into this support, deduplicating by claim id.
+
+        Used when two candidate entities redirect to the same survivor: both sides'
+        satisfying and eligible claims must reach the final match, or a conflict the merge
+        inherited is silently dropped.
+        """
+        seen_ids = {c.id for c in self.satisfied_by}
+        for claim in other.satisfied_by:
+            if claim.id not in seen_ids:
+                self.satisfied_by.append(claim)
+                seen_ids.add(claim.id)
+        seen_ids = {c.id for c in self.all_eligible}
+        for claim in other.all_eligible:
+            if claim.id not in seen_ids:
+                self.all_eligible.append(claim)
+                seen_ids.add(claim.id)
 
 
 @dataclass
@@ -635,6 +654,11 @@ class StructuredExecutor:
                 )
             }
 
+        # Merged entities are redirects: a Claim attached to a merged Entity must not cause
+        # the deprecated Entity to be returned. Follow the merge pointer to the survivor,
+        # preserve provenance (the dead entity's claims are what the survivor qualifies on),
+        # and deduplicate when multiple candidates resolve to the same survivor.
+        matches_by_survivor_id: dict[str, StructuredMatch] = {}
         for entity_id in candidate_ids:
             entity = entities.get(entity_id)
             if entity is None:
@@ -649,7 +673,31 @@ class StructuredExecutor:
             if isinstance(match, StructuredRejection):
                 result.rejections.append(match)
                 continue
-            result.matches.append(match)
+
+            # Follow merged_into_entity_id to the surviving entity, bounded at 8 hops against
+            # cycles. The pointer is what counts: status can disagree with it (no CHECK
+            # constraint ties them), and everywhere else that handles merges (wiki builder,
+            # search indexer, Knowledge API detail route) keys off the pointer.
+            survivor = EntityResolver._follow_merge(self.session, entity, max_hops=8)
+            if survivor.id != entity.id:
+                # The candidate was a merged entity and we followed its chain. Replace the
+                # entity pointer with the survivor so the answer names the right one.
+                match.entity = survivor
+
+            # Deduplicate: if two candidates redirect to the same survivor, merge their
+            # supports so the answer shows all the evidence behind the survivor rather than
+            # an arbitrary subset. The existing match wins for entity_type/subtype checks.
+            if survivor.id in matches_by_survivor_id:
+                existing = matches_by_survivor_id[survivor.id]
+                for field_name, support in match.supports.items():
+                    if field_name in existing.supports:
+                        existing.supports[field_name].merge_with(support)
+                    else:
+                        existing.supports[field_name] = support
+            else:
+                matches_by_survivor_id[survivor.id] = match
+
+        result.matches = list(matches_by_survivor_id.values())
 
         # `plan.limit` is deliberately *not* applied here. Stopping at the limit would mean
         # similarity ranks an arbitrary prefix of the qualifying set -- whichever rows

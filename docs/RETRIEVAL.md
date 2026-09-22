@@ -332,6 +332,12 @@ hard constraints; see 5.1. The examples above are not literal: restaurants are
 executed, and `user_state != visited` is not expressible — the supported states are
 `want_to_go`, `want_to_try` and `want_to_learn`.
 
+Negation is not expressible either, in any of the three claim fields, and a query that states
+one is refused rather than parsed (DEC-021) — `不是日料` must not become `cuisine = 日料`. Nor
+is conjunction on a single field: `人均100以下和200以上` states two conditions and is refused as
+a whole, because collapsing it produced `>= 100`, which matches neither bound and admits the
+band between them.
+
 **Hard constraints and similarity signals are different kinds of thing.** A structured
 constraint is a condition on membership: a candidate that fails it is not a worse answer, it
 is not an answer. FTS and vector scores are signals about *ordering and presentation* among
@@ -621,6 +627,26 @@ follow-ups, parses and persists the plan, and routes to `retrieve_structured` wh
 uses the collection and the plan is structured. The guarantees above hold for the real Ask
 surface, not only for a direct caller of the retriever.
 
+Two consequences of running through `ask()` rather than the executor alone. **A result with
+only structured matches is not empty.** A user-state-only plan (我想去的店) qualifies entities
+out of `EntityUserState` and derives no claim constraints, so its matches carry no chunks and
+no claims; `is_empty()` counts `structured.matches` for the same reason `source_ids` does, or
+the turn would report 收藏里没有匹配这个说法的内容 about an entity it had just found. Such an
+answer names the entity and cites nothing — `has_evidence` is derived from the citation list,
+not defaulted — which is a thin answer, not an absent one (DEC-018). **Returned structured
+entities become follow-up context.** `_next_state` reads match names in rank order ahead of
+claim subjects, so `第二家呢` resolves against the list the user was actually shown.
+
+A structured query stating a condition V1 cannot express is **refused before any retrieval
+runs**, not degraded to a text search (DEC-021). `parse_query` records
+`diagnostics["refused"]`, `ask()` skips retrieval, and the refusal message is returned ahead
+of every no-result reason in 15 — those describe a search that ran, and a refused query never
+ran one. Degrading would answer the opposite question: a text search for `不是日料的旺角餐厅`
+matches `日料`. Exactly two shapes are refused — a negation cue immediately before a district
+or cuisine alias, and two price numbers each carrying their own comparison marker. `人均大概80`
+is *not* refused: it states no comparison, so it stays unsupported-and-silent, contributing no
+numeric constraint rather than an invented threshold.
+
 Rejections are retained, not discarded. Each carries the entity, the constraint that failed
 and a human-readable detail, which is what lets the system say "有匹配的店，但人均 150 超过
 了 100" instead of "没找到".
@@ -847,7 +873,12 @@ It may offer actions such as:
 
 But it should not fabricate a match.
 
----
+**What V1 implements.** `_no_result_reasons` distinguishes the reasons above, and reads
+structured rejections first when present because they are strictly more informative: "有匹配的
+店，但人均 150 超过了 100" tells the user what to change, while "收藏里没有匹配这个说法的内容"
+is false in that situation. One reason outranks even those — a *refused* condition (DEC-021).
+Every other reason describes a search that ran and found nothing; a refused query never ran
+one, so claiming an absence would report a check that never happened.
 
 ## 16. Conversation Memory / Follow-ups
 
@@ -878,6 +909,13 @@ current answer evidence set
 ```
 
 This state is separate from the long-term personal knowledge base.
+
+**What V1 implements.** `_next_state` carries forward entity names, source ids and the citation
+count. Names come from structured match order first and claim subjects second — a structured
+answer is a numbered list of entities, and on a user-state-only plan there are no claims at all,
+so reading claim subjects alone left `第二家呢` unresolvable after exactly the answers that were
+presented as a list. Follow-up resolution itself is textual: `_resolve_followup` appends the
+previous turn's entity names to the query rather than consuming `conversation_entity_refs`.
 
 ---
 

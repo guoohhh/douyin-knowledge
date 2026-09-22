@@ -340,7 +340,7 @@ class TestDowngradedClaimsStayOutOfDerivedOutput:
     def test_a_downgraded_claim_is_not_composed_into_a_wiki_page(
         self, session: Session, source: Source, run: ProcessingRun
     ) -> None:
-        from douyin_knowledge.db.models.entities import Claim, Entity
+        from douyin_knowledge.db.models.entities import Claim, ClaimEvidence, Entity
         from douyin_knowledge.db.models.policy import SourceProcessingState
         from douyin_knowledge.wiki.builder import WikiBuilder
 
@@ -359,22 +359,34 @@ class TestDowngradedClaimsStayOutOfDerivedOutput:
         session.flush()
 
         def _add(status: str | None, predicate: str) -> None:
-            session.add(
-                Claim(
-                    source_id=source.id,
-                    processing_run_id=run.id,
-                    subject_entity_id=entity.id,
-                    subject_text="好运茶餐厅",
-                    predicate=predicate,
-                    value_type="number",
-                    value_number=80,
-                    currency="CNY",
-                    claim_kind="measurement",
-                    provenance_type="creator_statement",
-                    attribution="unknown_creator",
-                    grounding_status=status,
-                )
+            # Eligibility rule 6 requires evidence from the claim's own source, so each
+            # claim gets a real unit here. This test is about grounding *status*, and a
+            # claim with no evidence at all would be excluded for the wrong reason.
+            evidence = EvidenceUnit(
+                source_id=source.id,
+                kind="asr",
+                raw_text=f"好运茶餐厅 {predicate}",
+                normalized_text=f"好运茶餐厅 {predicate}",
+                content_hash=content_hash(f"{predicate}|{status}"),
             )
+            session.add(evidence)
+            claim = Claim(
+                source_id=source.id,
+                processing_run_id=run.id,
+                subject_entity_id=entity.id,
+                subject_text="好运茶餐厅",
+                predicate=predicate,
+                value_type="number",
+                value_number=80,
+                currency="CNY",
+                claim_kind="measurement",
+                provenance_type="creator_statement",
+                attribution="unknown_creator",
+                grounding_status=status,
+            )
+            session.add(claim)
+            session.flush()
+            session.add(ClaimEvidence(claim_id=claim.id, evidence_id=evidence.id))
 
         _add("valid", "price_per_person")
         _add("downgraded", "closing_hour")

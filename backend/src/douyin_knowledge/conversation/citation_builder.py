@@ -183,13 +183,26 @@ class CitationBuilder:
         return citation_set
 
     def _claim_evidence_map(self, claim_ids: Sequence[str]) -> dict[str, list[str]]:
+        """Evidence ids per claim, restricted to evidence from the claim's own source.
+
+        The source check lives here rather than in :meth:`build` because this map is the
+        single place every consumer reads the claim-evidence spine from: the reuse lookup
+        that upgrades a chunk citation to an evidence-precise one, and the ``by_claim``
+        mapping the structured renderer quotes from. Filtering here drops a crossed row
+        once instead of asking each caller to re-check provenance, and a caller that
+        forgot would cite source A's claim with source B's words.
+        """
         if not claim_ids:
             return {}
-        from douyin_knowledge.db.models.entities import ClaimEvidence
+        from douyin_knowledge.db.models.entities import Claim, ClaimEvidence
 
         rows = self.session.execute(
-            select(ClaimEvidence.claim_id, ClaimEvidence.evidence_id).where(
-                ClaimEvidence.claim_id.in_(list(claim_ids))
+            select(ClaimEvidence.claim_id, ClaimEvidence.evidence_id)
+            .join(Claim, Claim.id == ClaimEvidence.claim_id)
+            .join(EvidenceUnit, EvidenceUnit.id == ClaimEvidence.evidence_id)
+            .where(
+                ClaimEvidence.claim_id.in_(list(claim_ids)),
+                EvidenceUnit.source_id == Claim.source_id,
             )
         )
         mapping: dict[str, list[str]] = {}

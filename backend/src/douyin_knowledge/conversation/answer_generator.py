@@ -268,6 +268,12 @@ class AnswerGenerator:
             citations=citations.as_list(),
             generator="structured",
             conflicts=conflicts,
+            # Derived, not defaulted. A user-state-only match qualifies out of
+            # `EntityUserState` and cites nothing (DEC-018: the user's own intent needs no
+            # creator claim behind it), so the default `True` announced evidence for an
+            # answer whose citation list was empty -- the same overclaim the structured path
+            # exists to prevent, one field over.
+            has_evidence=bool(citations),
             diagnostics=dict(result.diagnostics),
         )
 
@@ -308,6 +314,15 @@ class AnswerGenerator:
         """
         diagnostics = result.diagnostics or {}
         reasons: list[str] = []
+
+        # A refusal outranks everything below it. The retrieval-level reasons all describe a
+        # search that ran and found nothing; a refused query never ran one, and saying
+        # 收藏里没有匹配这个说法的内容 would claim an absence that was never checked.
+        refused = diagnostics.get("refused")
+        if isinstance(refused, dict):
+            message = refused.get("message")
+            if isinstance(message, str) and message:
+                return [message]
 
         structured = result.structured
         if structured is not None:

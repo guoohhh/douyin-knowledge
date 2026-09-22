@@ -26,12 +26,7 @@ from douyin_knowledge.retrieval.query_plan import (
     QueryPlanError,
     validate_plan,
 )
-from douyin_knowledge.retrieval.vocabulary import (
-    CUISINE_ALIASES,
-    DISTRICT_ALIASES,
-    canonical_cuisine,
-    canonical_district,
-)
+from douyin_knowledge.retrieval.vocabulary import CUISINE_ALIASES, DISTRICT_ALIASES
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from douyin_knowledge.ai.providers import StructuredModel
@@ -125,6 +120,86 @@ def _price_constraint(query: str) -> dict[str, Any] | None:
     if upper is not None:
         operator = "<=" if upper in _PRICE_UPPER_INCLUSIVE else "<"
         return {"field": "price_per_person", "operator": operator, "value": amount}
+    return None
+
+
+# --------------------------------------------------------- refused conditions
+
+#: Words that negate the vocabulary term immediately following them.
+_NEGATION_CUES = ("不是", "不要", "别", "非", "除了", "不想吃", "不吃")
+
+#: How far after a negation cue a vocabulary hit still counts as negated. A short window,
+#: because the cue has to be modifying *this* term: in 不是日料的旺角餐厅 the cue sits
+#: directly against 日料, while 旺角 five characters later is not negated at all.
+_NEGATION_WINDOW = 4
+
+
+def _negated_vocabulary_term(query: str) -> str | None:
+    """The first district or cuisine term the query negates, if any.
+
+    Cuisine and district are matched by bare substring scan, which cannot tell
+    ``不是日料`` from ``日料``. Left alone that inverts the user's meaning: asking for
+    餐厅 that are *not* 日料 executed as ``cuisine = 日料`` and returned exactly the
+    restaurants the user ruled out.
+    """
+    folded = query.casefold()
+    for cue in _NEGATION_CUES:
+        start = folded.find(cue)
+        while start != -1:
+            window = folded[start + len(cue) : start + len(cue) + _NEGATION_WINDOW]
+            for aliases in (CUISINE_ALIASES, DISTRICT_ALIASES):
+                for alias in sorted(aliases, key=len, reverse=True):
+                    if alias in window:
+                        return alias
+            start = folded.find(cue, start + 1)
+    return None
+
+
+def _price_condition_count(query: str) -> int:
+    """How many explicit price conditions the query states.
+
+    A condition is a number carrying its own comparison marker. Counting them is not
+    the same as parsing them: ``_price_constraint`` returns a single constraint, and its
+    8-character lookahead window cannot tell 人均100以下和200以上 (two conditions) from
+    人均100以下 (one). In that phrase the window held both 以下 and 以上, the
+    lower-bound branch won, and the plan executed ``>= 100`` -- a predicate matching
+    *neither* stated condition and admitting the whole 100-200 band the user excluded
+    twice. Detecting the shape lets the caller refuse it.
+
+    Deliberately blind to a number with no marker: 人均大概80 is vague by contract and
+    must keep yielding no constraint and no error.
+    """
+    if not re.search(_PRICE_SUBJECT, query):
+        return 0
+    markers = sorted({*_PRICE_UPPER, *_PRICE_LOWER, *_PRICE_EXACT}, key=len, reverse=True)
+    marker_group = "|".join(re.escape(m) for m in markers)
+    # Number immediately followed by its own marker, which is the only shape that states a
+    # second condition once the subject (人均) has been elided from the later clause.
+    pattern = rf"(?P<num>{_NUM})\s*(?:元|块|块钱|港币|rmb)?\s*(?:{marker_group})"
+    return len({match.start("num") for match in re.finditer(pattern, query)})
+
+
+def refused_condition(query: str) -> tuple[str, str] | None:
+    """A ``(code, message)`` for a condition V1 must refuse, or ``None``.
+
+    Refusing is not the same as failing to parse. An unparsed condition degrades to
+    unstructured retrieval over the original text, which for these two shapes would
+    *contradict* the user: a text search for 不是日料 matches 日料, and a query stating
+    two price bounds would be answered by whichever one the ranking happened to favour.
+    Both are the silent broadening this boundary exists to prevent, so the caller stops
+    rather than guesses.
+    """
+    negated = _negated_vocabulary_term(query)
+    if negated is not None:
+        return (
+            "unsupported_negated_condition",
+            f"V1 无法把否定条件（不是{negated}）表达成结构化过滤条件",
+        )
+    if _price_condition_count(query) > 1:
+        return (
+            "conflicting_price_conditions",
+            "问题里有多个价格条件，V1 不支持同一字段的组合条件",
+        )
     return None
 
 
@@ -285,13 +360,20 @@ def _propose_plan_with_model(
         proposal["intent"] = intent
 
     constraints: list[dict[str, Any]] = []
-    district = canonical_district(data.get("district") if isinstance(data.get("district"), str) else None)
-    if district:
-        proposal["location"] = {"district": district}
+    # Raw values, not canonicalized ones. Canonicalizing here and dropping whatever came
+    # back `None` made the proposal divisible: a model answering
+    # {"district": "九龙城", "cuisine": "日料"} lost the district it could not resolve and
+    # executed the cuisine alone, so a question about 九龙城 was answered with 旺角
+    # restaurants -- a different query than the user asked, presented as if it were theirs.
+    # `validate_plan` already rejects an out-of-vocabulary value with `unknown_district`;
+    # letting the raw string reach it makes the proposal succeed or fail as one unit.
+    district_raw = data.get("district") if isinstance(data.get("district"), str) else None
+    if district_raw:
+        proposal["location"] = {"district": district_raw}
 
-    cuisine = canonical_cuisine(data.get("cuisine") if isinstance(data.get("cuisine"), str) else None)
-    if cuisine:
-        constraints.append({"field": "cuisine", "operator": "=", "value": cuisine})
+    cuisine_raw = data.get("cuisine") if isinstance(data.get("cuisine"), str) else None
+    if cuisine_raw:
+        constraints.append({"field": "cuisine", "operator": "=", "value": cuisine_raw})
 
     operator = data.get("price_operator")
     value = data.get("price_value")
@@ -306,7 +388,7 @@ def _propose_plan_with_model(
     if isinstance(semantic, list):
         proposal["semantic_requirements"] = [s for s in semantic if isinstance(s, str)]
 
-    if district or cuisine:
+    if district_raw or cuisine_raw:
         proposal["entity_types"] = ["place"]
     return proposal
 
@@ -331,6 +413,24 @@ def parse_query(
     diagnostics: dict[str, Any] = {"parser_attempts": []}
     refs = tuple(conversation_entity_refs or ())
 
+    # Checked before any proposal is built, and recorded as a *refusal* rather than a
+    # plan error. A plan error degrades to unstructured retrieval over the raw query,
+    # which for these shapes answers the opposite of the question: text search for
+    # 不是日料的旺角餐厅 matches 日料. The caller reads `refused` and declines instead.
+    refusal = refused_condition(query)
+    if refusal is not None:
+        code, message = refusal
+        logger.info("query_plan_refused", extra={"code": code})
+        diagnostics["refused"] = {"code": code, "message": message}
+        plan = validate_plan(
+            {"parser": "refused", "limit": limit, "conversation_entity_refs": list(refs)},
+            raw_query=query,
+            scope=scope,
+        )
+        diagnostics["plan"] = plan.as_dict()
+        diagnostics["supported_fields"] = sorted(CLAIM_FIELDS)
+        return plan, diagnostics
+
     proposal = propose_plan_deterministic(query, limit=limit)
     diagnostics["parser_attempts"].append("deterministic")
     deterministic_found = bool(proposal.get("location") or proposal.get("claim_constraints"))
@@ -351,8 +451,14 @@ def parse_query(
     except QueryPlanError as exc:
         # The proposal came from our own cue matcher or a model; either way the user
         # still gets an answer, via unstructured retrieval.
+        # `reason`, not `message`: `logging` reserves `message` on `LogRecord` and raises
+        # KeyError if `extra` tries to set it. That made this whole branch -- the one that
+        # keeps an invalid proposal from failing the user's request -- crash on the first
+        # invalid plan it was written to absorb. No test reached it before, because every
+        # proposal the deterministic parser builds is valid by construction and the model
+        # path only produced pre-canonicalized values.
         logger.warning(
-            "query_plan_invalid", extra={"code": exc.code, "message": exc.message}
+            "query_plan_invalid", extra={"code": exc.code, "reason": exc.message}
         )
         diagnostics["plan_error"] = {"code": exc.code, "message": exc.message}
         plan = validate_plan(
