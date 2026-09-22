@@ -17,12 +17,18 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 
 from douyin_knowledge.api import create_app
 from douyin_knowledge.config import Settings, get_settings
+from douyin_knowledge.db import session_scope
+from douyin_knowledge.db.models.entities import Claim, Entity, EntityMention
+from douyin_knowledge.db.models.knowledge import Topic
+from douyin_knowledge.db.models.policy import SourceProcessingState
+from douyin_knowledge.db.models.wiki import WikiPage
 from douyin_knowledge.jobs.handlers import register_default_handlers
 from douyin_knowledge.jobs.worker import Worker
+from douyin_knowledge.wiki.builder import WikiBuilder
 
 
 @pytest.fixture
@@ -137,3 +143,103 @@ class TestPolicyChangeReachesCurrentWiki:
         restored = _current_supported_sources(populated, page_id)
         assert source_id in restored, "reversal must let the source support current wiki again"
         assert restored == before
+
+    def test_hidden_source_stops_supporting_current_topic_page(
+        self, populated: TestClient
+    ) -> None:
+        """Policy reprojection must cover every persisted Wiki page family.
+
+        The fixture extractor currently produces entity pages, so construct the smallest
+        valid topic projection from one already grounded, current claim. This exercises the
+        same persisted Wiki path without depending on future topic extraction heuristics.
+        """
+        with session_scope() as db:
+            claim = db.scalars(
+                select(Claim)
+                .join(
+                    SourceProcessingState,
+                    (SourceProcessingState.source_id == Claim.source_id)
+                    & (
+                        SourceProcessingState.current_processing_run_id
+                        == Claim.processing_run_id
+                    ),
+                )
+                .where(Claim.grounding_status == "valid")
+                .limit(1)
+            ).one()
+            topic = Topic(name="审查主题", normalized_name="审查主题")
+            db.add(topic)
+            db.flush()
+            claim.subject_topic_id = topic.id
+            outcome = WikiBuilder(db).build_topic_page(topic)
+            assert outcome.page_id
+            page_id = db.scalar(select(WikiPage.id).where(WikiPage.topic_id == topic.id))
+            assert page_id is not None
+            source_id = claim.source_id
+
+        assert source_id in _current_supported_sources(populated, page_id)
+
+        created = populated.post(
+            "/api/admin/policy/rules",
+            json={"rule_type": "source", "action": "exclude", "target_source_id": source_id},
+        )
+        assert created.status_code == 201, created.text
+
+        assert source_id not in _current_supported_sources(populated, page_id), (
+            "excluding a source must immediately remove it from current topic pages"
+        )
+
+    def test_hiding_only_support_archives_current_entity_page(
+        self, populated: TestClient
+    ) -> None:
+        """A rebuild that finds zero eligible claims must retire the old projection."""
+        with session_scope() as db:
+            claim = db.scalars(
+                select(Claim)
+                .join(
+                    SourceProcessingState,
+                    (SourceProcessingState.source_id == Claim.source_id)
+                    & (
+                        SourceProcessingState.current_processing_run_id
+                        == Claim.processing_run_id
+                    ),
+                )
+                .where(Claim.grounding_status == "valid")
+                .limit(1)
+            ).one()
+            entity = Entity(
+                entity_type="concept",
+                canonical_name="唯一来源实体",
+                normalized_name="唯一来源实体",
+            )
+            db.add(entity)
+            db.flush()
+            claim.subject_entity_id = entity.id
+            db.add(
+                EntityMention(
+                    source_id=claim.source_id,
+                    processing_run_id=claim.processing_run_id,
+                    mention_text=entity.canonical_name,
+                    normalized_text=entity.normalized_name,
+                    entity_type_hint=entity.entity_type,
+                    resolved_entity_id=entity.id,
+                    resolution_status="resolved",
+                )
+            )
+            outcome = WikiBuilder(db).build_entity_page(entity)
+            assert outcome.page_id
+            page_id = outcome.page_id
+            source_id = claim.source_id
+
+        assert source_id in _current_supported_sources(populated, page_id)
+
+        created = populated.post(
+            "/api/admin/policy/rules",
+            json={"rule_type": "source", "action": "exclude", "target_source_id": source_id},
+        )
+        assert created.status_code == 201, created.text
+
+        detail = populated.get(f"/api/knowledge/wiki/{page_id}")
+        assert detail.status_code == 404 or detail.json()["status"] != "active" or not (
+            _current_supported_sources(populated, page_id)
+        ), "a page with no eligible claims must not stay active with its old revision"
