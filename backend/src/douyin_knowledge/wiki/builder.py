@@ -328,6 +328,72 @@ class WikiBuilder:
             count += 1
         return count
 
+    # --------------------------------------------------- retiring a page
+
+    def _retire_page(self, canonical_key: str, title: str) -> BuildOutcome:
+        """A targeted rebuild found no current eligible claims for this subject.
+
+        Returning ``skipped_reason`` alone was not enough. For a subject that never had a
+        page there is nothing to do, but for one that already has an *active* page the old
+        current revision keeps standing as present-tense knowledge, citing sources the
+        eligibility rule has already stopped believing. The page must stop being current.
+
+        Retiring means exactly two writes: the page goes ``archived`` and the current
+        revision loses ``is_current``. Nothing is deleted. Every ``WikiRevision`` and every
+        ``WikiSupport`` row stays exactly where it was, so the history endpoint still serves
+        the full trail and a citation from an old revision still resolves -- "disappearance
+        is not deletion" (AGENTS s4) applies to the wiki's own past as much as to sources.
+
+        ``WikiLink`` rows are cleared because links are a projection of *current* knowledge
+        (WIKI-007), not provenance: a retired page must not keep advertising edges into the
+        live graph. ``_rebuild_links`` re-derives them when the page comes back.
+
+        The inverse needs no code of its own. ``_get_or_create_page`` already flips an
+        archived page back to ``active``, and ``commit_revision`` sees no current revision
+        and appends the next one, so returning eligible claims restores the page with its
+        revision numbering continuing from the history rather than restarting.
+        """
+        page = self.session.scalars(
+            select(WikiPage).where(WikiPage.canonical_key == canonical_key)
+        ).one_or_none()
+        if page is None:
+            return BuildOutcome(
+                page_id="",
+                canonical_key=canonical_key,
+                title=title,
+                skipped_reason="no_current_claims",
+            )
+
+        current = self._current_revision(page.id)
+        already_retired = page.status != "active" and current is None
+        if already_retired:
+            return BuildOutcome(
+                page_id=page.id,
+                canonical_key=canonical_key,
+                title=page.title,
+                skipped_reason="no_current_claims",
+            )
+
+        if current is not None:
+            current.is_current = 0
+        page.status = "archived"
+        page.updated_at_ms = now_ms()
+        self.session.query(WikiLink).filter(WikiLink.from_page_id == page.id).delete(
+            synchronize_session=False
+        )
+        self.session.flush()
+        logger.info(
+            "wiki_page_archived",
+            extra={"page_id": page.id, "reason": "no_current_claims"},
+        )
+        return BuildOutcome(
+            page_id=page.id,
+            canonical_key=canonical_key,
+            title=page.title,
+            revision_no=current.revision_no if current is not None else 0,
+            skipped_reason="archived_no_current_claims",
+        )
+
     # ------------------------------------------------------------ entities
 
     def build_entity_page(
@@ -346,12 +412,7 @@ class WikiBuilder:
 
         claims = self.claims_for_entity(entity.id)
         if len(claims) < MIN_CLAIMS_FOR_PAGE:
-            return BuildOutcome(
-                page_id="",
-                canonical_key=entity_canonical_key(entity),
-                title=entity.canonical_name,
-                skipped_reason="no_current_claims",
-            )
+            return self._retire_page(entity_canonical_key(entity), entity.canonical_name)
 
         composed = compose_page(
             title=entity.canonical_name,
@@ -380,12 +441,7 @@ class WikiBuilder:
     ) -> BuildOutcome:
         claims = self.claims_for_topic(topic.id)
         if len(claims) < MIN_CLAIMS_FOR_PAGE:
-            return BuildOutcome(
-                page_id="",
-                canonical_key=topic_canonical_key(topic),
-                title=topic.name,
-                skipped_reason="no_current_claims",
-            )
+            return self._retire_page(topic_canonical_key(topic), topic.name)
         composed = compose_page(
             title=topic.name,
             page_type=PAGE_TYPE_TOPIC,
@@ -460,6 +516,29 @@ class WikiBuilder:
         ).all()
         for entity in entities:
             stats.record(self.build_entity_page(entity, integration_run_id=integration_run_id))
+        return stats
+
+    def build_for_topics(
+        self,
+        topic_ids: Sequence[str],
+        *,
+        integration_run_id: str | None = None,
+    ) -> BuildStats:
+        """The topic counterpart of :meth:`build_for_entities`.
+
+        Added because ``Topic`` is a live page family with a real writer, so any caller that
+        recomposes a narrowed set of pages -- policy reprojection above all -- has to be able
+        to name topics as well as entities. Without it, a targeted rebuild could only ever
+        reach half the wiki.
+        """
+        stats = BuildStats()
+        if not topic_ids:
+            return stats
+        topics = self.session.scalars(
+            select(Topic).where(Topic.id.in_(list(topic_ids)))
+        ).all()
+        for topic in topics:
+            stats.record(self.build_topic_page(topic, integration_run_id=integration_run_id))
         return stats
 
     def rebuild_all(self, *, integration_run_id: str | None = None) -> BuildStats:

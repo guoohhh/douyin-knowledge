@@ -221,32 +221,73 @@ class PolicyReconciler:
         deterministic and local -- no model calls -- and the set is narrowed to the pages
         the changed sources actually mention, not the whole wiki.
 
-        History is untouched: `build_for_entities` commits a *new* revision and demotes the
-        previous one, so the old text remains in `wiki_revisions` for the audit trail.
+        History is untouched: the builder commits a *new* revision and demotes the previous
+        one, so the old text remains in `wiki_revisions` for the audit trail. When a subject
+        is left with no eligible claims at all the builder archives the page and drops the
+        `is_current` flag instead of deleting anything, so even a page that stops being
+        current knowledge keeps its full history (P1-2).
+
+        The affected subjects are read off the **claim spine**, not off `EntityMention`
+        alone. Mentions only ever name entities, so a `Topic` page composed from claims the
+        hidden source produced was unreachable from here: the claim vanished from the
+        eligibility rule while the topic page went on presenting it as current, cited. Both
+        live page families (`Entity`, `Topic`) are derived from `Claim`, so querying claims
+        by source is the projection that matches what the composer actually reads. Mentions
+        are still unioned in for entities, because an entity can be mentioned by a source
+        whose claims point elsewhere and that page's composition still changes.
+
+        Page families with constants but no writer (Concept, Synthesis, SourceDigest) are
+        deliberately not handled: there is nothing persisted to go stale.
         """
-        from douyin_knowledge.db.models.entities import EntityMention
+        from douyin_knowledge.db.models.entities import Claim, EntityMention
         from douyin_knowledge.wiki.builder import WikiBuilder
 
-        entity_ids = list(
-            dict.fromkeys(
-                row[0]
-                for row in self.session.execute(
-                    select(EntityMention.resolved_entity_id).where(
-                        EntityMention.source_id.in_(source_ids),
-                        EntityMention.resolved_entity_id.is_not(None),
-                    )
-                )
-                if row[0]
+        entity_ids: dict[str, None] = {}
+        topic_ids: dict[str, None] = {}
+
+        for subject_entity, object_entity, subject_topic, object_topic in self.session.execute(
+            select(
+                Claim.subject_entity_id,
+                Claim.object_entity_id,
+                Claim.subject_topic_id,
+                Claim.object_topic_id,
+            ).where(Claim.source_id.in_(source_ids))
+        ):
+            for entity_id in (subject_entity, object_entity):
+                if entity_id:
+                    entity_ids[entity_id] = None
+            for topic_id in (subject_topic, object_topic):
+                if topic_id:
+                    topic_ids[topic_id] = None
+
+        for (mentioned,) in self.session.execute(
+            select(EntityMention.resolved_entity_id).where(
+                EntityMention.source_id.in_(source_ids),
+                EntityMention.resolved_entity_id.is_not(None),
             )
-        )
-        if not entity_ids:
+        ):
+            if mentioned:
+                entity_ids[mentioned] = None
+
+        if not entity_ids and not topic_ids:
             return 0
 
-        stats = WikiBuilder(self.session).build_for_entities(entity_ids)
-        recompiled = len([o for o in stats.outcomes if o.page_id])
+        builder = WikiBuilder(self.session)
+        outcomes = [
+            *builder.build_for_entities(list(entity_ids)).outcomes,
+            *builder.build_for_topics(list(topic_ids)).outcomes,
+        ]
+        # A page whose only eligible support just disappeared is counted too: it was
+        # recompiled -- to nothing current -- and the caller needs to see that the rule
+        # reached the wiki. `_retire_page` returns the real page id for exactly this.
+        recompiled = len([o for o in outcomes if o.page_id])
         logger.info(
             "policy reprojected onto wiki",
-            extra={"entities": len(entity_ids), "pages": recompiled},
+            extra={
+                "entities": len(entity_ids),
+                "topics": len(topic_ids),
+                "pages": recompiled,
+            },
         )
         return recompiled
 

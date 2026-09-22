@@ -246,6 +246,24 @@ Because support is recomputed per read rather than denormalized onto the state r
 
 ---
 
+### DEC-019: A Wiki page with no eligible support is archived, and policy reprojection follows the claim spine
+
+**Decision**: Two changes to how a policy verdict reaches persisted Wiki output.
+
+`WikiBuilder.build_entity_page()` / `build_topic_page()` no longer answer an empty eligible-claim set with `skipped_reason="no_current_claims"` alone. When the subject already has an *active* page, `_retire_page()` sets `WikiPage.status = "archived"` and clears `is_current` on the current `WikiRevision`. Nothing is deleted: every revision and every `WikiSupport` row stays. `WikiLink` rows are cleared, because links are a projection of current knowledge (WIKI-007) rather than provenance.
+
+`PolicyReconciler._reproject_wiki()` derives the affected subjects from `Claim` — subject and object, entity and topic — instead of from `EntityMention` alone, and calls both `build_for_entities()` and the new `build_for_topics()`.
+
+**Rationale**: the invariant belongs in the builder, not in the reconciler, because *any* targeted rebuild should behave correctly when its subject has stopped having current knowledge; special-casing the policy path would leave the same staleness reachable from every other caller. Archiving rather than deleting is the same rule as DEC-015 turned on the Wiki's own output: the page stops being present-tense knowledge, and its past stays auditable.
+
+Reprojection followed mentions because mentions were how entity pages were found. But mentions only ever name entities, and `Topic` is a live page family with a real writer, so a topic page composed from a hidden source's claims was unreachable — it went on citing a source that had already vanished from Ask and from entity pages. Both live families are composed from `Claim`, so the claim spine is the projection that matches what the composer actually reads. Concept, Synthesis and SourceDigest have constants but no writer, so there is nothing persisted to go stale and they are deliberately not handled.
+
+**Consequence**: reversal needs no new code. `_get_or_create_page` already flips an archived page back to `active`, and `commit_revision` finds no current revision and appends the next one, so un-hiding a source restores the page with its revision numbering continuing from history — without reprocessing the source. `wiki_pages_recompiled` now counts retired pages too, since "the rule reached the wiki" is what the number is for.
+
+**Evidence**: `wiki/builder.py` (`_retire_page`, `build_for_topics`); `policy/reconciler.py` (`_reproject_wiki`); `tests/test_wiki_policy_currency.py`.
+
+---
+
 ## Known gaps
 
 These are true limitations, not deferred decisions. Each is either invisible in normal use or visible and harmless; none is load-bearing for V1 acceptance.
