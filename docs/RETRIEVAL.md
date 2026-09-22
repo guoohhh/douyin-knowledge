@@ -241,6 +241,36 @@ Supported constraint fields, and the storage they map onto:
 | `cuisine` | `cuisine` | `value_text` | `=` |
 | `district` | `located_in` | `value_text` | `=` |
 
+Three entity-level filters are also hard constraints, and are enforced rather than accepted and
+ignored:
+
+| plan field | checked against | semantics |
+| --- | --- | --- |
+| `entity_types` | `Entity.entity_type` | set membership, validated against a closed set |
+| `entity_subtypes` | `Entity.subtype` | set membership; a `NULL` subtype always fails |
+| `user_state` | `EntityUserState.state` | `want_to_go`, `want_to_try`, `want_to_learn` |
+
+Each narrows candidate generation in SQL and is re-checked per entity during evaluation, which
+emits `entity_type_mismatch`, `entity_subtype_mismatch` or a user-state rejection. Two notes on
+where the enforcement surface and the parser deliberately diverge:
+
+- **`entity_subtypes` is enforceable, but the deterministic parser never proposes
+  `restaurant`.** Production extraction does not reliably write `Entity.subtype`, so a parser
+  that manufactured the filter would reject every restaurant in the corpus. The executor
+  honours the field for a caller whose data supports it; the parser does not invent one.
+  Unlike `entity_types`, subtype values are not validated against a closed set.
+- **`entity_types` narrows a structured plan; it does not make one.** A plan needs a location,
+  a claim constraint or a user state to be structured, so an entity-type-only question routes
+  to ordinary hybrid retrieval rather than through the executor.
+
+The supported UserState filters are exactly the three product intent states, shared with
+Resurface. **`visited` is intentionally unsupported**: finishing something is a history, a
+different feature, and there is no write path for it — parsing 去过 into a constraint the
+executor cannot satisfy would produce a plan that claims to filter on history and silently
+returns everything. A plan carrying it is rejected with `unsupported_user_state`. Negation is
+not parsed either: `present=False` is executed if a plan carries it, but V1 proposes no such
+plan, so 不想去 keeps a query's other constraints and adds no user-state filter.
+
 Five rules hold the boundary:
 
 1. **The operator set is a whitelist, not an escape.** An operator is matched against a
@@ -259,8 +289,10 @@ Five rules hold the boundary:
    (`MAX_CANDIDATES`), so plan cost cannot grow with a model's enthusiasm.
 
 Not supported in V1, deliberately: ranges (`50-100`), time constraints, `sort_preferences`,
-relations, any predicate outside the three above, and `city` as a filter (it is accepted and
-carried, never executed). Districts and cuisines come from closed alias vocabularies in
+relations, any claim predicate outside the three above, and `city` as a filter (it is accepted
+and carried, never executed). `text_requirements`, `intent`, `notes` and
+`conversation_entity_refs` are validated and persisted on the plan but are read by no executor
+or ranking path; only `semantic_requirements` reaches ranking. Districts and cuisines come from closed alias vocabularies in
 `retrieval/vocabulary.py`; a value outside them is rejected rather than passed through, so
 an unmatchable constraint never looks like a satisfied one.
 
@@ -293,7 +325,12 @@ saved_at >= ...
 
 Likely backed by SQLite relational queries.
 
-Of those examples, V1 implements `district`, `cuisine` and `price_per_person` only; see 5.1.
+Of those examples, V1 implements `district`, `cuisine` and `price_per_person` as claim
+constraints, and enforces `entity_types`, `entity_subtypes` and `user_state` as entity-level
+hard constraints; see 5.1. The examples above are not literal: restaurants are
+`entity_type = "place"` (there is no `restaurant` entity type), `city` is carried but never
+executed, and `user_state != visited` is not expressible — the supported states are
+`want_to_go`, `want_to_try` and `want_to_learn`.
 
 **Hard constraints and similarity signals are different kinds of thing.** A structured
 constraint is a condition on membership: a candidate that fails it is not a worse answer, it
@@ -529,11 +566,16 @@ plan carrying hard constraints, the implemented arrangement is stricter:
 ```text
 QueryPlan (validated)
       ↓
+caller's source_ids  ──→  restricts the claims the executor may read
+      ↓
 Structured executor  →  qualifying entities + per-constraint support + rejections
+      │                  (the full qualifying set, bounded by MAX_CANDIDATES)
       ↓
 qualifying source ids  ──→  passed to FTS/vector as an allow-list
       ↓
-fusion / re-ranking (within the allowed set only)
+ranking within the allowed set only  (semantic_requirements as a soft signal)
+      ↓
+plan.limit applied last
       ↓
 Evidence packet
 ```
@@ -543,11 +585,41 @@ existing hybrid retriever as a `source_ids` allow-list. An empty allow-list shor
 no candidates rather than degrading to unrestricted search — the distinction between "no
 filter" (`None`) and "filtered to nothing" (`[]`) is load-bearing.
 
+Four properties of that order are worth stating separately, because each one is a defect if
+reversed.
+
+**A caller's `source_ids` restricts structured claims before qualification, not citations
+afterwards.** The allow-list is applied to every claim the executor reads, so an entity
+supported only by an excluded source does not qualify at all — it is absent from the answer,
+not present with fewer citations.
+
+**The full qualifying set is evaluated before ranking.** The executor deliberately does not
+apply `plan.limit`; it returns everything that qualifies, bounded only by `MAX_CANDIDATES`.
+Truncating at the limit first would mean similarity ranks an arbitrary prefix of the qualifying
+set rather than the set itself.
+
+**`plan.limit` is applied after ranking**, to the ordered list, which is what makes "the best
+N qualifying answers" mean what it says.
+
+**`semantic_requirements` are soft ranking signals and never hard filters.** They contribute
+to the ranking text and to a rank-based per-source bonus; they appear nowhere in the executor.
+A soft requirement can reorder an answer and cannot exclude anyone from it.
+
 This is why hard-constraints-beat-similarity is a structural property here and not a scoring
-weight that a large enough similarity score could overcome: a rejected candidate never enters
-the ranked set, so there is no score it could win with. The cost is that similarity cannot
-*rescue* a candidate whose structured evidence is missing, which is the intended trade —
-absent evidence is a no-result with a reason (see 15), not a low-confidence guess.
+weight that a large enough similarity score could overcome: **similarity can never resurrect a
+candidate rejected by a hard structured constraint.** Membership is fixed by the executor
+before any similarity call; ranking is a sort over the surviving list, and a rejected entity is
+in a different list entirely. The allow-list handed to FTS and vector search is derived from the
+survivors, so a rejected candidate's sources are not even searched unless shared. No weight,
+threshold or floor exists on that path that could be tuned to re-admit it. The cost is that
+similarity cannot *rescue* a candidate whose structured evidence is missing, which is the
+intended trade — absent evidence is a no-result with a reason (see 15), not a low-confidence
+guess.
+
+The whole path is reached through `ConversationManager.ask()`, which classifies scope, resolves
+follow-ups, parses and persists the plan, and routes to `retrieve_structured` when the scope
+uses the collection and the plan is structured. The guarantees above hold for the real Ask
+surface, not only for a direct caller of the retriever.
 
 Rejections are retained, not discarded. Each carries the entity, the constraint that failed
 and a human-readable detail, which is what lets the system say "有匹配的店，但人均 150 超过
@@ -835,6 +907,14 @@ If the user asks:
 
 UserState becomes a hard filter.
 
+**What V1 implements.** UserState is a real, enforced hard constraint, over the three product
+intent states `want_to_go`, `want_to_try` and `want_to_learn` (see 5.1). The visited/liked/
+disliked distinctions sketched above are *not* supported: `visited` is intentionally
+unsupported, so the second example — 有没有我收藏过但还没去过的 — is not expressible as a
+structured filter in V1, and a plan carrying `visited` is rejected with a code rather than
+accepted and silently ignored. Personal ratings and notes as primary evidence are likewise not
+part of the shipped structured path.
+
 If the user asks:
 
 ```text
@@ -1046,6 +1126,10 @@ They remain discoverable through metadata search and can be processed once on ex
 ### RET-009 — Personal UserState is part of retrieval
 
 Visited/used/completed/liked/disliked status can be a filter or ranking feature.
+
+V1 implements this for the three intent states only (`want_to_go`, `want_to_try`,
+`want_to_learn`), as an enforced hard filter; `visited` and the liked/disliked axis are
+intentionally unsupported. See 5.1 and 17.
 
 ### RET-010 — Resurfacing should reuse the same retrieval/evidence core
 
