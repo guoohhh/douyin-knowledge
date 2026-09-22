@@ -316,6 +316,23 @@ def get_processing_status(
 # ---------------------------------------------------------------------- policy
 
 
+#: Matcher keys `PolicyEvaluator._matcher_matches` actually reads. Kept next to the request
+#: model because its only job is to reject rules the evaluator could never act on; if the
+#: evaluator learns a new condition, this list has to learn it too.
+METADATA_MATCHER_KEYS = frozenset(
+    {
+        "title_contains",
+        "title_not_contains",
+        "keywords",
+        "hashtags",
+        "source_type",
+        "min_duration_ms",
+        "max_duration_ms",
+        "creator_name_contains",
+    }
+)
+
+
 class RuleRequest(BaseModel):
     name: str | None = None
     rule_type: Literal["source", "creator", "collection", "metadata", "semantic"]
@@ -352,6 +369,27 @@ class RuleRequest(BaseModel):
             # `unknown` means triage could not tell. Letting it drive an exclusion would
             # turn every classifier miss into silent data loss.
             raise ValueError("content_types cannot include 'unknown'")
+        return self
+
+    @model_validator(mode="after")
+    def _check_metadata_matcher(self) -> RuleRequest:
+        """Reject a metadata rule with no usable condition.
+
+        `PolicyEvaluator._matcher_matches` returns False for an empty matcher, deliberately,
+        so that a half-saved rule cannot switch off the pipeline. The cost is the same silent
+        failure DEC-016 rejects for semantic rules: the rule saves, lists, shows as enabled,
+        and never fires. Checked here so the write fails instead.
+        """
+        if self.rule_type != "metadata":
+            return self
+        matcher = self.matcher or {}
+        if not any(
+            matcher.get(key) not in (None, "", [], {}) for key in METADATA_MATCHER_KEYS
+        ):
+            raise ValueError(
+                "a metadata rule needs at least one condition; "
+                f"supported keys are {sorted(METADATA_MATCHER_KEYS)}"
+            )
         return self
 
 

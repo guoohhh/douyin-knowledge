@@ -6,6 +6,14 @@ reads. Every candidate is filtered through
 result. Without that filter, reprocessing a video leaves the old interpretation
 retrievable and the system will happily cite a claim it no longer believes.
 
+Only ``doc_type = 'chunk'`` documents are fused here. The indexer also writes
+``doc_type = 'wiki'`` documents for wiki pages, and nothing reads them: wiki
+content reaches the user through the wiki pages themselves, never through
+search. That is a gap, not a design -- a wiki retrieval surface needs its own
+answer for citation (a page is a synthesis, so citing it means citing the
+evidence behind each statement) and is deferred to the structured retrieval
+phase rather than half-added here.
+
 Fusion uses Reciprocal Rank Fusion rather than a weighted sum of raw scores,
 because BM25 and cosine similarity live on incomparable scales — BM25 is
 unbounded and corpus-dependent, cosine is [-1, 1]. RRF only reads *rank*, so it

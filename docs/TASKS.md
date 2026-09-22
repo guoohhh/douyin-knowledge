@@ -15,11 +15,11 @@ This section is the answer to "what actually runs?", kept separate from the plan
 
 **Runs in demo mode by default.** `DK_AI_PROVIDER=mock` and `DK_CAPTURE_PROVIDER=fixture` are the shipped defaults, so the whole product works with no key and no Douyin session. Phase 6's real adapters (OpenAI chat/embedding/vision) are implemented and selected by `DK_AI_PROVIDER=openai`, but have not been run against the live API. Phase 4's Douyin sidecar adapter is likewise implemented against the documented contract and unexercised: there is no sidecar to point it at.
 
-**Not started.** Phase 10 (on-demand enrichment), 14 (resurfacing), 15 (export/backup/rebuild — `exports/` is an empty package), 16 (evaluation suite). The corresponding job types `ENRICH_SOURCE`, `CLEANUP_CACHE` and `EXPORT_MARKDOWN` are declared in `jobs/types.py` but no handler is registered, so enqueueing one raises `ConfigurationError: no handler registered for job type ...` rather than failing quietly — deliberate, but it means the enum overstates what the queue can do.
+**Not started.** Phase 10 (on-demand enrichment), 15 (export/backup/rebuild — `exports/` is an empty package), 16 (evaluation suite). The job types that would have driven them — `ENRICH_SOURCE`, `CLEANUP_CACHE`, `EXPORT_MARKDOWN` — were declared with no handler registered and have been removed from `jobs/types.py`, so the enum no longer overstates what the queue can do. Phase 14 (resurfacing) is implemented in restrained form; see DEC-018.
 
 **Phase 12 partially.** Wiki lint runs and writes `wiki_lint_findings`; findings surface in the API and the UI. The governance loop around them — triage, suppression, close criteria beyond `wiki_quality_close_threshold` — is not built.
 
-**Known dead code.** `retrieval/query_planner.py` is exported and never instantiated; `Settings.enable_query_enrichment` and `query_planner_model` are read by nothing. Follow-up resolution happens in `conversation/conversation_manager.py:_resolve_followup` from conversation state instead. See DECISIONS.md "Known gaps".
+**Dead code removed.** `retrieval/query_planner.py` and the unread `Settings.query_planner_model` / `Settings.enable_query_enrichment` are deleted. Follow-up resolution happens in `conversation/conversation_manager.py:_resolve_followup` from conversation state. Structured query planning is deferred to the Structured Retrieval phase; see DECISIONS.md "Known gaps".
 
 **Verification baseline.** 187 passed, 4 skipped; `ruff check` clean. The 4 skips are the tests that require real provider credentials.
 

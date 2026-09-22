@@ -414,6 +414,90 @@ class TestAdmin:
         )
         assert ok.status_code == 201, ok.text
 
+    def test_a_metadata_rule_needs_at_least_one_condition(self, client: TestClient) -> None:
+        """Same silent failure as DEC-016, on the other rule type.
+
+        `PolicyEvaluator._matcher_matches` returns False for an empty matcher so a
+        half-saved rule cannot switch off the pipeline. Without this check the half-saved
+        rule is still accepted, listed and shown as enabled while matching nothing.
+        """
+        base = {"rule_type": "metadata", "action": "exclude"}
+
+        assert client.post("/api/admin/policy/rules", json={**base, "matcher": {}}).status_code == 422
+        assert client.post("/api/admin/policy/rules", json=base).status_code == 422
+        # Present but empty is still no condition.
+        blank = client.post(
+            "/api/admin/policy/rules", json={**base, "matcher": {"keywords": []}}
+        )
+        assert blank.status_code == 422
+        # A key the evaluator never reads cannot stand in for a real condition.
+        unread = client.post(
+            "/api/admin/policy/rules", json={**base, "matcher": {"titel_contains": ["广告"]}}
+        )
+        assert unread.status_code == 422, unread.text
+
+    def test_the_rule_shapes_the_settings_ui_builds_are_accepted(
+        self, client: TestClient
+    ) -> None:
+        """The Settings form generates matchers for the user; these are the shapes it sends.
+
+        The UI deliberately hides matcher JSON, so nothing in the frontend would tell us if
+        the key names drifted from what the evaluator reads -- the rule would just quietly
+        never match. This pins the contract from the backend side.
+        """
+        semantic = client.post(
+            "/api/admin/policy/rules",
+            json={
+                "name": "跳过影视剪辑",
+                "rule_type": "semantic",
+                "action": "exclude",
+                "priority": 50,
+                "is_enabled": True,
+                "matcher": {"content_types": ["movie_clip", "variety_clip", "meme"]},
+            },
+        )
+        assert semantic.status_code == 201, semantic.text
+        assert semantic.json()["matcher"]["content_types"] == [
+            "movie_clip",
+            "variety_clip",
+            "meme",
+        ]
+
+        metadata = client.post(
+            "/api/admin/policy/rules",
+            json={
+                "name": "跳过广告",
+                "rule_type": "metadata",
+                "action": "metadata_only",
+                "priority": 50,
+                "is_enabled": True,
+                "matcher": {"keywords": ["开箱", "好物推荐"], "hashtags": ["广告"]},
+            },
+        )
+        assert metadata.status_code == 201, metadata.text
+        saved = metadata.json()["matcher"]
+        assert saved["keywords"] == ["开箱", "好物推荐"]
+        assert saved["hashtags"] == ["广告"]
+
+        # Every content type the form offers must be accepted, or a checkbox is a dead end.
+        for label in (
+            "movie_clip",
+            "variety_clip",
+            "music_clip",
+            "meme",
+            "sports_highlight",
+            "other_entertainment",
+        ):
+            response = client.post(
+                "/api/admin/policy/rules",
+                json={
+                    "rule_type": "semantic",
+                    "action": "exclude",
+                    "matcher": {"content_types": [label]},
+                },
+            )
+            assert response.status_code == 201, f"{label}: {response.text}"
+
     def test_sources_expose_their_triage_label(self, populated: TestClient) -> None:
         """The label has to be visible, or a user cannot tell why a rule would apply.
 

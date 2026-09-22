@@ -151,7 +151,6 @@ class Settings(BaseSettings):
     retrieval_max_per_source: int = 3
     retrieval_evidence_budget: int = 24
     personal_first: bool = True
-    enable_query_enrichment: bool = True
 
     # ---- wiki ------------------------------------------------------------
     wiki_route_candidate_limit: int = 8
