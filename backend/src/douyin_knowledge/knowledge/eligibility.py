@@ -22,22 +22,59 @@ through here (AGENTS 4: disappearance is not deletion).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, or_, select
 from sqlalchemy.orm import Session
 
 from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.entities import Claim
 from douyin_knowledge.db.models.policy import SourceProcessingState
-from douyin_knowledge.extraction.grounding import is_assertable
+from douyin_knowledge.extraction.grounding import ASSERTABLE_STATUSES, is_assertable
 from douyin_knowledge.policy.models import HIDDEN_ACTIONS
 
 __all__ = [
+    "apply_claim_eligibility",
     "current_eligible_runs",
     "eligible_claims",
     "eligible_claim_ids",
     "is_source_eligible",
 ]
+
+
+def apply_claim_eligibility(stmt: Select[Any]) -> Select[Any]:
+    """Add the five eligibility rules to a ``Claim`` select as SQL.
+
+    The same predicate as :func:`eligible_claims`, expressed as joins instead of a
+    Python comprehension. Two implementations of one rule is a drift risk, and it is
+    accepted here for a specific reason: :func:`eligible_claims` loads every row its
+    statement matches, which its docstring bounds at "one entity's claims, not the
+    corpus". Structured retrieval starts from a *predicate* (`price_per_person` over
+    every entity) and that bound does not hold, so the filter has to happen in SQLite
+    where ``LIMIT`` can also apply.
+
+    The drift risk is contained by ``test_structured_retrieval.py``, which asserts both
+    functions return the same claim ids over a fixture built to exercise all five rules.
+    Grounding statuses come from :data:`ASSERTABLE_STATUSES` rather than being re-listed,
+    and the ``NULL`` member needs its own ``IS NULL`` term because SQL ``IN`` never
+    matches ``NULL``.
+    """
+    statuses = [s for s in ASSERTABLE_STATUSES if s is not None]
+    grounding_ok = Claim.grounding_status.in_(sorted(statuses))
+    if None in ASSERTABLE_STATUSES:
+        grounding_ok = or_(grounding_ok, Claim.grounding_status.is_(None))
+
+    return (
+        stmt.join(SourceProcessingState, SourceProcessingState.source_id == Claim.source_id)
+        .join(Source, Source.id == Claim.source_id)
+        .where(
+            Source.locally_deleted_at_ms.is_(None),
+            SourceProcessingState.current_processing_run_id.is_not(None),
+            SourceProcessingState.current_policy_action.not_in(sorted(HIDDEN_ACTIONS)),
+            SourceProcessingState.current_processing_run_id == Claim.processing_run_id,
+            grounding_ok,
+        )
+    )
 
 
 def current_eligible_runs(

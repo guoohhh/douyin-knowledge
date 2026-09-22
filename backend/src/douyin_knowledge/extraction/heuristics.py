@@ -336,7 +336,79 @@ def extract_claims(text: str, *, subject_hint: str | None = None) -> list[ClaimC
                 )
             )
 
+        claims.extend(_district_claims(sentence, local_subject))
+        claims.extend(_cuisine_claims(sentence, local_subject))
+
     return _dedupe_claims(claims)
+
+
+def _district_claims(sentence: str, subject: str | None) -> list[ClaimCandidate]:
+    """Emit a ``located_in`` claim when a known district is named.
+
+    Values are canonical, not the matched surface form, so ``Mong Kok`` and ``旺角``
+    produce the same filterable value. Normalizing on write is what lets the structured
+    executor use exact equality instead of fuzzy matching at query time.
+
+    The vocabulary is closed on purpose (see :mod:`douyin_knowledge.retrieval.vocabulary`).
+    An unknown place name produces no claim rather than a ``located_in`` claim the
+    executor can never match, because an unmatchable claim looks like knowledge in the
+    wiki while being useless for retrieval.
+    """
+    from douyin_knowledge.retrieval.vocabulary import DISTRICT_ALIASES
+
+    folded = sentence.casefold()
+    hits = [
+        (len(alias), alias, canonical)
+        for alias, canonical in DISTRICT_ALIASES.items()
+        if alias in folded
+    ]
+    if not hits:
+        return []
+    # Longest alias wins: 油尖旺 contains 旺 and a shorter match would file a Mong Kok
+    # restaurant under the wrong district.
+    _, alias, canonical = max(hits, key=lambda item: item[0])
+    return [
+        ClaimCandidate(
+            predicate="located_in",
+            value_type="text",
+            subject_text=subject,
+            value_text=canonical,
+            claim_kind="attribute",
+            provenance_type="creator_statement",
+            confidence=0.75,
+            # The span is the whole sentence, not the alias: grounding validates that some
+            # surface form of the canonical value appears here, and the alias alone would
+            # make that check trivially true.
+            evidence_span=sentence,
+        )
+    ]
+
+
+def _cuisine_claims(sentence: str, subject: str | None) -> list[ClaimCandidate]:
+    """Emit a ``cuisine`` claim when a known cuisine is named. Canonical values only."""
+    from douyin_knowledge.retrieval.vocabulary import CUISINE_ALIASES
+
+    folded = sentence.casefold()
+    hits = [
+        (len(alias), canonical)
+        for alias, canonical in CUISINE_ALIASES.items()
+        if alias in folded
+    ]
+    if not hits:
+        return []
+    _, canonical = max(hits, key=lambda item: item[0])
+    return [
+        ClaimCandidate(
+            predicate="cuisine",
+            value_type="text",
+            subject_text=subject,
+            value_text=canonical,
+            claim_kind="attribute",
+            provenance_type="creator_statement",
+            confidence=0.7,
+            evidence_span=sentence,
+        )
+    ]
 
 
 def _dedupe_claims(claims: list[ClaimCandidate]) -> list[ClaimCandidate]:

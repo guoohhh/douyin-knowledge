@@ -38,6 +38,7 @@ from douyin_knowledge.extraction.grounding import is_assertable
 from douyin_knowledge.knowledge.eligibility import current_eligible_runs
 from douyin_knowledge.observability.logging import get_logger
 from douyin_knowledge.retrieval.keyword_search import KeywordSearcher
+from douyin_knowledge.retrieval.structured import StructuredExecutor, StructuredResult
 from douyin_knowledge.search.indexer import DOC_TYPE_CHUNK, DOC_TYPE_SOURCE
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -46,6 +47,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.orm import Session
 
     from douyin_knowledge.ai.providers import EmbeddingModel
+    from douyin_knowledge.retrieval.query_plan import QueryPlan
     from douyin_knowledge.retrieval.vector_store import VectorStore
 
 logger = get_logger(__name__)
@@ -106,6 +108,7 @@ class RetrievalResult:
     chunks: list[RetrievedChunk] = field(default_factory=list)
     claims: list[Claim] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    structured: StructuredResult | None = None
 
     @property
     def source_ids(self) -> list[str]:
@@ -113,6 +116,14 @@ class RetrievalResult:
         for chunk in self.chunks:
             if chunk.source_id not in seen:
                 seen.append(chunk.source_id)
+        # Structured matches contribute their sources even when no chunk was retrieved: a
+        # qualifying entity whose supporting video produced no retrievable chunk still has
+        # real provenance. Without this, such a result would report "0 相关来源" while
+        # displaying cited claims.
+        if self.structured is not None:
+            for source_id in self.structured.qualifying_source_ids:
+                if source_id not in seen:
+                    seen.append(source_id)
         return seen
 
     def is_empty(self) -> bool:
@@ -362,6 +373,78 @@ class HybridRetriever:
             # wearing the same citation as a verified one (P1-2, DEC-017).
             and is_assertable(claim.grounding_status)
         ]
+
+    # --------------------------------------------------------- structured path
+
+    def retrieve_structured(
+        self,
+        plan: QueryPlan,
+        *,
+        use_vector: bool = True,
+        candidate_multiplier: int = 4,
+        min_vector_score: float = MIN_VECTOR_SCORE,
+    ) -> RetrievalResult:
+        """Execute `plan`'s hard constraints, then let FTS/vector illustrate the survivors.
+
+        The ordering is the invariant. Structured execution runs first and produces the
+        qualifying entity set; similarity search is then restricted to the sources behind
+        those entities, so it can only reorder and add excerpts. A candidate rejected by
+        ``price_per_person < 100`` is not in the allow-list and therefore cannot be
+        retrieved by a strong embedding match -- not because a later filter removes it,
+        but because it was never a candidate (INTEGRATION_PLAN_V1 §11).
+
+        The reverse arrangement, retrieving first and filtering after, is what makes
+        similarity able to override a constraint: anything the filter misses is already in
+        the result. Enforcing it by construction rather than by a downstream check is the
+        difference between an invariant and a convention.
+        """
+        executor = StructuredExecutor(self.session)
+        structured = executor.execute(plan)
+
+        diagnostics: dict[str, Any] = {
+            "structured": structured.as_dict(),
+            "keyword_hits": 0,
+            "vector_hits": 0,
+            "fts_available": self.keyword.available(),
+        }
+
+        if structured.is_empty():
+            diagnostics["reason"] = structured.diagnostics.get(
+                "reason", "no_structured_matches"
+            )
+            return RetrievalResult(query=plan.raw_query, diagnostics=diagnostics)
+
+        allowed_sources = structured.qualifying_source_ids
+
+        support = self.retrieve(
+            plan.raw_query,
+            limit=plan.limit,
+            source_ids=allowed_sources,
+            use_vector=use_vector,
+            include_claims=False,
+            candidate_multiplier=candidate_multiplier,
+            min_vector_score=min_vector_score,
+        )
+        diagnostics["keyword_hits"] = support.diagnostics.get("keyword_hits", 0)
+        diagnostics["vector_hits"] = support.diagnostics.get("vector_hits", 0)
+        diagnostics["vector_below_floor"] = support.diagnostics.get("vector_below_floor", 0)
+        diagnostics["support_reason"] = support.diagnostics.get("reason")
+        diagnostics["fusion"] = (
+            "structured_first: hard constraints selected the result set; "
+            "FTS/vector only ranked and illustrated it"
+        )
+        diagnostics["returned"] = len(structured.matches)
+
+        return RetrievalResult(
+            query=plan.raw_query,
+            # Claims come from the executor, not from `retrieve`: the executor already
+            # selected exactly the claims that satisfied (or conflicted with) a constraint,
+            # and re-deriving them from chunks would lose that distinction.
+            chunks=support.chunks,
+            claims=structured.claims,
+            diagnostics=diagnostics,
+            structured=structured,
+        )
 
     # ------------------------------------------------------------- utilities
 

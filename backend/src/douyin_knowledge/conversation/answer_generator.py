@@ -63,6 +63,45 @@ _GENERAL_SYSTEM_PROMPT = """你是一个知识助手。这个问题不是在问�
 
 NO_EVIDENCE_TEMPLATE = "我没有在你已经处理的收藏里找到足够证据来回答这个问题。"
 
+#: Display labels for structured constraint fields. Keys are `QueryPlan` field names.
+_CONSTRAINT_LABELS = {
+    "price_per_person": "人均",
+    "cuisine": "菜系",
+    "district": "位置",
+}
+
+#: Why each structured rejection happened, in the user's terms.
+#:
+#: These exist because "没找到" is several different situations and they need different
+#: user actions: a price that missed the threshold means relax the filter, a
+#: ``metadata_only`` source means process it, a superseded run means the answer changed
+#: since the video was reprocessed (RETRIEVAL.md 15).
+_REJECTION_LABELS = {
+    "numeric_constraint_failed": "有匹配的店，但数值不满足你给的条件",
+    "text_constraint_failed": "有匹配的店，但类别对不上",
+    "missing_required_claim": "找到了相关的店，但收藏里没有对应的结构化信息",
+    "no_eligible_claims_metadata_only": (
+        "相关收藏只保留了元数据，内容从未被真正理解，所以不能当作已知知识"
+    ),
+    "no_eligible_claims_excluded": "相关收藏已被排除在知识检索之外",
+    "no_eligible_claims_superseded": "相关数值只存在于已被取代的旧处理结果里",
+    "no_eligible_claims_downgraded": "相关断言没有通过溯源校验，不能用来回答",
+    "entity_type_mismatch": "匹配到的对象类型不对",
+    "entity_subtype_mismatch": "匹配到的对象类型不对",
+    "user_state_mismatch": "有符合条件的店，但和你的去过/想去状态不符",
+}
+
+
+def _format_value(value: Any) -> str:
+    """Render a claim value for display, without inventing precision.
+
+    ``value_number`` is a float column, so a price of 80 arrives as ``80.0``. Printing
+    that implies a precision the creator never gave -- they said 人均八十.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
 
 @dataclass
 class GeneratedAnswer:
@@ -122,9 +161,113 @@ class AnswerGenerator:
                 return answer
             return self._no_evidence_answer(result, decision)
 
+        if result.structured is not None and result.structured.matches:
+            # A structured result is rendered deterministically even when a chat model is
+            # available. The answer's job here is to state which entities satisfied which
+            # constraint and on whose authority; paraphrasing that through a model can only
+            # lose the precision the structured executor just established.
+            return self._structured_answer(result, citations, decision)
+
         if self.chat_model is not None:
             return self._model_answer(query, result, citations, decision)
         return self._deterministic_answer(query, result, citations, decision)
+
+    # ------------------------------------------------------- structured answers
+
+    def _structured_answer(
+        self,
+        result: RetrievalResult,
+        citations: CitationSet,
+        decision: ScopeDecision,
+    ) -> GeneratedAnswer:
+        """Render qualifying entities with per-constraint provenance.
+
+        Every qualifying entity gets one line per satisfied constraint, each carrying the
+        citation of the claim that satisfied it. That is what makes the four questions the
+        brief requires answerable from the answer text alone: why this entity, why this
+        district, why this cuisine, which price claim cleared the threshold.
+
+        Conflicts are rendered as their own section rather than folded into the value line.
+        A restaurant with an eligible 80 and an eligible 120 qualifies for ``< 100``, and
+        writing "人均 80" alone would imply a settled price the archive does not support.
+        """
+        structured = result.structured
+        assert structured is not None  # guarded by the caller
+
+        lines: list[str] = [
+            f"在你的收藏里找到 {len(structured.matches)} 个符合条件的结果。",
+            "",
+        ]
+        conflicts: list[str] = []
+
+        for index, match in enumerate(structured.matches, start=1):
+            lines.append(f"{index}. {match.entity.canonical_name}")
+            for field_name, support in match.supports.items():
+                label = _CONSTRAINT_LABELS.get(field_name, field_name)
+                # Claims are grouped by (value, attribution) rather than rendered one per
+                # claim. The same creator saying 日料 in three sentences produces three
+                # eligible claims, and printing three identical lines reads as three
+                # independent confirmations when it is one. Distinct values are *not*
+                # merged -- that is a conflict and it is rendered below.
+                grouped: dict[tuple[str, str], list[str]] = {}
+                for claim in support.satisfied_by:
+                    citation = citations.by_claim.get(claim.id)
+                    value = (
+                        claim.value_number
+                        if claim.value_number is not None
+                        else claim.value_text
+                    )
+                    key = (_format_value(value), claim.attribution or "未知作者")
+                    markers = grouped.setdefault(key, [])
+                    if citation is not None and citation.marker not in markers:
+                        markers.append(citation.marker)
+                for (value_text, attribution), markers in grouped.items():
+                    lines.append(
+                        f"   - {label}：{value_text}（来自 {attribution}）{''.join(markers)}"
+                    )
+
+            for field_name in match.conflicts:
+                label = _CONSTRAINT_LABELS.get(field_name, field_name)
+                rendered: list[str] = []
+                seen: set[tuple[str, str]] = set()
+                for claim in match.supports[field_name].all_eligible:
+                    citation = citations.by_claim.get(claim.id)
+                    marker = citation.marker if citation else ""
+                    value = (
+                        claim.value_number
+                        if claim.value_number is not None
+                        else claim.value_text
+                    )
+                    attribution = claim.attribution or "未知作者"
+                    key = (_format_value(value), attribution)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    rendered.append(f"{attribution}说 {_format_value(value)}{marker}")
+                conflicts.append(
+                    f"{match.entity.canonical_name} 的{label}在不同来源之间不一致："
+                    f"{'；'.join(rendered)}"
+                )
+        lines.append("")
+
+        if conflicts:
+            lines.append("注意：以下信息在不同来源之间存在分歧，需要你自己判断：")
+            lines += [f"- {c}" for c in conflicts]
+            lines.append("")
+
+        excerpt_lines = self._render_excerpts(result, citations)
+        if excerpt_lines:
+            lines.append("相关原文：")
+            lines += excerpt_lines
+
+        return GeneratedAnswer(
+            content="\n".join(lines).rstrip(),
+            scope=decision.scope,
+            citations=citations.as_list(),
+            generator="structured",
+            conflicts=conflicts,
+            diagnostics=dict(result.diagnostics),
+        )
 
     # --------------------------------------------------------- no-result path
 
@@ -149,14 +292,42 @@ class AnswerGenerator:
 
     @staticmethod
     def _no_result_reasons(result: RetrievalResult) -> list[str]:
-        """Distinguish the four failure modes in RETRIEVAL.md 15.
+        """Distinguish the failure modes in RETRIEVAL.md 15.
 
         "No match" and "matched but not processed deeply enough" require
         completely different user actions, so collapsing them into one message
         leaves the user unable to fix anything.
+
+        Structured rejections are read first and, when present, are the whole answer. They
+        are strictly more informative than the retrieval-level diagnostics: "有匹配的店，
+        但人均 150 超过了 100" tells the user what to change, while "收藏里没有匹配这个说法
+        的内容" is false in that situation and would send them looking for a video they
+        already have.
         """
         diagnostics = result.diagnostics or {}
         reasons: list[str] = []
+
+        structured = result.structured
+        if structured is not None:
+            seen: list[str] = []
+            for rejection in structured.rejections:
+                label = _REJECTION_LABELS.get(rejection.reason)
+                if label is None or label in seen:
+                    continue
+                seen.append(label)
+                detail = (
+                    f"{label}（{rejection.entity_name}：{rejection.detail}）"
+                    if rejection.detail
+                    else label
+                )
+                reasons.append(detail)
+            if not structured.rejections and structured.diagnostics.get("reason") in (
+                "no_structured_candidates",
+                "plan_not_structured",
+            ):
+                reasons.append("收藏里没有满足这些条件的对象")
+            if reasons:
+                return reasons
 
         if diagnostics.get("reason") == "no_current_chunks":
             reasons.append(

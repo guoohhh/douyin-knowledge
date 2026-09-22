@@ -33,12 +33,13 @@ from douyin_knowledge.db.models.conversation import (
     Message,
 )
 from douyin_knowledge.observability.logging import get_logger
+from douyin_knowledge.retrieval.query_parser import parse_query
 from douyin_knowledge.retrieval.retriever import HybridRetriever
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.orm import Session
 
-    from douyin_knowledge.ai.providers import ChatModel, EmbeddingModel
+    from douyin_knowledge.ai.providers import ChatModel, EmbeddingModel, StructuredModel
     from douyin_knowledge.retrieval.vector_store import VectorStore
 
 logger = get_logger(__name__)
@@ -95,6 +96,7 @@ class ConversationManager:
         embedder: EmbeddingModel | None = None,
         chat_model: ChatModel | None = None,
         model_name: str | None = None,
+        structured_model: StructuredModel | None = None,
     ) -> None:
         self.session = session
         self.retriever = HybridRetriever(
@@ -102,6 +104,10 @@ class ConversationManager:
         )
         self.citations = CitationBuilder(session)
         self.generator = AnswerGenerator(chat_model=chat_model, model_name=model_name)
+        # Optional: the parser proposes a QueryPlan without it. A model is only consulted
+        # when the deterministic pass found no constraint at all, and whatever it returns
+        # still goes through `validate_plan` before it can reach SQL.
+        self.structured_model = structured_model
 
     # ------------------------------------------------------- conversations
 
@@ -210,6 +216,14 @@ class ConversationManager:
         decision: ScopeDecision = classify_scope(query, override=scope_override)
         resolved_query = self._resolve_followup(query, state)
 
+        plan, plan_diagnostics = parse_query(
+            resolved_query,
+            scope=decision.scope,
+            limit=limit,
+            structured_model=self.structured_model,
+            conversation_entity_refs=[str(n) for n in state.get("recent_entities", [])[:3]],
+        )
+
         user_message = Message(
             conversation_id=conversation.id,
             role=ROLE_USER,
@@ -219,12 +233,29 @@ class ConversationManager:
                 "resolved_query": resolved_query,
                 "scope": decision.as_dict(),
                 "followup": resolved_query != query,
+                # The plan is persisted on the *user* message because it is a record of how
+                # the question was understood, not of how it was answered. A wrong answer
+                # traced back to a wrong plan is a parser bug; the same answer from a correct
+                # plan is a retrieval bug, and only the stored plan distinguishes them.
+                "plan": plan.as_dict(),
+                "parser": plan_diagnostics.get("parser_attempts"),
+                "plan_error": plan_diagnostics.get("plan_error"),
             },
         )
         self.session.add(user_message)
         self.session.flush()
 
-        if decision.uses_collection:
+        if decision.uses_collection and plan.is_structured:
+            # Structured path: hard constraints select the result set, similarity only ranks
+            # it. `source_ids` is an additional narrowing from the caller, so it is applied
+            # after, as an intersection -- never as a way to widen the structured result.
+            result = self.retriever.retrieve_structured(plan)
+            if source_ids is not None:
+                allowed = set(source_ids)
+                result.chunks = [c for c in result.chunks if c.source_id in allowed]
+                result.claims = [c for c in result.claims if c.source_id in allowed]
+            citation_set = self.citations.build(result)
+        elif decision.uses_collection:
             result = self.retriever.retrieve(
                 resolved_query, limit=limit, source_ids=source_ids, include_claims=True
             )

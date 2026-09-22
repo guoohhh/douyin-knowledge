@@ -692,7 +692,13 @@ class TestConversation:
             )
 
     def test_model_hallucinated_markers_are_stripped(self, indexed, settings):
-        """A model citing [99] when 3 sources were supplied must not leak it."""
+        """A model citing [99] when 3 sources were supplied must not leak it.
+
+        The query is deliberately *unstructured*. A query carrying a hard constraint
+        ("人均八十的茶餐厅" parses 茶餐厅 as cuisine=港式) is answered deterministically by
+        the structured renderer and never reaches a chat model, so it could not exercise
+        marker stripping at all. See DEC-020.
+        """
         factory, _ = indexed
 
         class FakeChat:
@@ -711,9 +717,12 @@ class TestConversation:
                 embedder=MockEmbeddingModel(),
                 chat_model=FakeChat(),
             )
-            turn = manager.ask("人均八十的茶餐厅")
+            turn = manager.ask("有什么好吃的推荐")
             session.commit()
 
+            assert turn.answer.generator != "structured", (
+                "query must stay unstructured or the chat model is never called"
+            )
             assert "[99]" not in turn.answer.content
             assert turn.answer.diagnostics["stripped_markers"] == [99]
 

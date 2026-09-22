@@ -11,7 +11,11 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
-from douyin_knowledge.ai.registry import get_answer_chat_model, get_embedding_model
+from douyin_knowledge.ai.registry import (
+    get_answer_chat_model,
+    get_embedding_model,
+    get_structured_model,
+)
 from douyin_knowledge.config import Settings, get_settings
 from douyin_knowledge.conversation.conversation_manager import ConversationManager
 from douyin_knowledge.db.session import get_db
@@ -67,6 +71,7 @@ def get_conversation_manager(
         embedder=get_embedding_model(settings),
         chat_model=get_answer_chat_model(settings),
         model_name=settings.model_for_role("answer"),
+        structured_model=get_structured_model(settings),
     )
 
 

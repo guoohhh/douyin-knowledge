@@ -24,7 +24,11 @@ from douyin_knowledge.cli.main import (
 
 
 def _services(session, settings):
-    from douyin_knowledge.ai.registry import get_answer_chat_model, get_embedding_model
+    from douyin_knowledge.ai.registry import (
+        get_answer_chat_model,
+        get_embedding_model,
+        get_structured_model,
+    )
     from douyin_knowledge.conversation.conversation_manager import ConversationManager
     from douyin_knowledge.retrieval.vector_store import VectorStore
 
@@ -37,6 +41,7 @@ def _services(session, settings):
         embedder=get_embedding_model(settings),
         chat_model=get_answer_chat_model(settings),
         model_name=settings.model_for_role("answer"),
+        structured_model=get_structured_model(settings),
     )
 
 

@@ -61,6 +61,15 @@ def is_assertable(grounding_status: str | None) -> bool:
     return grounding_status in _ASSERTABLE
 
 
+#: The same set, exported for callers that need it as data rather than as a predicate.
+#:
+#: Structured retrieval filters claims in SQL (see
+#: :func:`douyin_knowledge.knowledge.eligibility.apply_claim_eligibility`) because a
+#: predicate-wide scan cannot be bounded in Python. SQL needs the membership list, not a
+#: Python function, and re-listing the statuses there would let the two definitions drift.
+ASSERTABLE_STATUSES = _ASSERTABLE
+
+
 #: Chinese numeral mapping for common ranges (一 through 万).
 _CHINESE_NUMERALS = {
     "零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
@@ -161,6 +170,39 @@ def _find_value_in_text(text: str, value_text: str | None, value_number: float |
 #: every `recommended` claim in the demo corpus, taking a wiki page down with it.
 _LITERAL_VALUE_TYPES = frozenset({"text", "number"})
 
+#: Predicates whose value is a *canonical* vocabulary term rather than a quotation.
+#:
+#: ``cuisine`` and ``located_in`` store 日料 and 旺角 even when the creator said 日本料理
+#: or Mong Kok, because the structured executor matches them by equality. A literal check
+#: would reject every one of those claims.
+#:
+#: These are *not* exempted from grounding. They are validated against the alias set
+#: instead of against the canonical string: some surface form that maps to this exact
+#: canonical value must appear in the evidence. That is strictly stronger than skipping the
+#: check, and it is what stops a claim asserting 旺角 from resting on evidence that only
+#: ever mentioned 中环.
+_NORMALIZED_VOCABULARY_PREDICATES = frozenset({"cuisine", "located_in"})
+
+
+def _find_vocabulary_value_in_text(text: str, predicate: str, canonical: str) -> bool:
+    """Whether any surface form of `canonical` appears in `text`.
+
+    The vocabulary import is local to avoid an ``extraction`` -> ``retrieval`` module-level
+    import cycle: retrieval already imports grounding through the eligibility rule.
+    """
+    from douyin_knowledge.retrieval.vocabulary import (
+        cuisine_surface_forms,
+        district_surface_forms,
+    )
+
+    forms = (
+        cuisine_surface_forms(canonical)
+        if predicate == "cuisine"
+        else district_surface_forms(canonical)
+    )
+    normed = _normalize_for_grounding(text)
+    return any(_normalize_for_grounding(form) in normed for form in forms)
+
 
 class GroundingValidator:
     """Validates claims before persistence (P1-2).
@@ -187,6 +229,7 @@ class GroundingValidator:
         value_type: str = "text",
         value_text: str | None = None,
         value_number: float | None = None,
+        predicate: str | None = None,
     ) -> GroundingVerdict:
         """Validate one claim's grounding against its evidence.
 
@@ -196,6 +239,9 @@ class GroundingValidator:
             evidence_span: The model-returned supporting span.
             value_text: The claim's value_text, if present.
             value_number: The claim's value_number, if present.
+            predicate: The claim's predicate. Only consulted for the normalized-vocabulary
+                predicates, where the value is a canonical term and the evidence must
+                contain one of its surface forms instead of the term itself.
 
         Returns:
             A verdict with passed/status/reason. Rejected claims should not be persisted;
@@ -223,7 +269,16 @@ class GroundingValidator:
         # round -- returning the span downgrade immediately -- meant a claim with both a
         # hallucinated span *and* an unsupported number was kept as merely "downgraded",
         # so the worse of the two defects escaped because the milder one was found first.
-        if value_type in _LITERAL_VALUE_TYPES and (value_text or value_number is not None):
+        if predicate in _NORMALIZED_VOCABULARY_PREDICATES and value_text:
+            if not _find_vocabulary_value_in_text(evidence_text, predicate, value_text):
+                return GroundingVerdict(
+                    passed=False,
+                    status="rejected_value",
+                    reason=(
+                        f"no surface form of {value_text!r} ({predicate}) found in evidence"
+                    ),
+                )
+        elif value_type in _LITERAL_VALUE_TYPES and (value_text or value_number is not None):
             if not _find_value_in_text(evidence_text, value_text, value_number):
                 return GroundingVerdict(
                     passed=False,

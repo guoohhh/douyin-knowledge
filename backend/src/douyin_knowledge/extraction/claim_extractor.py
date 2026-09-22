@@ -158,6 +158,7 @@ class ClaimExtractor:
                     value_type=claim.value_type,
                     value_text=claim.value_text,
                     value_number=claim.value_number,
+                    predicate=claim.predicate,
                 )
                 if verdict.status in _HARD_REJECTIONS:
                     rejected += 1
