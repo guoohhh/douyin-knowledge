@@ -19,6 +19,15 @@ and ``district: Mong Kok``; the schema has ``entity_type='place'`` with
 ``subtype='restaurant'``, a ``price_per_person`` claim predicate, and Chinese surface
 forms in the corpus. Adapting to the schema is the instruction; the conflict is
 recorded in DEC-020.
+
+Every field on :class:`QueryPlan` is executed. That is a stronger promise than it
+sounds, and it is why ``visited`` is absent from :class:`UserStateConstraint` and why
+the parser no longer proposes ``entity_subtypes``: a plan field the executor ignores
+tells the user their filter was understood while returning results that disregard it,
+which is worse than not modelling the filter at all. The remaining fields that do not
+narrow the result set -- ``semantic_requirements``, ``text_requirements`` -- are
+ranking signals by contract and are documented as such, not hard constraints wearing
+a constraint's clothes.
 """
 
 from __future__ import annotations
@@ -26,12 +35,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from douyin_knowledge.knowledge.resurface import INTENT_STATES
 from douyin_knowledge.retrieval.vocabulary import canonical_cuisine, canonical_district
 
 __all__ = [
     "CLAIM_FIELDS",
+    "ENTITY_TYPES",
     "INTENTS",
     "NUMERIC_OPERATORS",
+    "USER_STATES",
     "ClaimConstraint",
     "LocationConstraint",
     "QueryPlan",
@@ -133,22 +145,36 @@ class LocationConstraint:
         return {"district": self.district, "city": self.city}
 
 
+#: User states a plan may filter on. This is exactly `resurface.INTENT_STATES`, imported
+#: rather than restated so the two cannot drift: those are the states the product can
+#: actually *write*, through `POST /api/knowledge/entities/{id}/user-state`.
+#:
+#: `visited` is deliberately absent, and its absence is the point. There is no write path
+#: for it and `resurface.INTENT_STATES` excludes it on purpose ("finishing something is a
+#: different feature"). Parsing 去过 into a constraint the executor cannot satisfy would
+#: produce a plan that claims to filter on history and silently returns everything --
+#: worse than not understanding the question, because the user cannot tell.
+USER_STATES = INTENT_STATES
+
+
 @dataclass(frozen=True)
 class UserStateConstraint:
-    """Optional filter over the user's own relationship to the entity.
+    """Filter on the user's own declared relationship to the entity.
 
-    Separate from claims by design (AGENTS 4.4): "visited" is a user fact, "人均 80"
-    is a creator assertion, and mixing them would let one overwrite the other.
+    Separate from claims by design (AGENTS 4.4): "想去" is a user fact, "人均 80" is a
+    creator assertion, and mixing them would let one overwrite the other.
+
+    `present` distinguishes 想去的店 from 还没标想去的店 without needing a second field.
     """
 
-    visited: bool | None = None
-    want_to_go: bool | None = None
-
-    def is_empty(self) -> bool:
-        return self.visited is None and self.want_to_go is None
+    state: str
+    present: bool = True
 
     def as_dict(self) -> dict[str, Any]:
-        return {"visited": self.visited, "want_to_go": self.want_to_go}
+        return {"state": self.state, "present": self.present}
+
+    def describe(self) -> str:
+        return f"user_state {'=' if self.present else '!='} {self.state}"
 
 
 @dataclass(frozen=True)
@@ -179,11 +205,17 @@ class QueryPlan:
     def is_structured(self) -> bool:
         """Whether this plan has any hard constraint worth running the executor for.
 
-        A plan with no location, no claim constraint and no subtype is just a text
+        A plan with no location, no claim constraint and no user state is just a text
         query wearing a plan's clothes; routing it through the structured path would
         return every entity in the collection.
+
+        `entity_types` alone does not qualify, and `entity_subtypes` no longer does
+        either. Both are *narrowing* constraints -- they say which of the candidates
+        found some other way may survive -- and neither is selective enough to generate
+        candidates from on its own: "every place in the collection" is not a query
+        result, it is a table scan with an answer attached.
         """
-        return bool(self.location or self.required_constraints or self.entity_subtypes)
+        return bool(self.location or self.required_constraints or self.user_state)
 
     @property
     def required_constraints(self) -> tuple[ClaimConstraint, ...]:
@@ -368,15 +400,20 @@ def validate_plan(raw: dict[str, Any], *, raw_query: str, scope: str) -> QueryPl
     if raw_state is not None:
         if not isinstance(raw_state, dict):
             raise QueryPlanError("bad_user_state", "user_state must be an object")
-        for key in ("visited", "want_to_go"):
-            if key in raw_state and raw_state[key] is not None and not isinstance(
-                raw_state[key], bool
-            ):
-                raise QueryPlanError("bad_user_state", f"user_state.{key} must be a boolean")
-        candidate = UserStateConstraint(
-            visited=raw_state.get("visited"), want_to_go=raw_state.get("want_to_go")
-        )
-        user_state = None if candidate.is_empty() else candidate
+        state = raw_state.get("state")
+        if not isinstance(state, str) or state not in USER_STATES:
+            # `visited` lands here, by design. It is not a typo to fix later: there is no
+            # write path for it, so accepting it would mean accepting a filter that can
+            # never be true and answering 去过的店 with an empty list that looks like a
+            # real result.
+            raise QueryPlanError(
+                "unsupported_user_state",
+                f"{state!r} is not a supported user state; supported: {sorted(USER_STATES)}",
+            )
+        present = raw_state.get("present", True)
+        if not isinstance(present, bool):
+            raise QueryPlanError("bad_user_state", "user_state.present must be a boolean")
+        user_state = UserStateConstraint(state=state, present=present)
 
     limit = raw.get("limit", 10)
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:

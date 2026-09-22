@@ -156,6 +156,18 @@ _SEMANTIC_CUES = (
     "好吃", "地道", "网红",
 )
 
+#: Phrases that map onto a state the product actually writes, scanned in order. Every
+#: 想去 variant maps to the same state, so overlap between them is harmless; the order is
+#: only load-bearing across *different* states. Negation (不想去) is not handled and
+#: deliberately so -- a `present=False` filter needs a phrase the parser can be confident
+#: about, and guessing it would produce the exact failure this pass exists to remove: a
+#: plan asserting a filter the user did not ask for.
+_USER_STATE_CUES: tuple[tuple[str, str], ...] = (
+    ("想去", "want_to_go"),
+    ("想试", "want_to_try"),
+    ("想学", "want_to_learn"),
+)
+
 
 def propose_plan_deterministic(query: str, *, limit: int = 10) -> dict[str, Any]:
     """Build a proposed plan dict from cue matching alone. Never raises.
@@ -189,23 +201,30 @@ def propose_plan_deterministic(query: str, *, limit: int = 10) -> dict[str, Any]
     if constraints:
         proposal["claim_constraints"] = constraints
 
-    # A cuisine or district question is about a place. Asking for the subtype as well
-    # is what keeps a dish entity named 日式定食 out of a restaurant result list.
+    # A cuisine or district question is about a place, and `entity_types` is enforced, so
+    # this is what keeps a *dish* entity named 日式定食 -- which can legitimately carry
+    # both a cuisine and a price claim -- out of a restaurant result list.
+    #
+    # `entity_subtypes` is deliberately not proposed. `subtype = restaurant` is the right
+    # description of what the user wants, and nothing in the pipeline writes `subtype`, so
+    # asking for it would reject every restaurant in the corpus. The executor enforces the
+    # field when a plan carries it; the parser does not manufacture one. Inventing a
+    # subtype classifier to close the gap is explicitly out of scope (DEC-020).
     if district or cuisine or any(cue in text for cue in _PLACE_CUES):
         proposal["entity_types"] = ["place"]
-        if district or cuisine:
-            proposal["entity_subtypes"] = ["restaurant"]
 
     semantic = [cue for cue in _SEMANTIC_CUES if cue in text]
     if semantic:
         proposal["semantic_requirements"] = semantic
 
-    if "没去过" in text or "还没去" in text:
-        proposal["user_state"] = {"visited": False}
-    elif "去过" in text:
-        proposal["user_state"] = {"visited": True}
-    if "想去" in text:
-        proposal["user_state"] = {"want_to_go": True}
+    # Only states the product can write are parsed. 去过/没去过 is not among them: see
+    # `USER_STATES` and `resurface.INTENT_STATES`. A query saying 去过 therefore keeps its
+    # other constraints and simply carries no user-state filter, which is honest -- the
+    # alternative is a plan that claims to filter on history and does not.
+    for phrase, state in _USER_STATE_CUES:
+        if phrase in text:
+            proposal["user_state"] = {"state": state, "present": True}
+            break
 
     return proposal
 
@@ -289,7 +308,6 @@ def _propose_plan_with_model(
 
     if district or cuisine:
         proposal["entity_types"] = ["place"]
-        proposal["entity_subtypes"] = ["restaurant"]
     return proposal
 
 

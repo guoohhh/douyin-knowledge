@@ -27,9 +27,16 @@ from sqlalchemy.orm import Session
 
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.db.models.capture import Source
+from douyin_knowledge.db.models.conversation import Message
 from douyin_knowledge.db.models.entities import Claim, ClaimEvidence, Entity
 from douyin_knowledge.db.models.policy import SourceProcessingState
-from douyin_knowledge.db.models.processing import EvidenceUnit, ProcessingRun
+from douyin_knowledge.db.models.processing import (
+    EvidenceUnit,
+    ProcessingRun,
+    RetrievalChunk,
+    RetrievalChunkEvidence,
+)
+from douyin_knowledge.db.models.userstate import EntityUserState
 from douyin_knowledge.knowledge.eligibility import (
     apply_claim_eligibility,
     eligible_claims,
@@ -169,6 +176,43 @@ class Corpus:
         self.session.flush()
         return row
 
+    def chunk(self, source: Source, run: ProcessingRun, text: str) -> RetrievalChunk:
+        """A retrievable chunk over this source's evidence, so FTS has something to rank.
+
+        Linked to the source's existing evidence units rather than new ones: `_hydrate`
+        drops a chunk that resolves to no evidence, because a chunk is a retrieval
+        convenience and never a citation target.
+        """
+        row = RetrievalChunk(
+            source_id=source.id,
+            processing_run_id=run.id,
+            chunk_type="paragraph",
+            ordinal=0,
+            text=text,
+            content_hash=f"c_{run.id}_{len(text)}_{text[:16]}",
+        )
+        self.session.add(row)
+        self.session.flush()
+        for evidence in self.session.scalars(
+            select(EvidenceUnit).where(EvidenceUnit.source_id == source.id)
+        ):
+            self.session.add(
+                RetrievalChunkEvidence(retrieval_chunk_id=row.id, evidence_id=evidence.id)
+            )
+        self.session.flush()
+        return row
+
+    def user_state(self, entity: Entity, state: str) -> EntityUserState:
+        row = EntityUserState(
+            entity_id=entity.id,
+            state=state,
+            first_action_at_ms=now_ms(),
+            last_action_at_ms=now_ms(),
+        )
+        self.session.add(row)
+        self.session.flush()
+        return row
+
     def restaurant(
         self,
         name: str,
@@ -179,23 +223,40 @@ class Corpus:
         attribution: str = "阿明",
         policy_action: str = "process",
         grounding_status: str | None = "valid",
+        entity_type: str = "place",
+        subtype: str | None = "restaurant",
+        evidence_text: str | None = None,
     ) -> Entity:
-        """One fully-described restaurant on one source."""
+        """One fully-described entity on one source.
+
+        `entity_type` is a parameter because the dangerous case is exactly the one where
+        every *claim* matches and the entity is the wrong kind of thing: a dish named 日式
+        定食 legitimately carries a cuisine and a price.
+        """
         source, run = self.source(f"{name} 探店", policy_action=policy_action)
-        entity = self.entity(name)
+        entity = self.entity(name, entity_type=entity_type)
+        entity.subtype = subtype
+        self.session.flush()
         self.claim(
             entity, source, run, predicate="located_in", text=district,
             attribution=attribution, grounding_status=grounding_status,
+            evidence_text=evidence_text,
         )
         self.claim(
             entity, source, run, predicate="cuisine", text=cuisine,
             attribution=attribution, grounding_status=grounding_status,
+            evidence_text=evidence_text,
         )
         if price is not None:
             self.claim(
                 entity, source, run, predicate="price_per_person", number=price,
                 attribution=attribution, grounding_status=grounding_status,
+                evidence_text=evidence_text,
             )
+        if evidence_text is not None:
+            # Only when the test cares about text: a chunk is what FTS ranks, and most cases
+            # here are about qualification, which must work with no chunk at all.
+            self.chunk(source, run, evidence_text)
         return entity
 
 
@@ -215,6 +276,13 @@ def _names(result) -> list[str]:
 
 def _reasons(result) -> set[str]:
     return {r.reason for r in result.rejections}
+
+
+def _index(session: Session) -> None:
+    """Populate the FTS index so ranking has a real signal to work from."""
+    from douyin_knowledge.search.indexer import reindex_all
+
+    reindex_all(session)
 
 
 # ------------------------------------------------- the eight required cases
@@ -530,7 +598,14 @@ class TestMalformedPlans:
             ({"limit": True}, "bad_limit"),
             ({"parser": ""}, "bad_parser"),
             ({"user_state": "visited"}, "bad_user_state"),
-            ({"user_state": {"visited": "yes"}}, "bad_user_state"),
+            # The old `{"visited": ...}` shape no longer names a field, so it fails as an
+            # unsupported state rather than a bad type. `visited` is not a state V1 can
+            # execute (no write path; `resurface.INTENT_STATES` excludes it deliberately),
+            # and a plan may not carry a constraint the executor would ignore.
+            ({"user_state": {"visited": "yes"}}, "unsupported_user_state"),
+            ({"user_state": {"state": "visited"}}, "unsupported_user_state"),
+            ({"user_state": {"state": 7}}, "unsupported_user_state"),
+            ({"user_state": {"state": "want_to_go", "present": "yes"}}, "bad_user_state"),
         ],
     )
     def test_rejected_with_code(self, raw: object, code: str) -> None:
@@ -953,3 +1028,687 @@ class TestRejectionsReachTheAnswer:
 
         assert "旺角平价寿司" in content
         assert "80" in content
+
+
+# --------------------------------------------------- entity_types as a hard constraint
+
+
+class TestEntityTypeIsEnforced:
+    """A plan asking for a place must never return a dish, however good its claims are.
+
+    The failure this guards is subtle because every *claim* is correct: a dish entity can
+    carry 产地/口味-style claims on the same predicates a restaurant uses, and candidate
+    generation starts from claims. Before this was enforced, 日式定食 (a dish) with
+    located_in=旺角, cuisine=日料 and price_per_person=80 answered the canonical restaurant
+    query, and the plan said `entity_types = ["place"]` the whole time.
+    """
+
+    def test_a_dish_with_every_matching_claim_does_not_qualify(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        corpus.restaurant(
+            "日式定食",
+            district="旺角",
+            cuisine="日料",
+            price=80,
+            entity_type="dish",
+            subtype=None,
+        )
+
+        plan = _plan()
+        assert list(plan.entity_types) == ["place"], "the parser must still ask for a place"
+        result = StructuredExecutor(session).execute(plan)
+
+        assert _names(result) == []
+
+    def test_a_tool_with_every_matching_claim_does_not_qualify(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        corpus.restaurant(
+            "寿司刀",
+            district="旺角",
+            cuisine="日料",
+            price=80,
+            entity_type="tool",
+            subtype=None,
+        )
+
+        result = StructuredExecutor(session).execute(_plan())
+
+        assert _names(result) == []
+
+    def test_the_place_beside_it_still_qualifies(self, session: Session, corpus: Corpus) -> None:
+        """The filter narrows, it does not break the path it runs on."""
+        corpus.restaurant(
+            "日式定食", district="旺角", cuisine="日料", price=80,
+            entity_type="dish", subtype=None,
+        )
+        corpus.restaurant("旺角一番", district="旺角", cuisine="日料", price=80)
+
+        result = StructuredExecutor(session).execute(_plan())
+
+        assert _names(result) == ["旺角一番"]
+
+    def test_the_numeric_only_candidate_path_is_filtered_too(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """`entity_types` on every path, not only the one the canonical query happens to use.
+
+        A price-only plan takes the `numeric_constraints` candidate branch, which is a
+        different code path from the text branch the canonical query uses. Both had the same
+        defect and both need the assertion.
+        """
+        corpus.restaurant(
+            "便宜的饭", district="旺角", cuisine="日料", price=60,
+            entity_type="dish", subtype=None,
+        )
+        plan = validate_plan(
+            {
+                "claim_constraints": [
+                    {"field": "price_per_person", "operator": "<", "value": 100}
+                ],
+                "entity_types": ["place"],
+            },
+            raw_query="人均100以下",
+            scope="personal_required",
+        )
+
+        result = StructuredExecutor(session).execute(plan)
+
+        assert result.diagnostics["candidate_source"] == "numeric_constraints"
+        assert _names(result) == []
+
+    def test_candidate_generation_itself_filters_by_kind(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """Both layers are asserted separately, or one can rot behind the other.
+
+        The evaluation check alone makes the *result* correct while the executor still loads
+        and evaluates every dish in the corpus -- correct and needlessly slow, and the kind
+        of thing that survives review because the user-visible behaviour is fine. This
+        asserts the filter where it belongs: a wrong-kind entity is never a candidate.
+        """
+        corpus.restaurant(
+            "日式定食", district="旺角", cuisine="日料", price=80,
+            entity_type="dish", subtype=None,
+        )
+        corpus.restaurant("旺角一番", district="旺角", cuisine="日料", price=80)
+
+        executor = StructuredExecutor(session)
+        candidate_ids, diagnostics = executor._candidate_entity_ids(_plan())
+
+        assert diagnostics["candidate_source"] == "text_constraints"
+        kinds = {
+            entity.entity_type
+            for entity in session.scalars(select(Entity).where(Entity.id.in_(candidate_ids)))
+        }
+        assert kinds == {"place"}
+
+    def test_a_mismatch_is_diagnosable_when_it_reaches_evaluation(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """The per-entity check reports `entity_type_mismatch` rather than failing silently.
+
+        Candidate generation normally removes these before evaluation, so this drives the
+        evaluation check directly. It exists because the guarantee should not depend on
+        which candidate path ran -- a future path added without the filter must degrade to
+        slow, not to wrong.
+        """
+        dish = corpus.restaurant(
+            "日式定食", district="旺角", cuisine="日料", price=80,
+            entity_type="dish", subtype=None,
+        )
+        plan = _plan()
+        executor = StructuredExecutor(session)
+        claims = {
+            claim.predicate: [claim]
+            for claim in session.scalars(
+                select(Claim).where(Claim.subject_entity_id == dish.id)
+            )
+        }
+
+        outcome = executor._evaluate_entity(dish, [], claims, plan=plan, user_states={})
+
+        assert outcome.reason == "entity_type_mismatch"  # type: ignore[union-attr]
+        assert outcome.field == "entity_type"  # type: ignore[union-attr]
+
+    def test_the_parser_does_not_propose_a_subtype_it_cannot_satisfy(self) -> None:
+        """`entity_subtypes` is enforced when present, so the parser must not invent one.
+
+        Nothing in the pipeline writes `Entity.subtype`. A proposed `subtype = restaurant`
+        would therefore reject every restaurant in the corpus -- which is why the fix was to
+        stop proposing it rather than to stop enforcing it.
+        """
+        plan = _plan()
+
+        assert list(plan.entity_subtypes) == []
+
+    def test_a_subtype_in_a_plan_is_genuinely_enforced(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        corpus.restaurant(
+            "旺角无子类", district="旺角", cuisine="日料", price=80, subtype=None
+        )
+        plan = validate_plan(
+            {
+                "location": {"district": "旺角"},
+                "entity_types": ["place"],
+                "entity_subtypes": ["restaurant"],
+            },
+            raw_query="旺角",
+            scope="personal_required",
+        )
+
+        result = StructuredExecutor(session).execute(plan)
+
+        assert _names(result) == []
+        assert result.diagnostics["reason"] == "no_structured_candidates"
+
+    def test_a_subtype_mismatch_is_reported_at_evaluation_too(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """Same two-layer argument as `entity_type`, asserted at the evaluation layer."""
+        place = corpus.restaurant(
+            "旺角无子类", district="旺角", cuisine="日料", price=80, subtype=None
+        )
+        plan = validate_plan(
+            {"location": {"district": "旺角"}, "entity_subtypes": ["restaurant"]},
+            raw_query="旺角",
+            scope="personal_required",
+        )
+
+        outcome = StructuredExecutor(session)._evaluate_entity(
+            place, [], {}, plan=plan, user_states={}
+        )
+
+        assert outcome.reason == "entity_subtype_mismatch"  # type: ignore[union-attr]
+        assert outcome.field == "subtype"  # type: ignore[union-attr]
+
+    def test_a_matching_subtype_passes_the_same_check(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """Enforced, not merely rejecting: a plan with a subtype a writer *did* set matches."""
+        place = corpus.restaurant(
+            "旺角有子类", district="旺角", cuisine="日料", price=80, subtype="restaurant"
+        )
+        plan = validate_plan(
+            {"location": {"district": "旺角"}, "entity_subtypes": ["restaurant"]},
+            raw_query="旺角",
+            scope="personal_required",
+        )
+
+        result = StructuredExecutor(session).execute(plan)
+
+        assert _names(result) == [place.canonical_name]
+
+
+# ------------------------------------------------------------ user state constraints
+
+
+class TestUserStateIsEnforced:
+    """想去 filters on `EntityUserState`, and 去过 is refused rather than ignored."""
+
+    def test_want_to_go_returns_only_marked_entities(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        marked = corpus.restaurant("旺角想去店", district="旺角", cuisine="日料", price=80)
+        corpus.restaurant("旺角还没标", district="旺角", cuisine="日料", price=80)
+        corpus.user_state(marked, "want_to_go")
+
+        plan = _plan("旺角人均100以下想去的日料")
+        assert plan.user_state is not None
+        assert plan.user_state.state == "want_to_go"
+        result = StructuredExecutor(session).execute(plan)
+
+        assert _names(result) == ["旺角想去店"]
+        assert "user_state_mismatch" in _reasons(result)
+
+    def test_a_different_state_does_not_count_as_want_to_go(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        other = corpus.restaurant("旺角想试店", district="旺角", cuisine="日料", price=80)
+        corpus.user_state(other, "want_to_try")
+
+        result = StructuredExecutor(session).execute(_plan("旺角人均100以下想去的日料"))
+
+        assert _names(result) == []
+
+    def test_user_state_does_not_loosen_the_other_constraints(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """Marking 想去 cannot rescue a restaurant that fails the price condition."""
+        expensive = corpus.restaurant("旺角贵店", district="旺角", cuisine="日料", price=150)
+        corpus.user_state(expensive, "want_to_go")
+
+        result = StructuredExecutor(session).execute(_plan("旺角人均100以下想去的日料"))
+
+        assert _names(result) == []
+        assert "numeric_constraint_failed" in _reasons(result)
+
+    def test_a_state_only_query_is_still_bounded_and_typed(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """想去的店 with no district or price: the user-state candidate path."""
+        marked = corpus.restaurant("想去的店", district="中环", cuisine="意大利菜", price=300)
+        dish = corpus.restaurant(
+            "想去吃的菜", district="中环", cuisine="意大利菜", price=300,
+            entity_type="dish", subtype=None,
+        )
+        corpus.user_state(marked, "want_to_go")
+        corpus.user_state(dish, "want_to_go")
+
+        plan = validate_plan(
+            {"user_state": {"state": "want_to_go"}, "entity_types": ["place"]},
+            raw_query="我想去的店",
+            scope="personal_required",
+        )
+        result = StructuredExecutor(session).execute(plan)
+
+        assert result.diagnostics["candidate_source"] == "user_state"
+        assert _names(result) == ["想去的店"]
+
+    def test_visited_is_not_parsed_into_a_constraint(self) -> None:
+        """去过 keeps its other constraints and carries no user-state filter.
+
+        The alternative -- parsing it into `visited=true` -- produced a plan that told the
+        user their history filter was understood while the executor ignored it. There is no
+        write path for `visited` (see `resurface.INTENT_STATES`), so refusing to model it is
+        the honest option, and the *other* constraints still work.
+        """
+        plan = _plan("我去过的旺角人均100以下的日料")
+
+        assert plan.user_state is None
+        assert plan.location is not None and plan.location.district == "旺角"
+        assert {c.field for c in plan.required_constraints} == {"cuisine", "price_per_person"}
+
+    def test_a_plan_may_not_carry_an_unexecutable_state(self) -> None:
+        with pytest.raises(QueryPlanError) as excinfo:
+            validate_plan(
+                {"user_state": {"state": "visited"}},
+                raw_query="去过的店",
+                scope="personal_required",
+            )
+
+        assert excinfo.value.code == "unsupported_user_state"
+
+
+# -------------------------------------------- source_ids restricts before qualification
+
+
+class TestSourceRestrictionPrecedesQualification:
+    """A caller allow-list must decide *who qualifies*, not merely what is displayed.
+
+    The post-hoc version filtered `result.chunks` and `result.claims` and left
+    `structured.matches` alone -- and the answer renderer reads `matches` directly. So a
+    restaurant supported only by an excluded source was still named, with its price, and no
+    citation the caller had permitted. That is the shape of a fabricated answer: true
+    content, impermissible provenance.
+    """
+
+    def _retrieve(self, session: Session, source_ids: list[str] | None):
+        from douyin_knowledge.retrieval.retriever import HybridRetriever
+
+        return HybridRetriever(session).retrieve_structured(
+            _plan(), use_vector=False, source_ids=source_ids
+        )
+
+    def _sources_of(self, session: Session, entity: Entity) -> list[str]:
+        return [
+            claim.source_id
+            for claim in session.scalars(
+                select(Claim).where(Claim.subject_entity_id == entity.id)
+            )
+        ]
+
+    def test_an_entity_supported_only_by_an_excluded_source_does_not_qualify(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        a = corpus.restaurant("旺角A店", district="旺角", cuisine="日料", price=80)
+        b = corpus.restaurant("旺角B店", district="旺角", cuisine="日料", price=80)
+        b_sources = self._sources_of(session, b)
+
+        result = self._retrieve(session, b_sources)
+
+        assert result.structured is not None
+        assert _names(result.structured) == ["旺角B店"]
+        # Not just absent from the list: no claim of A's may support any match.
+        a_sources = set(self._sources_of(session, a))
+        assert not a_sources & set(result.structured.qualifying_source_ids)
+        assert not {c.source_id for c in result.claims} & a_sources
+
+    def test_nothing_qualifying_in_the_allowed_source_is_an_honest_no_result(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        corpus.restaurant("旺角A店", district="旺角", cuisine="日料", price=80)
+        other = corpus.restaurant("中环C店", district="中环", cuisine="意大利菜", price=300)
+
+        result = self._retrieve(session, self._sources_of(session, other))
+
+        assert result.structured is not None
+        assert result.structured.matches == []
+        assert "旺角A店" not in str(result.structured.as_dict())
+
+    def test_the_allowed_source_qualifies_normally_with_citations(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        a = corpus.restaurant("旺角A店", district="旺角", cuisine="日料", price=80)
+        corpus.restaurant("旺角B店", district="旺角", cuisine="日料", price=80)
+
+        result = self._retrieve(session, self._sources_of(session, a))
+
+        assert result.structured is not None
+        assert _names(result.structured) == ["旺角A店"]
+        assert result.claims, "a qualifying match must still carry citable claims"
+
+    def test_an_empty_allow_list_qualifies_nobody(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """`[]` means "no sources permitted", not "no restriction"."""
+        corpus.restaurant("旺角A店", district="旺角", cuisine="日料", price=80)
+
+        result = self._retrieve(session, [])
+
+        assert result.structured is not None
+        assert result.structured.matches == []
+
+    def test_no_restriction_still_returns_everything(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        corpus.restaurant("旺角A店", district="旺角", cuisine="日料", price=80)
+        corpus.restaurant("旺角B店", district="旺角", cuisine="日料", price=80)
+
+        result = self._retrieve(session, None)
+
+        assert result.structured is not None
+        assert sorted(_names(result.structured)) == ["旺角A店", "旺角B店"]
+
+
+# --------------------------------------------------- ranking runs after qualification
+
+
+class TestRankingHappensAfterQualification:
+    """`plan.limit` is applied to a *ranked* qualifying set, never to an arbitrary prefix."""
+
+    def _retrieve(self, session: Session, query: str = CANONICAL_QUERY, *, limit: int = 10):
+        from douyin_knowledge.retrieval.retriever import HybridRetriever
+
+        return HybridRetriever(session).retrieve_structured(
+            _plan(query, limit=limit), use_vector=False
+        )
+
+    def test_every_qualifying_entity_is_evaluated_before_the_limit_cuts(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """Six qualify, two are shown, and the executor still saw all six.
+
+        The old `break` at `plan.limit` stopped candidate evaluation, so entities 3-6 were
+        never scored and the "top 2" were whichever rows the database happened to return
+        first. `qualified` is the assertion that the ranking input was the whole set.
+        """
+        for i in range(6):
+            corpus.restaurant(f"旺角{i}号店", district="旺角", cuisine="日料", price=80)
+
+        result = self._retrieve(session, limit=2)
+
+        assert result.structured is not None
+        assert result.structured.diagnostics["qualified"] == 6
+        assert len(result.structured.matches) == 2
+
+    def test_the_fallback_order_is_stated_not_incidental(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """With no FTS signal, order is by canonical name -- deterministic, not row order.
+
+        Insertion order is deliberately the reverse of name order. Without the explicit
+        sort the result comes back in insertion order, which is what SQLite happened to
+        return -- stable today, and free to change after an unrelated reindex.
+        """
+        inserted = ["旺角Z店", "旺角M店", "旺角A店"]
+        for name in inserted:
+            corpus.restaurant(name, district="旺角", cuisine="日料", price=80)
+
+        result = self._retrieve(session)
+
+        assert result.structured is not None
+        assert result.structured.diagnostics["ranking"] == "deterministic_fallback_by_name"
+        assert _names(result.structured) == sorted(inserted)
+        assert _names(result.structured) != inserted, "must not be incidental row order"
+
+    def test_stronger_support_for_a_soft_requirement_ranks_first(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """Both satisfy every hard condition; the one whose text discusses 约会 wins.
+
+        This is the whole content of "semantic requirements are ranking signals": they do
+        not decide membership, and they are not decoration either.
+        """
+        # Two things are stacked against the right answer on purpose, so this test cannot
+        # pass by accident. Alphabetically "A吵闹店" sorts first, so the deterministic
+        # fallback would put it on top. And its text repeats every term of the *question*
+        # (旺角/日料/人均/收藏) many times over, so whole-query BM25 ranks it first too --
+        # which is exactly the dilution the dedicated soft-requirement pass exists to
+        # correct. Only 约会 distinguishes them, and only the requirement asks about 约会.
+        corpus.restaurant(
+            "Z安静店",
+            district="旺角",
+            cuisine="日料",
+            price=80,
+            evidence_text="Z安静店 很适合约会 约会气氛安静 约会首选",
+        )
+        corpus.restaurant(
+            "A吵闹店",
+            district="旺角",
+            cuisine="日料",
+            price=80,
+            evidence_text=(
+                "A吵闹店 旺角 日料 人均 收藏 旺角 日料 人均 100 以下 旺角 日料 人均 "
+                "旺角 日料 人均 收藏 旺角 日料 排队很长 环境一般"
+            ),
+        )
+        _index(session)
+
+        plan = _plan("旺角人均100以下适合约会的日料")
+        assert "适合约会" in plan.semantic_requirements
+        from douyin_knowledge.retrieval.retriever import HybridRetriever
+
+        result = HybridRetriever(session).retrieve_structured(plan, use_vector=False)
+
+        assert result.structured is not None
+        assert result.structured.diagnostics["ranking"] == "similarity_over_qualifying_sources"
+        assert _names(result.structured)[0] == "Z安静店", (
+            f"soft requirement did not affect ranking: "
+            f"{result.structured.diagnostics.get('scores')}"
+        )
+
+    def test_a_soft_requirement_never_excludes_anyone(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """It reorders. The restaurant with no 约会 support is ranked lower, not dropped."""
+        corpus.restaurant(
+            "Z安静店", district="旺角", cuisine="日料", price=80,
+            evidence_text="Z安静店 人均80 日料 很适合约会",
+        )
+        corpus.restaurant(
+            "A吵闹店", district="旺角", cuisine="日料", price=80,
+            evidence_text="A吵闹店 人均80 日料 排队很长",
+        )
+        _index(session)
+        from douyin_knowledge.retrieval.retriever import HybridRetriever
+
+        result = HybridRetriever(session).retrieve_structured(
+            _plan("旺角人均100以下适合约会的日料"), use_vector=False
+        )
+
+        assert result.structured is not None
+        assert sorted(_names(result.structured)) == ["A吵闹店", "Z安静店"]
+
+    def test_high_similarity_cannot_resurrect_a_rejected_candidate(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """The most textually relevant restaurant in the corpus fails on price and is gone.
+
+        Its evidence repeats every term of the question, so any similarity-first arrangement
+        would rank it top. It qualifies on district and cuisine and fails on 人均, and no
+        ranking stage has a route back to membership: ranking sorts `matches`, and it is not
+        in `matches`.
+        """
+        corpus.restaurant(
+            "旺角超相关店",
+            district="旺角",
+            cuisine="日料",
+            price=400,
+            evidence_text=(
+                "旺角 日料 人均 收藏 旺角超相关店 旺角 日料 人均 100 以下 旺角 日料 "
+                "我收藏过哪些旺角人均100以下的日料"
+            ),
+        )
+        corpus.restaurant(
+            "旺角普通店", district="旺角", cuisine="日料", price=80, evidence_text="一家店"
+        )
+        _index(session)
+
+        result = self._retrieve(session)
+
+        assert result.structured is not None
+        assert _names(result.structured) == ["旺角普通店"]
+        assert "numeric_constraint_failed" in _reasons(result.structured)
+        assert "旺角超相关店" not in [c.source_title for c in result.chunks]
+
+
+# ------------------------------------------- the product entry point, end to end
+
+
+class TestTheCanonicalQueryThroughConversationManager:
+    """`ConversationManager.ask()` -- the entry point the frontend calls.
+
+    Everything else in this file tests a component. This tests the product: scope
+    classification, plan parsing, plan persistence, structured routing, qualification,
+    citation building and answer rendering, in the order the user's request travels through
+    them. A defect in the wiring between any two of those is invisible to every
+    executor-level test in this file and completely visible to the user -- which is exactly
+    what happened with the rejection path.
+    """
+
+    def _ask(self, session: Session, query: str = CANONICAL_QUERY, **kwargs):
+        from douyin_knowledge.conversation.conversation_manager import ConversationManager
+
+        # No chat model and no vector store: demo mode, which is also the state a new user
+        # is in before configuring a key. The answer must be real and cited without either.
+        return ConversationManager(session).ask(query, **kwargs)
+
+    def test_the_canonical_query_answers_from_the_collection_with_real_citations(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        corpus.restaurant(
+            "旺角松本食堂",
+            district="旺角",
+            cuisine="日料",
+            price=80,
+            evidence_text="旺角松本食堂 人均80 很地道的日料",
+        )
+        corpus.restaurant("中环贵价意菜", district="中环", cuisine="意大利菜", price=400)
+        _index(session)
+
+        turn = self._ask(session)
+        body = turn.as_dict()
+
+        # 1. scope: a question about 我收藏过 may not be answered from general knowledge.
+        assert body["scope"] == "personal_required"
+        # `structured`, not `deterministic` or `model`: the generator records which path
+        # actually produced the prose, and this asserts the structured one did.
+        assert body["meta"]["generator"] == "structured"
+        assert body["meta"]["model_name"] is None, "no model wrote this, so none is claimed"
+
+        # 2. the plan is persisted on the user message, with all three constraints.
+        user_message = session.get(Message, turn.user_message_id)
+        assert user_message is not None
+        persisted = user_message.query_plan_json
+        assert persisted is not None
+        # The plan is stored nested under "plan", beside the parser trail, so a later
+        # reader can tell *which* parser produced it and whether a model attempt failed.
+        plan_json = persisted["plan"]
+        assert plan_json["location"]["district"] == "旺角"
+        fields = {c["field"]: c for c in plan_json["claim_constraints"]}
+        assert fields["cuisine"]["value_text"] == "日料"
+        assert fields["price_per_person"]["operator"] == "<"
+        assert fields["price_per_person"]["value_number"] == 100
+
+        # 3. the structured path ran, and it selected the result set.
+        assert plan_json["is_structured"] is True
+        structured = body["meta"]["diagnostics"]["structured"]
+        assert [m["entity_name"] for m in structured["matches"]] == ["旺角松本食堂"]
+
+        # 4. the returned entity satisfies every hard constraint, not just the query text.
+        supports = structured["matches"][0]["supports"]
+        assert set(supports) == {"district", "cuisine", "price_per_person"}
+        for field_name, support in supports.items():
+            assert support["satisfied_by"], f"{field_name} has no claim satisfying it"
+
+        # 5. the answer names it and carries resolvable citations.
+        assert "旺角松本食堂" in body["content"]
+        assert "中环贵价意菜" not in body["content"]
+        assert body["has_evidence"] is True
+        assert body["citations"], "a personal-scope structured answer must cite claims"
+
+        # 6. every citation resolves through Claim -> Evidence -> Source. A citation whose
+        #    provenance does not resolve is worse than no citation: it looks verified.
+        for citation in body["citations"]:
+            assert citation["source_id"]
+            claim_id = citation.get("claim_id")
+            if claim_id:
+                claim = session.get(Claim, claim_id)
+                assert claim is not None
+                links = session.scalars(
+                    select(ClaimEvidence).where(ClaimEvidence.claim_id == claim.id)
+                ).all()
+                assert links, "a cited claim must have evidence behind it"
+                for link in links:
+                    evidence = session.get(EvidenceUnit, link.evidence_id)
+                    assert evidence is not None
+                    assert session.get(Source, evidence.source_id) is not None
+
+        # 7. no general-knowledge fallback: the answer came from the collection.
+        assert body["meta"]["diagnostics"]["structured"]["matched"] == 1
+
+    def test_source_ids_restricts_the_answer_not_just_its_citations(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """The API contract "restrict retrieval to these sources", asserted on rendered text.
+
+        The post-hoc filter left `structured.matches` populated, and the renderer reads
+        `matches`, so the excluded restaurant appeared in the prose with its price while its
+        citations were stripped -- a named result the caller was not permitted to see, with
+        no provenance at all.
+        """
+        a = corpus.restaurant("旺角A店", district="旺角", cuisine="日料", price=80)
+        corpus.restaurant("旺角B店", district="旺角", cuisine="日料", price=80)
+        a_sources = [
+            claim.source_id
+            for claim in session.scalars(
+                select(Claim).where(Claim.subject_entity_id == a.id)
+            )
+        ]
+
+        body = self._ask(session, source_ids=a_sources).as_dict()
+
+        assert "旺角A店" in body["content"]
+        assert "旺角B店" not in body["content"], "an excluded source must not be named"
+        assert body["citations"]
+
+    def test_an_excluded_source_gives_an_honest_no_result(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        corpus.restaurant("旺角A店", district="旺角", cuisine="日料", price=80)
+        other = corpus.restaurant("中环C店", district="中环", cuisine="意大利菜", price=300)
+        other_sources = [
+            claim.source_id
+            for claim in session.scalars(
+                select(Claim).where(Claim.subject_entity_id == other.id)
+            )
+        ]
+
+        body = self._ask(session, source_ids=other_sources).as_dict()
+
+        assert "旺角A店" not in body["content"]
+        assert body["citations"] == []
+        assert body["has_evidence"] is False

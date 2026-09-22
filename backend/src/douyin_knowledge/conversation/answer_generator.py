@@ -86,9 +86,11 @@ _REJECTION_LABELS = {
     "no_eligible_claims_excluded": "相关收藏已被排除在知识检索之外",
     "no_eligible_claims_superseded": "相关数值只存在于已被取代的旧处理结果里",
     "no_eligible_claims_downgraded": "相关断言没有通过溯源校验，不能用来回答",
-    "entity_type_mismatch": "匹配到的对象类型不对",
-    "entity_subtype_mismatch": "匹配到的对象类型不对",
-    "user_state_mismatch": "有符合条件的店，但和你的去过/想去状态不符",
+    "entity_type_mismatch": "有条件都对得上的内容，但它不是你问的那类东西",
+    "entity_subtype_mismatch": "有条件都对得上的地方，但子类型和你问的不一致",
+    # 去过 is deliberately not mentioned: it is not a state V1 can filter on, so a label
+    # offering it would advertise a capability the executor does not have.
+    "user_state_mismatch": "有符合条件的店，但你还没标记成想去",
 }
 
 

@@ -39,8 +39,11 @@ from sqlalchemy import select
 from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.entities import Claim, Entity
 from douyin_knowledge.db.models.policy import SourceProcessingState
+from douyin_knowledge.db.models.userstate import EntityUserState
+from douyin_knowledge.extraction.grounding import is_assertable
 from douyin_knowledge.knowledge.eligibility import apply_claim_eligibility
 from douyin_knowledge.observability.logging import get_logger
+from douyin_knowledge.policy.models import HIDDEN_ACTIONS
 from douyin_knowledge.retrieval.query_plan import CLAIM_FIELDS, ClaimConstraint, QueryPlan
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -228,6 +231,21 @@ class StructuredResult:
     def is_empty(self) -> bool:
         return not self.matches
 
+    def refresh_diagnostics(self) -> None:
+        """Recompute the match-derived counters after `matches` has been reordered or cut.
+
+        The retriever ranks the qualifying set and truncates it to ``plan.limit`` after the
+        executor returns, so ``matched`` and ``conflicts`` computed during execution would
+        describe a list that no longer exists -- reporting conflicts for an entity the user
+        was never shown. ``rejections`` is untouched on purpose: a candidate rejected by a
+        hard constraint is still rejected regardless of how many survivors were displayed,
+        and that is exactly what the answer needs in order to say 有一家但人均 150.
+        """
+        self.diagnostics["matched"] = len(self.matches)
+        self.diagnostics["conflicts"] = {
+            m.entity.canonical_name: m.conflicts for m in self.matches if m.conflicts
+        }
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "matches": [m.as_dict() for m in self.matches],
@@ -262,8 +280,22 @@ def _numeric_satisfied(value: float | None, operator: str, target: float) -> boo
 class StructuredExecutor:
     """Run a validated plan against the Entity/Claim/Evidence/Source spine."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, source_ids: Sequence[str] | None = None) -> None:
+        """`source_ids`, when given, is a caller allow-list applied *before* qualification.
+
+        It is not a display filter. Every claim the executor reads passes through
+        :meth:`_eligible_claims_for`, so the allow-list constrains candidate generation,
+        hard-condition satisfaction, conflict collection and the provenance behind the
+        answer with one check. Filtering matches afterwards would let an entity qualify on
+        a claim from a source the caller excluded, then render it with no citation -- the
+        answer would assert something no permitted source says.
+
+        ``None`` means unrestricted; an empty sequence means "restricted to nothing" and
+        qualifies nobody. The distinction matters and is preserved deliberately: collapsing
+        ``[]`` to "no filter" would turn the narrowest possible request into the widest.
+        """
         self.session = session
+        self.source_ids: list[str] | None = None if source_ids is None else list(source_ids)
 
     # ------------------------------------------------------------- candidates
 
@@ -275,19 +307,53 @@ class StructuredExecutor:
         Eligibility is applied in SQL (see :func:`apply_claim_eligibility`) so ``LIMIT``
         is meaningful. Doing it in Python here would mean loading every price claim in
         the corpus before discarding the excluded ones.
+
+        This is the single chokepoint for the caller's source allow-list. Every claim the
+        executor considers -- for candidates, for satisfaction, for conflicts -- comes
+        through here, which is what makes "restricted before qualification" structural
+        rather than a rule each call site has to remember.
         """
         if not predicates:
+            return []
+        if self.source_ids is not None and not self.source_ids:
             return []
         stmt = select(Claim).where(
             Claim.predicate.in_(list(predicates)),
             Claim.subject_entity_id.is_not(None),
         )
+        if self.source_ids is not None:
+            stmt = stmt.where(Claim.source_id.in_(self.source_ids))
         if entity_ids is not None:
             if not entity_ids:
                 return []
             stmt = stmt.where(Claim.subject_entity_id.in_(list(entity_ids)))
         stmt = apply_claim_eligibility(stmt).limit(MAX_CANDIDATES * 8)
         return list(self.session.scalars(stmt))
+
+    def _entity_ids_of_wanted_kind(self, plan: QueryPlan, ids: Sequence[str]) -> list[str]:
+        """`ids` narrowed to the entity types/subtypes the plan asks for, order preserved.
+
+        Candidate generation from claims starts from ``Claim.subject_entity_id``, which
+        says nothing about what kind of thing the subject is: a *dish* called 日式定食 can
+        legitimately carry both a ``cuisine`` and a ``price_per_person`` claim and would
+        otherwise be returned as a restaurant. Applying the type filter here means every
+        candidate path is narrowed, not just the entity-table fallback.
+
+        Order is preserved rather than re-derived from the database, because the caller's
+        order is the claim order and downstream ranking depends on a deterministic
+        starting sequence (see :meth:`execute`).
+        """
+        if not ids:
+            return []
+        if not plan.entity_types and not plan.entity_subtypes:
+            return list(ids)
+        stmt = select(Entity.id).where(Entity.id.in_(list(ids)))
+        if plan.entity_types:
+            stmt = stmt.where(Entity.entity_type.in_(list(plan.entity_types)))
+        if plan.entity_subtypes:
+            stmt = stmt.where(Entity.subtype.in_(list(plan.entity_subtypes)))
+        allowed = set(self.session.scalars(stmt))
+        return [entity_id for entity_id in ids if entity_id in allowed]
 
     def _candidate_entity_ids(self, plan: QueryPlan) -> tuple[list[str], dict[str, Any]]:
         """Entity ids worth evaluating, derived from the plan's own hard constraints.
@@ -297,6 +363,11 @@ class StructuredExecutor:
         predicate, and the entities carrying it are the only ones that can possibly
         qualify. Starting from entities and filtering afterwards would read the whole
         corpus to answer a two-restaurant question.
+
+        Whichever path runs, the result is narrowed by ``entity_types`` /
+        ``entity_subtypes`` before it is returned. The per-entity check in
+        :meth:`_evaluate_entity` is not redundant with that: it is what makes the
+        guarantee independent of which path happened to run.
         """
         diagnostics: dict[str, Any] = {}
         selective_predicates: list[str] = []
@@ -314,7 +385,7 @@ class StructuredExecutor:
                     ids.append(claim.subject_entity_id)
             diagnostics["candidate_source"] = "text_constraints"
             diagnostics["candidate_predicates"] = sorted(set(selective_predicates))
-            return ids[:MAX_CANDIDATES], diagnostics
+            return self._entity_ids_of_wanted_kind(plan, ids)[:MAX_CANDIDATES], diagnostics
 
         numeric_predicates = [
             c.predicate for c in plan.required_constraints if c.kind == "number"
@@ -327,10 +398,23 @@ class StructuredExecutor:
                     ids.append(claim.subject_entity_id)
             diagnostics["candidate_source"] = "numeric_constraints"
             diagnostics["candidate_predicates"] = sorted(set(numeric_predicates))
-            return ids[:MAX_CANDIDATES], diagnostics
+            return self._entity_ids_of_wanted_kind(plan, ids)[:MAX_CANDIDATES], diagnostics
 
-        # Subtype-only plan: no claim predicate to start from, so the entity table is
-        # the candidate set. Bounded by MAX_CANDIDATES like every other path.
+        # User-state-only plan (想去的店 with no district, cuisine or price): the states the
+        # user declared are the selective thing, so start from them. This is the one
+        # candidate path not derived from claims, and it is still bounded.
+        if plan.user_state is not None and plan.user_state.present:
+            state_stmt = (
+                select(EntityUserState.entity_id)
+                .where(EntityUserState.state == plan.user_state.state)
+                .limit(MAX_CANDIDATES * 8)
+            )
+            diagnostics["candidate_source"] = "user_state"
+            state_ids = list(self.session.scalars(state_stmt))
+            return self._entity_ids_of_wanted_kind(plan, state_ids)[:MAX_CANDIDATES], diagnostics
+
+        # Nothing claim-shaped and no positive user state to start from, so the entity
+        # table is the candidate set. Bounded by MAX_CANDIDATES like every other path.
         stmt = select(Entity.id).where(Entity.status == "active")
         if plan.entity_types:
             stmt = stmt.where(Entity.entity_type.in_(list(plan.entity_types)))
@@ -366,6 +450,19 @@ class StructuredExecutor:
             return None
 
         for grounding, run_id, action, current_run, deleted in rows:
+            if (
+                action not in HIDDEN_ACTIONS
+                and deleted is None
+                and current_run is not None
+                and run_id == current_run
+                and is_assertable(grounding)
+            ):
+                # This claim is fully eligible, so ineligibility is not the explanation for
+                # anything. Returning a reason here -- as the fall-through below used to --
+                # told the user their data was superseded when the truth was that the entity
+                # was filtered out for being the wrong *kind* of thing. A wrong diagnosis is
+                # worse than none: it sends them to reprocess a source that is already fine.
+                return None
             if action == "metadata_only":
                 return (
                     "no_eligible_claims_metadata_only",
@@ -418,6 +515,10 @@ class StructuredExecutor:
                 continue
             if entity_id not in entity_ids:
                 entity_ids.append(entity_id)
+        # The same kind filter the real candidate paths apply. Without it, a question about
+        # restaurants could be answered "你有一条相关收藏但没被处理" about a *dish* -- an
+        # explanation for an entity that was never eligible to be an answer.
+        entity_ids = self._entity_ids_of_wanted_kind(plan, entity_ids)
         if not entity_ids:
             return []
 
@@ -525,18 +626,39 @@ class StructuredExecutor:
                 )
             )
 
+        user_states: dict[str, str] = {}
+        if plan.user_state is not None:
+            user_states = {
+                row.entity_id: row.state
+                for row in self.session.scalars(
+                    select(EntityUserState).where(EntityUserState.entity_id.in_(candidate_ids))
+                )
+            }
+
         for entity_id in candidate_ids:
             entity = entities.get(entity_id)
             if entity is None:
                 continue
-            match = self._evaluate_entity(entity, constraints, claims_by_entity.get(entity_id, {}))
+            match = self._evaluate_entity(
+                entity,
+                constraints,
+                claims_by_entity.get(entity_id, {}),
+                plan=plan,
+                user_states=user_states,
+            )
             if isinstance(match, StructuredRejection):
                 result.rejections.append(match)
                 continue
             result.matches.append(match)
-            if len(result.matches) >= plan.limit:
-                break
 
+        # `plan.limit` is deliberately *not* applied here. Stopping at the limit would mean
+        # similarity ranks an arbitrary prefix of the qualifying set -- whichever rows
+        # SQLite happened to return first -- and the entity ranked 1st of 3 shown could be
+        # 40th of 50 qualifying. The full qualifying set (bounded by MAX_CANDIDATES) is
+        # returned; `retrieve_structured` reranks it and truncates afterwards. Callers that
+        # use the executor directly get everything that qualifies, which is the more
+        # defensible default for a hard-constraint query.
+        result.diagnostics["qualified"] = len(result.matches)
         result.diagnostics["matched"] = len(result.matches)
         result.diagnostics["rejected"] = len(result.rejections)
         result.diagnostics["rejection_reasons"] = sorted({r.reason for r in result.rejections})
@@ -552,16 +674,64 @@ class StructuredExecutor:
         entity: Entity,
         constraints: list[ClaimConstraint],
         claims: dict[str, list[Claim]],
+        *,
+        plan: QueryPlan,
+        user_states: dict[str, str],
     ) -> StructuredMatch | StructuredRejection:
         """One entity against every constraint. First failure wins and is reported.
 
-        Entity ``subtype`` is deliberately *not* checked. A plan for the canonical query
-        asks for ``subtype = restaurant``, and nothing in the pipeline currently writes
-        ``subtype`` at all, so enforcing it would reject every restaurant in the corpus.
-        Candidate generation already narrows by ``entity_type`` where it can. The gap is
-        recorded in DEC-020 rather than papered over with a filter that silently matches
-        nothing.
+        The kind checks come first and are repeated here on purpose. Candidate generation
+        already narrows by ``entity_types``, so in normal operation these never fire --
+        that is the intent. They exist so the guarantee "a plan asking for a place never
+        returns a dish" is a property of *evaluation*, not a property of which candidate
+        path happened to run. A future candidate path added without the filter degrades
+        performance here; it cannot corrupt the result.
+
+        ``entity_subtypes`` is enforced identically when a plan carries one. The V1 parser
+        does not propose it, because nothing in the pipeline writes ``Entity.subtype`` and
+        a proposed ``subtype = restaurant`` would reject every restaurant in the corpus
+        (DEC-020). Enforced-when-present plus never-proposed is the honest combination: the
+        field is not a decoration, and it is not a trap either.
         """
+        if plan.entity_types and entity.entity_type not in plan.entity_types:
+            return StructuredRejection(
+                entity_id=entity.id,
+                entity_name=entity.canonical_name,
+                reason="entity_type_mismatch",
+                detail=(
+                    f"类型是 {entity.entity_type}，问题要找的是 "
+                    f"{'/'.join(sorted(plan.entity_types))}"
+                ),
+                field="entity_type",
+            )
+        if plan.entity_subtypes and (
+            entity.subtype is None or entity.subtype not in plan.entity_subtypes
+        ):
+            return StructuredRejection(
+                entity_id=entity.id,
+                entity_name=entity.canonical_name,
+                reason="entity_subtype_mismatch",
+                detail=(
+                    f"子类型是 {entity.subtype or '未标注'}，问题要找的是 "
+                    f"{'/'.join(sorted(plan.entity_subtypes))}"
+                ),
+                field="subtype",
+            )
+        if plan.user_state is not None:
+            current = user_states.get(entity.id)
+            matches_state = current == plan.user_state.state
+            if matches_state is not plan.user_state.present:
+                return StructuredRejection(
+                    entity_id=entity.id,
+                    entity_name=entity.canonical_name,
+                    reason="user_state_mismatch",
+                    detail=(
+                        f"你的标记是 {current or '未标记'}，"
+                        f"条件是 {plan.user_state.describe()}"
+                    ),
+                    field="user_state",
+                )
+
         match = StructuredMatch(entity=entity)
         for constraint in constraints:
             available = claims.get(constraint.predicate, [])

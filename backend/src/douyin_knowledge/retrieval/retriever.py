@@ -38,7 +38,11 @@ from douyin_knowledge.extraction.grounding import is_assertable
 from douyin_knowledge.knowledge.eligibility import current_eligible_runs
 from douyin_knowledge.observability.logging import get_logger
 from douyin_knowledge.retrieval.keyword_search import KeywordSearcher
-from douyin_knowledge.retrieval.structured import StructuredExecutor, StructuredResult
+from douyin_knowledge.retrieval.structured import (
+    StructuredExecutor,
+    StructuredMatch,
+    StructuredResult,
+)
 from douyin_knowledge.search.indexer import DOC_TYPE_CHUNK, DOC_TYPE_SOURCE
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -168,7 +172,10 @@ class HybridRetriever:
         stmt = stmt.join(Source, Source.id == RetrievalChunk.source_id).where(
             Source.locally_deleted_at_ms.is_(None)
         )
-        if source_ids:
+        if source_ids is not None:
+            # `is not None`, not truthiness: an empty allow-list means "restricted to no
+            # sources" and must return nothing. Treating it as "no restriction" would turn
+            # the narrowest possible request into an unrestricted search over the corpus.
             stmt = stmt.where(RetrievalChunk.source_id.in_(list(source_ids)))
 
         return {
@@ -383,8 +390,9 @@ class HybridRetriever:
         use_vector: bool = True,
         candidate_multiplier: int = 4,
         min_vector_score: float = MIN_VECTOR_SCORE,
+        source_ids: Sequence[str] | None = None,
     ) -> RetrievalResult:
-        """Execute `plan`'s hard constraints, then let FTS/vector illustrate the survivors.
+        """Execute `plan`'s hard constraints, then let FTS/vector rank the survivors.
 
         The ordering is the invariant. Structured execution runs first and produces the
         qualifying entity set; similarity search is then restricted to the sources behind
@@ -397,8 +405,25 @@ class HybridRetriever:
         similarity able to override a constraint: anything the filter misses is already in
         the result. Enforcing it by construction rather than by a downstream check is the
         difference between an invariant and a convention.
+
+        The pipeline, in order:
+
+        1. hard structured constraints, over a caller-restricted claim set, produce the
+           *full* qualifying entity set (bounded by ``MAX_CANDIDATES``);
+        2. FTS/vector runs over the sources behind those entities only;
+        3. each qualifying entity takes a relevance score from its own sources' chunks;
+        4. the qualifying entities are reordered by that score;
+        5. ``plan.limit`` is applied *last*.
+
+        Steps 3-5 are why the limit is not applied in the executor. Truncating before
+        ranking would mean similarity orders an arbitrary prefix of the qualifying set --
+        whichever rows SQLite returned first -- so the "best" of three shown could be the
+        worst three of fifty. `source_ids` is the caller's allow-list and is passed into
+        execution, not applied to the output: an entity that qualifies only on a claim from
+        an excluded source must never qualify at all, because the answer would then assert
+        something no permitted source says.
         """
-        executor = StructuredExecutor(self.session)
+        executor = StructuredExecutor(self.session, source_ids=source_ids)
         structured = executor.execute(plan)
 
         diagnostics: dict[str, Any] = {
@@ -423,16 +448,38 @@ class HybridRetriever:
             )
 
         allowed_sources = structured.qualifying_source_ids
+        qualified = len(structured.matches)
 
+        # Over-fetch relative to the *qualifying* set, not to `plan.limit`. Ranking three
+        # of fifty survivors requires a score for all fifty; fetching `limit` chunks would
+        # leave most entities unscored and sorted by fallback alone.
         support = self.retrieve(
-            plan.raw_query,
-            limit=plan.limit,
+            self._ranking_query(plan),
+            limit=max(qualified * 2, plan.limit),
             source_ids=allowed_sources,
             use_vector=use_vector,
             include_claims=False,
             candidate_multiplier=candidate_multiplier,
             min_vector_score=min_vector_score,
         )
+
+        ranked = self._rank_structured_matches(
+            structured,
+            support.chunks,
+            semantic=self._semantic_scores(plan, allowed_sources, support.chunks),
+        )
+        structured.matches = ranked[: plan.limit]
+        structured.refresh_diagnostics()
+        structured.diagnostics["qualified"] = qualified
+        structured.diagnostics["returned"] = len(structured.matches)
+
+        # Excerpts are narrowed to the entities that survived truncation. Keeping a chunk
+        # from a qualifying-but-not-shown entity would offer the answer generator a citation
+        # for something the answer does not mention.
+        shown_sources = set(structured.qualifying_source_ids)
+        chunks = [chunk for chunk in support.chunks if chunk.source_id in shown_sources]
+
+        diagnostics["structured"] = structured.as_dict()
         diagnostics["keyword_hits"] = support.diagnostics.get("keyword_hits", 0)
         diagnostics["vector_hits"] = support.diagnostics.get("vector_hits", 0)
         diagnostics["vector_below_floor"] = support.diagnostics.get("vector_below_floor", 0)
@@ -441,18 +488,129 @@ class HybridRetriever:
             "structured_first: hard constraints selected the result set; "
             "FTS/vector only ranked and illustrated it"
         )
+        diagnostics["qualified"] = qualified
         diagnostics["returned"] = len(structured.matches)
+        diagnostics["ranking"] = structured.diagnostics.get("ranking")
+        if source_ids is not None:
+            diagnostics["source_restriction"] = len(list(source_ids))
 
         return RetrievalResult(
             query=plan.raw_query,
             # Claims come from the executor, not from `retrieve`: the executor already
             # selected exactly the claims that satisfied (or conflicted with) a constraint,
             # and re-deriving them from chunks would lose that distinction.
-            chunks=support.chunks,
+            chunks=chunks,
             claims=structured.claims,
             diagnostics=diagnostics,
             structured=structured,
         )
+
+    @staticmethod
+    def _ranking_query(plan: QueryPlan) -> str:
+        """The text used for the ranking pass: the question plus its soft requirements.
+
+        Appended rather than substituted, because the question itself remains the primary
+        signal. Requirements already present verbatim in the question are not repeated.
+        """
+        extras = [req for req in plan.semantic_requirements if req not in plan.raw_query]
+        if not extras:
+            return plan.raw_query
+        return plan.raw_query + " " + " ".join(extras)
+
+    def _semantic_scores(
+        self,
+        plan: QueryPlan,
+        allowed_sources: Sequence[str],
+        chunks: Sequence[RetrievedChunk],
+    ) -> dict[str, float]:
+        """Per-source bonus reflecting how well each source supports the *soft* requirements.
+
+        `semantic_requirements` ("适合约会", "安静") are not hard filters in V1: there is no
+        structured field behind them and inventing one would mean inventing an ontology,
+        which is out of scope. But a requirement that changes nothing is decoration, so they
+        get their own ranking pass over the qualifying chunks only. A separate pass rather
+        than extra words in the main query, because inside one query the question's own terms
+        -- which every qualifying entity matches, since they all satisfy the same district
+        and cuisine -- swamp the differentiating term.
+
+        This cannot change membership. It is a score keyed by source id, consulted while
+        sorting ``structured.matches``, and an entity absent from that list has nothing for
+        it to score.
+        """
+        if not plan.semantic_requirements or not self.keyword.available():
+            return {}
+        chunk_ids = [chunk.chunk_id for chunk in chunks]
+        if not chunk_ids:
+            return {}
+        source_of = {chunk.chunk_id: chunk.source_id for chunk in chunks}
+        scores: dict[str, float] = {}
+        hits = self.keyword.search(
+            " ".join(plan.semantic_requirements),
+            limit=len(chunk_ids),
+            doc_types=[DOC_TYPE_CHUNK],
+            allowed_object_ids=sorted(chunk_ids),
+        )
+        for rank, hit in enumerate(hits, start=1):
+            source_id = source_of.get(hit.object_id)
+            if source_id is None:
+                continue
+            # Rank-based like RRF, and for the same reason: BM25 magnitudes are not
+            # comparable across queries, so only the ordering is trustworthy.
+            contribution = 1.0 / (RRF_K + rank)
+            if contribution > scores.get(source_id, 0.0):
+                scores[source_id] = contribution
+        return scores
+
+    @staticmethod
+    def _rank_structured_matches(
+        structured: StructuredResult,
+        chunks: Sequence[RetrievedChunk],
+        *,
+        semantic: dict[str, float] | None = None,
+    ) -> list[StructuredMatch]:
+        """Order qualifying entities by the relevance of *their own* sources' chunks.
+
+        The score is the best chunk score among the sources supporting the entity. `max`
+        rather than a sum, because a restaurant discussed in one strongly-relevant video
+        should not be outranked by one mentioned in passing in four.
+
+        Ties -- including the all-zero case when FTS is unavailable, the vector store is
+        absent, or nothing cleared the relevance floor -- fall back to canonical name and
+        then entity id. That is arbitrary but *stated* and stable; leaving it to SQLite row
+        order would make the same query return a different first result after an unrelated
+        reindex, which reads as the system changing its mind.
+
+        This cannot resurrect a rejected candidate: it is a sort over
+        ``structured.matches``, and a rejected entity is not in that list. Ranking has no
+        route to membership.
+        """
+        bonus = semantic or {}
+        best: dict[str, float] = {}
+        for chunk in chunks:
+            score = chunk.score + bonus.get(chunk.source_id, 0.0)
+            if score > best.get(chunk.source_id, float("-inf")):
+                best[chunk.source_id] = score
+        # A source may carry a soft-requirement bonus without appearing in the main ranking
+        # pass at all; it still has to be able to outrank an unscored peer.
+        for source_id, value in bonus.items():
+            if value > best.get(source_id, float("-inf")):
+                best[source_id] = value
+
+        scored: list[tuple[float, str, str, StructuredMatch]] = []
+        for match in structured.matches:
+            score = max((best.get(sid, 0.0) for sid in match.source_ids), default=0.0)
+            scored.append((score, match.entity.canonical_name, match.entity.id, match))
+
+        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+        structured.diagnostics["ranking"] = (
+            "similarity_over_qualifying_sources"
+            if any(score > 0.0 for score, _, _, _ in scored)
+            else "deterministic_fallback_by_name"
+        )
+        structured.diagnostics["scores"] = {
+            match.entity.canonical_name: round(score, 6) for score, _, _, match in scored
+        }
+        return [match for _, _, _, match in scored]
 
     # ------------------------------------------------------------- utilities
 

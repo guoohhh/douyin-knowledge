@@ -247,13 +247,12 @@ class ConversationManager:
 
         if decision.uses_collection and plan.is_structured:
             # Structured path: hard constraints select the result set, similarity only ranks
-            # it. `source_ids` is an additional narrowing from the caller, so it is applied
-            # after, as an intersection -- never as a way to widen the structured result.
-            result = self.retriever.retrieve_structured(plan)
-            if source_ids is not None:
-                allowed = set(source_ids)
-                result.chunks = [c for c in result.chunks if c.source_id in allowed]
-                result.claims = [c for c in result.claims if c.source_id in allowed]
+            # it. `source_ids` goes *into* execution rather than being applied to its output.
+            # Filtering afterwards only cleaned up `chunks` and `claims`, while
+            # `structured.matches` -- which the answer renderer reads directly -- kept
+            # entities that qualified solely on a claim from an excluded source, so the
+            # answer named a restaurant with no citation the caller had permitted.
+            result = self.retriever.retrieve_structured(plan, source_ids=source_ids)
             citation_set = self.citations.build(result)
         elif decision.uses_collection:
             result = self.retriever.retrieve(
