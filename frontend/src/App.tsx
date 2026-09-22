@@ -8,6 +8,8 @@ import { SourcePage } from './pages/SourcePage'
 import { WikiPage } from './pages/WikiPage'
 import { WikiDetailPage } from './pages/WikiDetailPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { ResurfacePage } from './pages/ResurfacePage'
+import { EntityPage } from './pages/EntityPage'
 
 function ModeBadge() {
   const { data } = useQuery({ queryKey: ['health'], queryFn: api.health })
@@ -32,6 +34,7 @@ export function App() {
           </NavLink>
           <NavLink to="/collections">收藏</NavLink>
           <NavLink to="/wiki">条目</NavLink>
+          <NavLink to="/resurface">待办</NavLink>
           <NavLink to="/settings">设置</NavLink>
         </nav>
         <ModeBadge />
@@ -44,6 +47,8 @@ export function App() {
           <Route path="/sources/:sourceId" element={<SourcePage />} />
           <Route path="/wiki" element={<WikiPage />} />
           <Route path="/wiki/:pageId" element={<WikiDetailPage />} />
+          <Route path="/resurface" element={<ResurfacePage />} />
+          <Route path="/entities/:entityId" element={<EntityPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route
             path="*"

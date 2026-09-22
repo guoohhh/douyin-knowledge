@@ -266,6 +266,26 @@ textarea {
   margin-bottom: 0.35rem;
 }
 
+/* ----------------------------------------------------------------- cards */
+
+/* Saved intentions. One column at the measure rather than a dense grid: each card carries
+   provenance links the user is meant to actually read, and a tighter grid encourages
+   skimming past exactly the part that makes the card trustworthy. */
+.cards {
+  display: grid;
+  gap: 1rem;
+  max-width: var(--measure);
+}
+
+.card {
+  border: 1px solid var(--rule);
+  padding: 0.9rem 1rem;
+}
+
+.card h3 {
+  font-size: 1.05rem;
+}
+
 /* ---------------------------------------------------------------- tables */
 
 table {

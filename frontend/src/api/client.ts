@@ -13,7 +13,11 @@
 
 import type {
   Collection,
+  EntityDetail,
+  EntitySummary,
+  EntityUserState,
   PolicyDecisionRow,
+  ResurfaceCard,
   PolicyRule,
   SearchResult,
   SettingsView,
@@ -125,6 +129,34 @@ export const api = {
 
   wikiPage: (id: string) =>
     request<WikiPageDetail>(`/api/knowledge/wiki/${encodeURIComponent(id)}`),
+
+  entities: (params: { q?: string; entity_type?: string; min_claims?: number; limit?: number } = {}) =>
+    request<{ total: number; entities: EntitySummary[] }>(
+      `/api/knowledge/entities${qs(params)}`,
+    ),
+
+  entity: (id: string) =>
+    request<EntityDetail>(`/api/knowledge/entities/${encodeURIComponent(id)}`),
+
+  // ---------------------------------------------------------------- resurface
+  // The user's own saved intentions. Separate from claims on purpose: what the user wants
+  // is not something a creator said.
+  resurface: (params: { state?: string; limit?: number } = {}) =>
+    request<{ total: number; states: string[]; cards: ResurfaceCard[] }>(
+      `/api/knowledge/resurface${qs(params)}`,
+    ),
+
+  setUserState: (entityId: string, body: { state: string; note?: string | null }) =>
+    request<EntityUserState>(
+      `/api/knowledge/entities/${encodeURIComponent(entityId)}/user-state`,
+      { method: 'PUT', body: JSON.stringify(body) },
+    ),
+
+  clearUserState: (entityId: string) =>
+    request<EntityUserState & { cleared: boolean }>(
+      `/api/knowledge/entities/${encodeURIComponent(entityId)}/user-state`,
+      { method: 'DELETE' },
+    ),
 
   // ---------------------------------------------------------------- ask
   // `scope_override`, not `scope`: the field name matters because the route now rejects

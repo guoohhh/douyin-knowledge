@@ -85,6 +85,33 @@ export const SCOPE_LABELS: Record<string, string> = {
 
 export const scopeLabel = (scope: string) => SCOPE_LABELS[scope] ?? scope
 
+/** The saved-intention states, in the order they are offered.
+ *
+ * Mirrors `knowledge.resurface.INTENT_STATES`; the API rejects anything else, so adding a
+ * button here without adding the state there produces a 422 rather than a silent no-op.
+ */
+export const INTENT_STATES: Array<{ value: string; label: string }> = [
+  { value: 'want_to_go', label: '想去' },
+  { value: 'want_to_try', label: '想试' },
+  { value: 'want_to_learn', label: '想学' },
+]
+
+export const intentLabel = (state: string) =>
+  INTENT_STATES.find((s) => s.value === state)?.label ?? state
+
+export const ENTITY_TYPE_LABELS: Record<string, string> = {
+  place: '地点',
+  person: '人物',
+  product: '商品',
+  work: '作品',
+  organization: '机构',
+  concept: '概念',
+  event: '事件',
+  dish: '菜品',
+}
+
+export const entityTypeLabel = (kind: string) => ENTITY_TYPE_LABELS[kind] ?? kind
+
 export const ACTION_LABELS: Record<string, string> = {
   process: '正常处理',
   metadata_only: '只存元数据',

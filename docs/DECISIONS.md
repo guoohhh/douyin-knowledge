@@ -230,6 +230,22 @@ Adapted from the GPT implementation rather than copied. GPT's shape — validate
 
 ---
 
+### DEC-018: Resurfacing stores user intention separately from creator claims, and re-checks support at read time
+
+**Decision**: The resurfacing loop (`knowledge/resurface.py`) is built on `EntityUserState`, not `KnowledgeItem`. A user marks an entity `want_to_go` / `want_to_try` / `want_to_learn`; that row is the intention. The supporting knowledge shown on each card is fetched separately at read time and routed through `eligible_claims()` (DEC-017, DB-004), so a card can exist with zero eligible support. V1 ranks nothing: cards are ordered by `(-last_action_at_ms, canonical_name)`, which is deterministic and needs no scoring model.
+
+**Rationale**: `KnowledgeItem` has a schema but no writer, so building on it would have meant inventing a second knowledge-production path to make one UI work — the table would have been populated only by the resurface feature and would not have matched anything the processing pipeline produces. `EntityUserState` already exists, is keyed on `entity_id`, and is exactly one row per intention.
+
+Keeping the intention out of `Claim` is the load-bearing part. "I want to go here" is not something a creator said, and writing it as a `Claim` would put user-authored rows into the same table the wiki and retriever read from, making the provenance of every claim ambiguous (KM-003). It would also make the intention subject to policy filtering, which is wrong in the other direction: if the user excludes the source that introduced a restaurant, they have decided they do not want that creator's material — not that they no longer want to go.
+
+**Consequence**: intention and support have different lifetimes on purpose. Excluding or downgrading every source behind an entity to `metadata_only` leaves the card present with its supports emptied, and the UI says so rather than silently rendering a bare name; reversing the policy restores the supports without the user re-saving anything. Where several sources support one entity and only some are excluded, the card shows the eligible remainder. Clearing an intention nulls `state` but keeps `note` and `rating`, so a user who toggles a mark off does not lose what they wrote about why. `first_action_at_ms` is written once and never moved, so "when did I first want this" survives edits.
+
+Because support is recomputed per read rather than denormalized onto the state row, no invalidation path is needed when policy changes — the same property that made the shared eligibility rule worth extracting in the first place.
+
+**Evidence**: `knowledge/resurface.py`, `knowledge/eligibility.py`; `api/routes/knowledge.py` (`/resurface`, `/entities/{id}/user-state`); `db/models/entities.py:EntityUserState`; `tests/test_resurface_api.py`.
+
+---
+
 ## Known gaps
 
 These are true limitations, not deferred decisions. Each is either invisible in normal use or visible and harmless; none is load-bearing for V1 acceptance.

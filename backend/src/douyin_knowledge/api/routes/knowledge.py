@@ -8,9 +8,10 @@ page as unverified rather than quietly presenting uncited text as knowledge (WIK
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import Select, func, select
 
 from douyin_knowledge.api.deps import DbSession, RetrieverDep, WikiUpdaterDep
@@ -22,6 +23,7 @@ from douyin_knowledge.db.models.entities import (
     EntityMention,
 )
 from douyin_knowledge.db.models.processing import EvidenceUnit
+from douyin_knowledge.db.models.userstate import EntityUserState
 from douyin_knowledge.db.models.wiki import (
     WikiLink,
     WikiLintFinding,
@@ -30,6 +32,13 @@ from douyin_knowledge.db.models.wiki import (
     WikiSupport,
 )
 from douyin_knowledge.knowledge.eligibility import eligible_claims
+from douyin_knowledge.knowledge.resurface import (
+    INTENT_STATES,
+    clear_state,
+    list_cards,
+    set_state,
+    state_for,
+)
 
 router = APIRouter()
 
@@ -184,6 +193,14 @@ def get_entity(entity_id: str, db: DbSession) -> dict[str, Any]:
         "aliases": aliases,
         "mention_count": mention_count,
         "wiki_page_id": page.id if page else None,
+        # The user's own saved intention, alongside the creators' claims but never inside
+        # them: the UI needs both to render the entity page in one request, and keeping them
+        # in separate keys is what stops "I want to go here" from reading as a claim.
+        "user_state": (
+            _user_state_payload(user_state)
+            if (user_state := state_for(db, entity_id)) is not None
+            else None
+        ),
         "claims": [
             {
                 "id": c.id,
@@ -431,6 +448,115 @@ def rebuild_wiki(updater: WikiUpdaterDep) -> dict[str, Any]:
     local, so the cost is bounded by claim count, not by provider latency.
     """
     return updater.rebuild_all().as_dict()
+
+
+# ------------------------------------------------------------------- resurface
+
+
+class UserStateRequest(BaseModel):
+    """The user's own intention for an entity.
+
+    `state` is a closed set rather than free text: Resurface has to be able to list and
+    filter these, and a note field already exists for anything that does not fit.
+    """
+
+    state: Literal["want_to_go", "want_to_try", "want_to_learn"]
+    note: str | None = None
+    rating: float | None = Field(default=None, ge=0, le=5)
+
+
+@router.get("/resurface")
+def list_resurface(
+    db: DbSession,
+    state: str | None = Query(default=None, description="Filter to one intention"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Saved intentions, with the current eligible knowledge that still backs each one.
+
+    A card can come back with `has_eligible_support: false`. That is a real answer, not an
+    empty result: the user saved the intention, and the sources that once supported it are
+    now excluded, `metadata_only`, locally deleted, or superseded. Hiding the card would
+    delete the user's own statement because of a policy decision about someone else's
+    video.
+    """
+    if state is not None and state not in INTENT_STATES:
+        raise HTTPException(
+            status_code=422, detail=f"unknown state; expected one of {list(INTENT_STATES)}"
+        )
+    cards, total = list_cards(db, state=state, limit=limit, offset=offset)
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "states": list(INTENT_STATES),
+        "cards": [card.as_dict() for card in cards],
+    }
+
+
+@router.put("/entities/{entity_id}/user-state")
+def put_user_state(
+    entity_id: str, request: UserStateRequest, db: DbSession
+) -> dict[str, Any]:
+    """Set the user's intention for an entity.
+
+    Idempotent by entity: the table is keyed on `entity_id`, so re-saving updates rather
+    than accumulating. This writes *user* state and never a `Claim` -- what the user wants
+    is not something a creator said, and merging the two would make the provenance of every
+    claim unreadable (KM-003).
+    """
+    try:
+        row = set_state(
+            db,
+            entity_id,
+            state=request.state,
+            note=request.note,
+            rating=request.rating,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    db.commit()
+    return _user_state_payload(row)
+
+
+@router.get("/entities/{entity_id}/user-state")
+def get_user_state(entity_id: str, db: DbSession) -> dict[str, Any]:
+    """The saved intention for one entity, or nulls if the user has not set one."""
+    if db.get(Entity, entity_id) is None:
+        raise HTTPException(status_code=404, detail="entity not found")
+    row = state_for(db, entity_id)
+    if row is None:
+        return {"entity_id": entity_id, "state": None, "note": None, "rating": None}
+    return _user_state_payload(row)
+
+
+@router.delete("/entities/{entity_id}/user-state")
+def delete_user_state(entity_id: str, db: DbSession) -> dict[str, Any]:
+    """Clear the intention, keeping any note the user wrote about why."""
+    if db.get(Entity, entity_id) is None:
+        raise HTTPException(status_code=404, detail="entity not found")
+    cleared = clear_state(db, entity_id)
+    db.commit()
+    row = state_for(db, entity_id)
+    return {
+        "cleared": cleared,
+        **(
+            _user_state_payload(row)
+            if row is not None
+            else {"entity_id": entity_id, "state": None, "note": None, "rating": None}
+        ),
+    }
+
+
+def _user_state_payload(row: EntityUserState) -> dict[str, Any]:
+    return {
+        "entity_id": row.entity_id,
+        "state": row.state,
+        "note": row.note,
+        "rating": row.rating,
+        "first_action_at_ms": row.first_action_at_ms,
+        "last_action_at_ms": row.last_action_at_ms,
+    }
 
 
 # ---------------------------------------------------------------------- search

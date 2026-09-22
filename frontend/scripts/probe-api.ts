@@ -41,6 +41,21 @@ const run = async () => {
   need(Array.isArray(rules), 'policy rules')
   const { decisions } = await api.decisions({ limit: 5 })
   need(decisions.length > 0 && decisions[0].phase !== undefined, 'policy decisions')
+  const { entities } = await api.entities({ limit: 5 })
+  need(entities.length > 0 && entities[0]!.canonical_name !== undefined, 'entities list')
+  const entity = await api.entity(entities[0]!.id)
+  need(Array.isArray(entity.claims), 'entity detail carries claims')
+  const saved = await api.setUserState(entity.id, { state: 'want_to_go', note: 'probe' })
+  need(saved.state === 'want_to_go' && saved.first_action_at_ms !== null, 'saving an intention')
+  const reread = await api.entity(entity.id)
+  need(reread.user_state?.state === 'want_to_go', 'entity detail reflects the saved intention')
+  const cards = await api.resurface({ state: 'want_to_go' })
+  const mine = cards.cards.find((c) => c.entity_id === entity.id)
+  need(mine !== undefined, 'the saved entity appears on the resurface list')
+  need(Array.isArray(mine?.supports), 'cards carry supports')
+  const gone = await api.clearUserState(entity.id)
+  need(gone.cleared === true && gone.state === null, 'clearing an intention')
+  need((await api.entity(entity.id)).user_state?.state == null, 'cleared state does not come back')
   try { await api.source('src_missing'); need(false, '404 raises') }
   catch (e) { need(e instanceof ApiError && (e as ApiError).status === 404, '404 becomes ApiError') }
 }

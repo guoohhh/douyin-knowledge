@@ -249,6 +249,84 @@ export interface PolicyRule {
   created_at_ms?: number
 }
 
+/** The user's own intention for an entity. Never a creator claim (KM-003). */
+export interface EntityUserState {
+  entity_id: string
+  state: string | null
+  note: string | null
+  rating: number | null
+  first_action_at_ms?: number | null
+  last_action_at_ms?: number | null
+}
+
+export interface EntityClaim {
+  id: string
+  predicate: string
+  value_type: string
+  value_text: string | null
+  value_number: number | null
+  unit: string | null
+  currency: string | null
+  claim_kind: string
+  provenance_type: string
+  attribution: string
+  confidence: number | null
+  source_id: string
+  source_title: string | null
+  source_url: string | null
+}
+
+export interface EntitySummary {
+  id: string
+  entity_type: string
+  subtype: string | null
+  canonical_name: string
+  claim_count: number
+  wiki_page_id: string | null
+}
+
+export interface EntityDetail {
+  id: string
+  entity_type: string
+  subtype: string | null
+  canonical_name: string
+  normalized_name?: string
+  status: string
+  merged_into_entity_id?: string | null
+  aliases?: string[]
+  mention_count?: number
+  wiki_page_id?: string | null
+  user_state?: EntityUserState | null
+  claims?: EntityClaim[]
+}
+
+export interface ResurfaceSupport {
+  claim_id: string
+  predicate: string
+  value_text: string | null
+  value_number: number | null
+  unit: string | null
+  currency: string | null
+  source_id: string
+  source_title: string | null
+  source_url: string | null
+}
+
+export interface ResurfaceCard {
+  entity_id: string
+  entity_type: string
+  canonical_name: string
+  state: string
+  note: string | null
+  rating: number | null
+  first_action_at_ms: number | null
+  last_action_at_ms: number | null
+  wiki_page_id: string | null
+  /** False when every source that once supported this card is now hidden or superseded. */
+  has_eligible_support: boolean
+  supports: ResurfaceSupport[]
+}
+
 export interface PolicyDecisionRow {
   id: string
   source_id: string

@@ -16,10 +16,26 @@ from douyin_knowledge.knowledge.eligibility import (
     eligible_claims,
     is_source_eligible,
 )
+from douyin_knowledge.knowledge.resurface import (
+    INTENT_STATES,
+    ResurfaceCard,
+    ResurfaceSupport,
+    clear_state,
+    list_cards,
+    set_state,
+    state_for,
+)
 
 __all__ = [
+    "INTENT_STATES",
+    "ResurfaceCard",
+    "ResurfaceSupport",
+    "clear_state",
     "current_eligible_runs",
-    "eligible_claims",
     "eligible_claim_ids",
+    "eligible_claims",
     "is_source_eligible",
+    "list_cards",
+    "set_state",
+    "state_for",
 ]
