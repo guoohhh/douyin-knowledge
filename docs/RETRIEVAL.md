@@ -223,6 +223,53 @@ The parser should identify:
 
 Unknown values should remain unknown rather than being invented.
 
+### 5.1 The implemented QueryPlan contract (V1)
+
+The shape above is the target. What ships is narrower, and the difference matters because
+everything downstream treats a validated plan as trusted: `retrieval/query_plan.py` is the
+only place where untrusted input becomes an execution instruction.
+
+`QueryPlan` fields: `raw_query`, `intent`, `scope`, `entity_types`, `entity_subtypes`,
+`location`, `claim_constraints`, `text_requirements`, `semantic_requirements`, `user_state`,
+`conversation_entity_refs`, `limit`, `parser`, `notes`.
+
+Supported constraint fields, and the storage they map onto:
+
+| plan field | claim predicate | column | operators |
+| --- | --- | --- | --- |
+| `price_per_person` | `price_per_person` | `value_number` | `<` `<=` `>` `>=` `=` |
+| `cuisine` | `cuisine` | `value_text` | `=` |
+| `district` | `located_in` | `value_text` | `=` |
+
+Five rules hold the boundary:
+
+1. **The operator set is a whitelist, not an escape.** An operator is matched against a
+   frozenset and used to select a Python comparison. A SQL fragment in that position can
+   only ever be an unrecognised string, which is why "no model-generated SQL" is a
+   structural property rather than a promise.
+2. **Every rejection is a code, not a silent default.** `QueryPlanError` carries codes like
+   `unsupported_operator`, `unknown_district`, `bad_value_type`, `duplicate_constraint`.
+   A malformed predicate fails; it never degrades into a fragment or a guessed value.
+3. **`scope` is a parameter, never read from the proposed plan.** A model that answered
+   我收藏过 with `scope: general` would license answering from world knowledge, which is
+   the one failure the scope classifier exists to prevent.
+4. **Two constraints on one field are rejected** rather than silently resolved, because the
+   executor implements no conjunction semantics for them.
+5. **`limit` is capped** (`MAX_LIMIT`), and candidate generation is bounded
+   (`MAX_CANDIDATES`), so plan cost cannot grow with a model's enthusiasm.
+
+Not supported in V1, deliberately: ranges (`50-100`), time constraints, `sort_preferences`,
+relations, any predicate outside the three above, and `city` as a filter (it is accepted and
+carried, never executed). Districts and cuisines come from closed alias vocabularies in
+`retrieval/vocabulary.py`; a value outside them is rejected rather than passed through, so
+an unmatchable constraint never looks like a satisfied one.
+
+Parsing is deterministic first (`query_parser.py`), and a structured model is consulted only
+when the deterministic pass found neither a location nor a claim constraint. Whatever the
+model proposes goes through the same `validate_plan` as everything else. `parse_query` never
+raises: a parser failure degrades to an unstructured plan and ordinary retrieval, leaving the
+reason in diagnostics rather than in a traceback.
+
 ---
 
 ## 6. Retrieval Surfaces
@@ -245,6 +292,16 @@ saved_at >= ...
 ```
 
 Likely backed by SQLite relational queries.
+
+Of those examples, V1 implements `district`, `cuisine` and `price_per_person` only; see 5.1.
+
+**Hard constraints and similarity signals are different kinds of thing.** A structured
+constraint is a condition on membership: a candidate that fails it is not a worse answer, it
+is not an answer. FTS and vector scores are signals about *ordering and presentation* among
+candidates that already qualify. Treating them as commensurable — letting a strong similarity
+score compensate for a failed constraint — produces the failure this phase exists to rule
+out: a restaurant at 人均 150 returned for 人均100以下 because its text was a good match for
+旺角 and 日料. It matched the words; it does not match the question.
 
 ---
 
@@ -463,6 +520,38 @@ Important ranking factors may include:
 - user state;
 - source diversity;
 - processing coverage.
+
+### 8.1 What V1 actually does: structured-first, not additive
+
+The `+` in that diagram reads as a union, and for an unstructured question it is one. For a
+plan carrying hard constraints, the implemented arrangement is stricter:
+
+```text
+QueryPlan (validated)
+      ↓
+Structured executor  →  qualifying entities + per-constraint support + rejections
+      ↓
+qualifying source ids  ──→  passed to FTS/vector as an allow-list
+      ↓
+fusion / re-ranking (within the allowed set only)
+      ↓
+Evidence packet
+```
+
+`retrieve_structured` runs the executor first and hands `qualifying_source_ids` to the
+existing hybrid retriever as a `source_ids` allow-list. An empty allow-list short-circuits to
+no candidates rather than degrading to unrestricted search — the distinction between "no
+filter" (`None`) and "filtered to nothing" (`[]`) is load-bearing.
+
+This is why hard-constraints-beat-similarity is a structural property here and not a scoring
+weight that a large enough similarity score could overcome: a rejected candidate never enters
+the ranked set, so there is no score it could win with. The cost is that similarity cannot
+*rescue* a candidate whose structured evidence is missing, which is the intended trade —
+absent evidence is a no-result with a reason (see 15), not a low-confidence guess.
+
+Rejections are retained, not discarded. Each carries the entity, the constraint that failed
+and a human-readable detail, which is what lets the system say "有匹配的店，但人均 150 超过
+了 100" instead of "没找到".
 
 ---
 

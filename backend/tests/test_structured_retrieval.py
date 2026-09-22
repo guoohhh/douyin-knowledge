@@ -883,3 +883,73 @@ class TestExtractionWritesStructuredClaims:
         match = result.matches[0]
         assert set(match.supports) == {"district", "cuisine", "price_per_person"}
         assert match.source_ids
+
+
+# ------------------------------------------- rejections reaching the user-facing answer
+
+
+class TestRejectionsReachTheAnswer:
+    """The executor's rejections must survive the whole way to rendered text.
+
+    Requirement 7 is not "the executor records a reason", it is "the user is not told
+    'nothing found' when something was found and deliberately rejected". Those are
+    different claims, and only this one is about the path between them. The retriever
+    returning a bare `RetrievalResult` on the no-match path satisfied every executor-level
+    test in this file while making the answer say 收藏里没有匹配这个说法的内容 -- which is
+    false, and sends the user looking for a video they already have.
+    """
+
+    def _answer(self, session: Session, query: str = CANONICAL_QUERY) -> str:
+        from douyin_knowledge.conversation.answer_generator import AnswerGenerator
+        from douyin_knowledge.conversation.citation_builder import CitationBuilder
+        from douyin_knowledge.conversation.scope import classify_scope
+        from douyin_knowledge.retrieval.retriever import HybridRetriever
+
+        decision = classify_scope(query)
+        plan, _ = parse_query(query, scope=decision.scope, limit=10)
+        # No vector store and no chat model: this asserts the structured path is renderable
+        # without either, which is also what makes the assertion deterministic.
+        result = HybridRetriever(session).retrieve_structured(plan, use_vector=False)
+        citations = CitationBuilder(session).build(result)
+        return AnswerGenerator().generate(query, result, citations, decision).content
+
+    def test_a_rejected_price_is_explained_not_reported_as_absent(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        corpus.restaurant("旺角贵一番", district="旺角", cuisine="日料", price=150)
+
+        content = self._answer(session)
+
+        assert "150" in content
+        assert "旺角贵一番" in content
+        assert "没有匹配这个说法的内容" not in content
+
+    def test_a_metadata_only_source_says_so(self, session: Session, corpus: Corpus) -> None:
+        corpus.restaurant(
+            "旺角未处理店",
+            district="旺角",
+            cuisine="日料",
+            price=80,
+            policy_action="metadata_only",
+        )
+
+        content = self._answer(session)
+
+        assert "元数据" in content or "从未被真正理解" in content
+
+    def test_an_empty_archive_still_says_nothing_matched(self, session: Session) -> None:
+        """The honest no-result is not regressed by carrying rejections: there are none."""
+        content = self._answer(session)
+
+        assert "收藏" in content
+        assert "旺角" not in content  # nothing was found, so nothing is named
+
+    def test_a_qualifying_match_is_rendered_with_its_price(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        corpus.restaurant("旺角平价寿司", district="旺角", cuisine="日料", price=80)
+
+        content = self._answer(session)
+
+        assert "旺角平价寿司" in content
+        assert "80" in content

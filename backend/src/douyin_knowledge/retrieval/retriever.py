@@ -412,7 +412,15 @@ class HybridRetriever:
             diagnostics["reason"] = structured.diagnostics.get(
                 "reason", "no_structured_matches"
             )
-            return RetrievalResult(query=plan.raw_query, diagnostics=diagnostics)
+            # `structured` is attached even with no matches, because the rejections *are* the
+            # answer on this path: "有匹配的店，但人均 150 超过了 100" is only sayable if the
+            # generator can read them. Returning a bare result here would leave the answer
+            # generator with nothing but retrieval-level diagnostics and make it report
+            # "收藏里没有匹配这个说法的内容" — which is false when a candidate was found and
+            # deliberately rejected, and sends the user looking for a video they already have.
+            return RetrievalResult(
+                query=plan.raw_query, structured=structured, diagnostics=diagnostics
+            )
 
         allowed_sources = structured.qualifying_source_ids
 

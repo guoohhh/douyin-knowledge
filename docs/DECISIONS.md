@@ -264,11 +264,35 @@ Reprojection followed mentions because mentions were how entity pages were found
 
 ---
 
+### DEC-020: A hard structured constraint selects the candidate set; similarity only orders it
+
+**Decision**: structured retrieval executes as a validated `QueryPlan` → bounded executor → source allow-list → existing hybrid retrieval, rather than as one more candidate generator fused with FTS and vector scores.
+
+`retrieval/query_plan.py` validates a proposed plan into a frozen `QueryPlan` before anything touches SQL. Numeric operators come from a frozenset (`< <= > >= =`) and select a Python comparison; text constraints accept `=` only. `scope` is passed as a parameter and never read from the proposed plan. District and cuisine values must resolve against closed alias vocabularies. Anything else raises `QueryPlanError` with a code. `retrieval/structured.py` then evaluates each candidate entity against every constraint using the shared eligibility rule, and `HybridRetriever.retrieve_structured` passes the qualifying source ids to `retrieve(...)` as an allow-list.
+
+Three constraint fields ship: `price_per_person` (`value_number`), `cuisine` (`value_text`), `district` (`located_in`, `value_text`).
+
+**Rationale**: "similarity must not override a hard constraint" has to be structural, because as a scoring weight it is only ever true until the weights change. Routing similarity through an allow-list means a rejected candidate is not a low-ranked answer, it is not in the ranked set, and no score exists that could promote it. The canonical failure — 人均 150 returned for 人均100以下 because the text matched 旺角 and 日料 — becomes unreachable rather than unlikely.
+
+The operator whitelist is the same reasoning applied to the parser boundary. A model proposes; it does not emit SQL. An operator position can hold only a recognised token, so a SQL fragment arriving there is an unmatched string and a coded rejection, not a query.
+
+Constraints are evaluated through `knowledge/eligibility.py` rather than with a fresh set of filters, because a surface that applies four of the five rules is a leak with better odds. `tests/test_structured_retrieval.py` asserts the Python and SQL implementations return identical claim ids over a corpus containing one claim per exclusion path, and that each rule individually excludes something — two implementations that both returned everything would agree perfectly.
+
+**Consequence**: a qualifying entity keeps *all* its eligible claims for each constraint, not just the satisfying one. Two current source-attributed prices of 80 and 120 both survive: the entity qualifies for `< 100` on the 80, and the answer renders the disagreement instead of picking or averaging. DB-005 holds — structured filtering does not convert a claim into an unquestioned fact.
+
+Restaurants are `entity_type="place"`; there is no `restaurant` entity type. `subtype` has no writer in production, so the executor deliberately does not filter on it — filtering on a column nothing populates would silently return nothing.
+
+**Evidence**: `retrieval/query_plan.py` (`validate_plan`, `NUMERIC_OPERATORS`, `CLAIM_FIELDS`); `retrieval/query_parser.py` (`parse_query`); `retrieval/structured.py` (`StructuredExecutor._evaluate_entity`); `retrieval/retriever.py` (`retrieve_structured`); `retrieval/vocabulary.py`; `conversation/answer_generator.py` (`_structured_answer`, `_no_result_reasons`); `tests/test_structured_retrieval.py`.
+
+---
+
 ## Known gaps
 
 These are true limitations, not deferred decisions. Each is either invisible in normal use or visible and harmless; none is load-bearing for V1 acceptance.
 
-**Structured query planning is deferred, not missing by accident.** The old `retrieval/query_planner.py` was deleted rather than wired. It extracted entities with regex place-name patterns, carried its own `TODO: use an NER model`, was exported from `retrieval/__init__.py`, and was instantiated nowhere; `Settings.query_planner_model` and `Settings.enable_query_enrichment` were read by nothing and are gone with it. The live path resolves follow-ups in `conversation/conversation_manager.py:_resolve_followup` from the previous turn's entities in conversation state, which is what the product actually needed. Keeping a dead planner exported was worse than having none, because it invited the reader to assume retrieval does NER. Real query planning — parsing a question into filters over entities, attributes and relations — belongs to the Structured Retrieval phase, where it can be designed against the structured index instead of bolted onto keyword search.
+**Query planning now exists, over three fields.** The old `retrieval/query_planner.py` was deleted rather than wired (regex place-name patterns, its own `TODO: use an NER model`, exported and instantiated nowhere; `Settings.query_planner_model` and `Settings.enable_query_enrichment` went with it). DEC-020 replaced it with a validated `QueryPlan` — but over `district`, `cuisine` and `price_per_person` only. Everything else in the `QueryPlanInput` sketch in `RETRIEVAL.md` 5 remains unimplemented: ranges, time constraints, `sort_preferences`, relations, `user_state` as a filter, and `city`, which is accepted and carried but never executed. A question outside those three fields degrades to ordinary hybrid retrieval, which is correct behaviour but is not structured retrieval. Follow-up resolution is still `conversation/conversation_manager.py:_resolve_followup` reading the previous turn's entities from conversation state.
+
+**Entity extraction cannot see some plausible restaurant names.** `extraction/heuristics.py` matches place names by suffix (`食堂`, `餐厅`, `茶餐厅`, …), so `日料` alone names no entity, and the `_NAME` character class excludes common function characters including `下` and `和` — `松本食堂` resolves, `山下食堂` and `和风食堂` produce no mention at all. A claim whose mention never resolved gets no `subject_entity_id` and is dropped by `_build_claim`, so it is invisible to structured retrieval rather than wrong in it. This is a vocabulary limit in the heuristic pass, not in the plan or the executor; the structured tests pin it by using a name the heuristics can see.
 
 **`KnowledgeItem` has a schema but no writer.** The `knowledge_items` table ships in migration 0001 and `KnowledgeItem` is modelled, but nothing creates rows and neither the wiki builder nor the retriever reads it. The table is kept because it is in the initial migration and dropping it buys nothing; it is out of `__all__` so that importing it is a deliberate act. This is why Resurface is built on `EntityUserState` instead (DEC-018) — a feature resting on a table with no writer would be a feature that cannot work.
 
