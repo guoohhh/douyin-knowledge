@@ -376,15 +376,11 @@ class HybridRetriever:
         function's question to answer -- it belongs to ``knowledge/eligibility.py``, which
         is the one definition of current normal knowledge.
 
-        This used to hand-check two of the six rules (run currency and assertability) and
-        was a leak for exactly the reason that module's docstring gives: a surface applying
-        a subset of the rules is a subset of the guarantee. The missing rule that mattered
-        was 6 -- a claim needs evidence from its *own* source. Without it, the corrupted
-        shape ``Claim(source=A) -> ClaimEvidence -> Evidence(source=B)`` was selectable
-        here whenever B's chunk was retrieved: the claim rode in on another source's
-        evidence, which is the fabricated provenance the structured path had already been
-        fixed to refuse. Rules 1 and 3 were missing too, so a locally-deleted or
-        policy-hidden source's claims could arrive through this path.
+        The overlap itself must also be same-source. Shared eligibility proves that a claim
+        has *some* valid evidence from its own source, but it does not make every other
+        ``ClaimEvidence`` row trustworthy. Without the check on this join, a corrupted
+        cross-source row can make source B's retrieved evidence select source A's otherwise
+        eligible claim.
         """
         evidence_ids = sorted({eid for chunk in chunks for eid in chunk.evidence_ids})
         if not evidence_ids:
@@ -393,7 +389,11 @@ class HybridRetriever:
         stmt = apply_claim_eligibility(
             select(Claim)
             .join(ClaimEvidence, ClaimEvidence.claim_id == Claim.id)
-            .where(ClaimEvidence.evidence_id.in_(evidence_ids))
+            .join(EvidenceUnit, EvidenceUnit.id == ClaimEvidence.evidence_id)
+            .where(
+                ClaimEvidence.evidence_id.in_(evidence_ids),
+                EvidenceUnit.source_id == Claim.source_id,
+            )
         ).distinct()
         return list(self.session.scalars(stmt).all())
 

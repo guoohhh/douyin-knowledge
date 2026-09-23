@@ -54,6 +54,52 @@ def _hybrid(session: Session, query: str) -> RetrievalResult:
 class TestHybridRetrievalRejectsCrossedProvenance:
     """Gap 1a. The crossed shape must not be selectable by ordinary hybrid retrieval."""
 
+    def test_extra_cross_source_link_cannot_create_hybrid_relevance_or_provenance(
+        self, session: Session, corpus: Corpus
+    ) -> None:
+        """A valid link elsewhere cannot make the retrieved crossed link trustworthy."""
+        place = corpus.restaurant(
+            "有正常证据的店", district="旺角", cuisine="日料", price=80
+        )
+        claim = _claim_of(session, place, "cuisine")
+
+        donor_source, donor_run = corpus.source("只含防御边界关键词的来源")
+        donor_entity = corpus.entity("无关对象")
+        donor_claim = corpus.claim(
+            donor_entity,
+            donor_source,
+            donor_run,
+            predicate="located_in",
+            text="中环",
+            evidence_text="火星防御边界关键词",
+        )
+        donor_evidence = session.scalar(
+            select(EvidenceUnit)
+            .join(ClaimEvidence, ClaimEvidence.evidence_id == EvidenceUnit.id)
+            .where(ClaimEvidence.claim_id == donor_claim.id)
+        )
+        assert donor_evidence is not None
+        corpus.chunk(donor_source, donor_run, "火星防御边界关键词")
+        session.add(
+            ClaimEvidence(
+                claim_id=claim.id,
+                evidence_id=donor_evidence.id,
+                support_role="supports",
+            )
+        )
+        session.flush()
+        _index(session)
+
+        result = HybridRetriever(session).retrieve(
+            "火星防御边界关键词", limit=10, use_vector=False, include_claims=True
+        )
+        citations = CitationBuilder(session).build(result)
+
+        assert result.chunks
+        assert {chunk.source_id for chunk in result.chunks} == {donor_source.id}
+        assert claim.id not in {item.id for item in result.claims}
+        assert claim.id not in citations.by_claim
+
     def test_a_claim_whose_only_evidence_is_another_source_is_not_returned(
         self, session: Session, corpus: Corpus
     ) -> None:
