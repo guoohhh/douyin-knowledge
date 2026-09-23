@@ -166,6 +166,11 @@ def _price_condition_count(query: str) -> int:
     *neither* stated condition and admitting the whole 100-200 band the user excluded
     twice. Detecting the shape lets the caller refuse it.
 
+    Chinese puts the marker on either side of the number, and both positions are equally
+    explicit: 人均100以下和200以上 trails it, 人均不超过100和超过200 leads it. Counting only
+    the trailing form missed the second shape entirely -- ``_price_constraint`` matched the
+    first clause, returned ``<= 100``, and *silently discarded* 超过200. So both are counted.
+
     Deliberately blind to a number with no marker: 人均大概80 is vague by contract and
     must keep yielding no constraint and no error.
     """
@@ -173,10 +178,20 @@ def _price_condition_count(query: str) -> int:
         return 0
     markers = sorted({*_PRICE_UPPER, *_PRICE_LOWER, *_PRICE_EXACT}, key=len, reverse=True)
     marker_group = "|".join(re.escape(m) for m in markers)
-    # Number immediately followed by its own marker, which is the only shape that states a
-    # second condition once the subject (人均) has been elided from the later clause.
-    pattern = rf"(?P<num>{_NUM})\s*(?:元|块|块钱|港币|rmb)?\s*(?:{marker_group})"
-    return len({match.start("num") for match in re.finditer(pattern, query)})
+    currency = r"(?:元|块|块钱|港币|rmb)?"
+    patterns = (
+        # 100以下 -- marker trailing its number.
+        rf"(?P<num>{_NUM})\s*{currency}\s*(?:{marker_group})",
+        # 不超过100 -- marker leading its number. The hedges (大概/大约/约/在) are *not*
+        # in the marker group, so 人均大概80 matches neither pattern and stays uncounted.
+        rf"(?:{marker_group})\s*(?P<num>{_NUM})",
+    )
+    # Keyed by the number's offset, so a number carrying a marker on both sides
+    # (人均不超过100以内) counts once rather than twice.
+    offsets: set[int] = set()
+    for pattern in patterns:
+        offsets |= {match.start("num") for match in re.finditer(pattern, query)}
+    return len(offsets)
 
 
 def refused_condition(query: str) -> tuple[str, str] | None:

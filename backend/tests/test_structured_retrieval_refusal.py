@@ -105,12 +105,38 @@ class TestConflictingPriceConditionsAreRefused:
 
         assert "旺角一百五十元店" not in str(body["content"])
 
+    def test_two_price_conditions_are_refused_with_the_marker_before_each_number(
+        self,
+    ) -> None:
+        """人均不超过100和超过200 states both bounds as explicitly as the trailing form.
+
+        Counting only trailing markers missed this one, and the failure was worse than the
+        one it was written to catch: `_price_constraint` matched the first clause, returned
+        `<= 100`, and discarded 超过200 with no diagnostic at all.
+        """
+        plan, diagnostics = _parse("我收藏过哪些旺角人均不超过100和超过200的日料？")
+        assert plan.constraint_for("price_per_person") is None
+        assert diagnostics["refused"]["code"] == "conflicting_price_conditions"
+
     def test_a_single_price_condition_still_parses(self) -> None:
         """The detector is a shape check, not a price-parsing rollback."""
         plan, diagnostics = _parse("我收藏过哪些旺角人均100以下的日料？")
         constraint = plan.constraint_for("price_per_person")
         assert constraint is not None
         assert (constraint.operator, constraint.value_number) == ("<", 100.0)
+        assert "refused" not in diagnostics
+
+    def test_a_single_prefix_marker_condition_still_parses(self) -> None:
+        """One leading marker is one condition. Counting positions must not refuse it."""
+        plan, diagnostics = _parse("我收藏过哪些旺角人均不超过100的日料？")
+        constraint = plan.constraint_for("price_per_person")
+        assert constraint is not None
+        assert (constraint.operator, constraint.value_number) == ("<=", 100.0)
+        assert "refused" not in diagnostics
+
+    def test_one_number_marked_on_both_sides_is_still_one_condition(self) -> None:
+        """人均不超过100以内 is one bound stated twice, not two conditions."""
+        _, diagnostics = _parse("我收藏过哪些旺角人均不超过100以内的日料？")
         assert "refused" not in diagnostics
 
 

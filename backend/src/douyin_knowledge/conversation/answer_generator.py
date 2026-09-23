@@ -63,6 +63,11 @@ _GENERAL_SYSTEM_PROMPT = """你是一个知识助手。这个问题不是在问�
 
 NO_EVIDENCE_TEMPLATE = "我没有在你已经处理的收藏里找到足够证据来回答这个问题。"
 
+#: Said when the collection was *not searched* because the question states a condition V1
+#: cannot express. Distinct from `NO_EVIDENCE_TEMPLATE`, which reports the outcome of a
+#: search that did run: "找到足够证据" is a finding, and a refused query has no finding.
+REFUSED_TEMPLATE = "这个问题里有我无法在你的收藏上执行的筛选条件，所以我没有检索你的收藏"
+
 #: Display labels for structured constraint fields. Keys are `QueryPlan` field names.
 _CONSTRAINT_LABELS = {
     "price_per_person": "人均",
@@ -154,12 +159,23 @@ class AnswerGenerator:
         if result.is_empty():
             if decision.allows_general_knowledge:
                 answer = self._general_answer(query, decision)
+                # Which preamble depends on whether the collection was *searched*.
+                # `NO_EVIDENCE_TEMPLATE` says 我没有在你已经处理的收藏里找到足够证据 -- a
+                # claim about what a search found. On a refused condition no search ran, so
+                # that sentence reports a check that never happened. The general half is
+                # still offered either way; only the account of the collection half changes.
+                refusal = self._refusal_message(result)
+                preamble = (
+                    f"{REFUSED_TEMPLATE}（{refusal}）"
+                    if refusal is not None
+                    else NO_EVIDENCE_TEMPLATE
+                )
                 answer.content = (
-                    f"{NO_EVIDENCE_TEMPLATE}\n\n以下是不依赖你的收藏的通用回答：\n\n"
-                    f"{answer.content}"
+                    f"{preamble}\n\n以下是不依赖你的收藏的通用回答：\n\n{answer.content}"
                 )
                 answer.has_evidence = False
                 answer.suggestions = self._no_result_suggestions(result)
+                answer.diagnostics = dict(result.diagnostics)
                 return answer
             return self._no_evidence_answer(result, decision)
 
@@ -283,10 +299,17 @@ class AnswerGenerator:
         self, result: RetrievalResult, decision: ScopeDecision
     ) -> GeneratedAnswer:
         suggestions = self._no_result_suggestions(result)
-        lines = [NO_EVIDENCE_TEMPLATE, ""]
-        lines.append("可能的原因：")
-        for reason in self._no_result_reasons(result):
-            lines.append(f"- {reason}")
+        refusal = self._refusal_message(result)
+        if refusal is not None:
+            # Same distinction the hybrid branch draws: no search ran, so there is no
+            # finding to report and no list of reasons a search might have come back
+            # empty. The refused condition is the whole account of this turn.
+            lines = [f"{REFUSED_TEMPLATE}（{refusal}）"]
+        else:
+            lines = [NO_EVIDENCE_TEMPLATE, ""]
+            lines.append("可能的原因：")
+            for reason in self._no_result_reasons(result):
+                lines.append(f"- {reason}")
         if suggestions:
             lines += ["", "你可以试试："]
             lines += [f"- {s}" for s in suggestions]
@@ -297,6 +320,21 @@ class AnswerGenerator:
             suggestions=suggestions,
             diagnostics=dict(result.diagnostics),
         )
+
+    @staticmethod
+    def _refusal_message(result: RetrievalResult) -> str | None:
+        """The refusal message if this turn refused a condition, else ``None``.
+
+        One reader for both consumers -- the no-result reason list and the hybrid preamble --
+        because they must agree on whether a search happened. They disagreed before: the
+        personal path surfaced the refusal while the hybrid path reported an empty search.
+        """
+        refused = (result.diagnostics or {}).get("refused")
+        if isinstance(refused, dict):
+            message = refused.get("message")
+            if isinstance(message, str) and message:
+                return message
+        return None
 
     @staticmethod
     def _no_result_reasons(result: RetrievalResult) -> list[str]:
@@ -318,11 +356,9 @@ class AnswerGenerator:
         # A refusal outranks everything below it. The retrieval-level reasons all describe a
         # search that ran and found nothing; a refused query never ran one, and saying
         # 收藏里没有匹配这个说法的内容 would claim an absence that was never checked.
-        refused = diagnostics.get("refused")
-        if isinstance(refused, dict):
-            message = refused.get("message")
-            if isinstance(message, str) and message:
-                return [message]
+        refusal = AnswerGenerator._refusal_message(result)
+        if refusal is not None:
+            return [refusal]
 
         structured = result.structured
         if structured is not None:
@@ -593,4 +629,9 @@ def _validate_citation_markers(text: str, valid: set[int]) -> tuple[str, set[int
     return re.sub(r"\[(\d+)\]", replace, text).strip(), removed
 
 
-__all__ = ["AnswerGenerator", "GeneratedAnswer", "NO_EVIDENCE_TEMPLATE"]
+__all__ = [
+    "AnswerGenerator",
+    "GeneratedAnswer",
+    "NO_EVIDENCE_TEMPLATE",
+    "REFUSED_TEMPLATE",
+]

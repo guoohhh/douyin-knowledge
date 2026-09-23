@@ -34,8 +34,10 @@ from douyin_knowledge.db.models.processing import (
     RetrievalChunk,
     RetrievalChunkEvidence,
 )
-from douyin_knowledge.extraction.grounding import is_assertable
-from douyin_knowledge.knowledge.eligibility import current_eligible_runs
+from douyin_knowledge.knowledge.eligibility import (
+    apply_claim_eligibility,
+    current_eligible_runs,
+)
 from douyin_knowledge.observability.logging import get_logger
 from douyin_knowledge.retrieval.keyword_search import KeywordSearcher
 from douyin_knowledge.retrieval.structured import (
@@ -257,9 +259,7 @@ class HybridRetriever:
             return RetrievalResult(query=query, diagnostics=diagnostics)
 
         chunks = self._hydrate(fused[: limit * 2], limit=limit)
-        claims = (
-            self._claims_for_chunks(chunks, current=self._current_runs()) if include_claims else []
-        )
+        claims = self._claims_for_chunks(chunks) if include_claims else []
 
         diagnostics["returned"] = len(chunks)
         diagnostics["claims"] = len(claims)
@@ -366,34 +366,36 @@ class HybridRetriever:
                 break
         return results
 
-    def _claims_for_chunks(
-        self, chunks: list[RetrievedChunk], *, current: dict[str, str]
-    ) -> list[Claim]:
-        """Claims sharing evidence with the retrieved chunks, current runs only.
+    def _claims_for_chunks(self, chunks: list[RetrievedChunk]) -> list[Claim]:
+        """Claims sharing evidence with the retrieved chunks, via shared eligibility.
 
-        Going through ``ClaimEvidence`` rather than matching on source keeps the
-        provenance chain intact: a returned claim is guaranteed to rest on
-        evidence the retrieval actually surfaced.
+        Two conditions, and they are different questions. *Relevance* is the evidence
+        overlap: a returned claim rests on evidence this retrieval actually surfaced, which
+        is why the join goes through ``ClaimEvidence`` rather than matching on source.
+        *Eligibility* is *whether the claim may be presented at all*, and that is not this
+        function's question to answer -- it belongs to ``knowledge/eligibility.py``, which
+        is the one definition of current normal knowledge.
+
+        This used to hand-check two of the six rules (run currency and assertability) and
+        was a leak for exactly the reason that module's docstring gives: a surface applying
+        a subset of the rules is a subset of the guarantee. The missing rule that mattered
+        was 6 -- a claim needs evidence from its *own* source. Without it, the corrupted
+        shape ``Claim(source=A) -> ClaimEvidence -> Evidence(source=B)`` was selectable
+        here whenever B's chunk was retrieved: the claim rode in on another source's
+        evidence, which is the fabricated provenance the structured path had already been
+        fixed to refuse. Rules 1 and 3 were missing too, so a locally-deleted or
+        policy-hidden source's claims could arrive through this path.
         """
         evidence_ids = sorted({eid for chunk in chunks for eid in chunk.evidence_ids})
         if not evidence_ids:
             return []
 
-        claims = self.session.scalars(
+        stmt = apply_claim_eligibility(
             select(Claim)
             .join(ClaimEvidence, ClaimEvidence.claim_id == Claim.id)
             .where(ClaimEvidence.evidence_id.in_(evidence_ids))
-            .distinct()
-        ).all()
-
-        return [
-            claim
-            for claim in claims
-            if current.get(claim.source_id) == claim.processing_run_id
-            # An answer cites the claims it returns, so a downgraded one would arrive
-            # wearing the same citation as a verified one (P1-2, DEC-017).
-            and is_assertable(claim.grounding_status)
-        ]
+        ).distinct()
+        return list(self.session.scalars(stmt).all())
 
     # --------------------------------------------------------- structured path
 

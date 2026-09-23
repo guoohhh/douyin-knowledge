@@ -27,6 +27,7 @@ from douyin_knowledge.core.text import truncate
 from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.conversation import MessageCitation
 from douyin_knowledge.db.models.processing import EvidenceUnit
+from douyin_knowledge.observability.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Sequence
@@ -35,6 +36,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from douyin_knowledge.db.models.entities import Claim
     from douyin_knowledge.retrieval.retriever import RetrievalResult, RetrievedChunk
+
+logger = get_logger(__name__)
 
 SNIPPET_LIMIT = 120
 
@@ -153,8 +156,27 @@ class CitationBuilder:
 
         claim_evidence = self._claim_evidence_map([c.id for c in result.claims])
         for claim in result.claims:
+            # No same-source evidence at all means the claim is not citable, and minting a
+            # claim-precision citation anyway is how the crossed row came back after
+            # `_claim_evidence_map` had just dropped it: the map removed source B's evidence,
+            # the reuse lookup found nothing, and the fallback below asserted the claim on
+            # its own authority -- a citation whose precision field says "claim" with no
+            # evidence behind it. Failing closed here is the last gate before render.
+            #
+            # This is *not* the same as "none of its evidence was retrieved". A healthy claim
+            # whose same-source evidence exists but was not among the retrieved chunks has a
+            # non-empty entry here and still earns the fallback citation below; that is the
+            # ordinary source-level case and it is unchanged.
+            citable_evidence = claim_evidence.get(claim.id)
+            if not citable_evidence:
+                logger.warning(
+                    "claim_citation_suppressed",
+                    extra={"claim_id": claim.id, "claim_source": claim.source_id},
+                )
+                continue
+
             existing = None
-            for evidence_id in claim_evidence.get(claim.id, []):
+            for evidence_id in citable_evidence:
                 existing = evidence_to_citation.get(evidence_id)
                 if existing is not None:
                     break
