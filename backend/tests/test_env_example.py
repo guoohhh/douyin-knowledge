@@ -81,7 +81,11 @@ def test_every_documented_key_is_a_real_setting(env_lines: list[str]) -> None:
 def test_no_secret_has_a_value(env_lines: list[str]) -> None:
     """SEC-001 at the level of the file most likely to be filled in and then committed."""
     active = _assignments(env_lines)
-    for key in ("DK_OPENAI_API_KEY", "DK_DOUYIN_SIDECAR_API_KEY"):
+    for key in (
+        "DK_OPENAI_API_KEY",
+        "DK_DOUYIN_SIDECAR_API_KEY",
+        "DK_DOUBAO_ASR_API_KEY",
+    ):
         assert key not in active, f"{key} must stay commented out in the example"
 
     text = "\n".join(env_lines)
