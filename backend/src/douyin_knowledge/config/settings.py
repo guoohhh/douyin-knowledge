@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     )
     douyin_sidecar_url: str = "http://127.0.0.1:8000"
     douyin_sidecar_api_key: str | None = Field(default=None, repr=False)
+    douyin_sidecar_identity: str | None = Field(
+        default=None,
+        description="Pinned sidecar identity id used for authenticated Douyin reads",
+    )
     douyin_sidecar_timeout_s: float = 30.0
     capture_fixture_dir: Path | None = Field(
         default=None, description="Defaults to the packaged demo fixture set"

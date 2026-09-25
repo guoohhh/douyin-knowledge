@@ -70,7 +70,7 @@ def sync(
 
     if collection:
         job_type = JobType.SYNC_COLLECTION_SOURCES
-        payload = {"collection_external_id": collection, "auto_process": process}
+        payload = {"external_collection_id": collection, "auto_process": process}
         dedupe = f"sync_collection:{collection}"
     else:
         job_type = JobType.SYNC_COLLECTIONS

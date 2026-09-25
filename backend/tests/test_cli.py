@@ -111,6 +111,22 @@ class TestDoctorAndStatus:
 
 
 class TestPipeline:
+    def test_sync_one_collection_uses_worker_payload_contract(
+        self, cli_env: Settings
+    ) -> None:
+        result = runner.invoke(
+            app,
+            ["sync", "--collection", "col_food_hk", "--no-process", "--wait", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        status_result = runner.invoke(app, ["status", "--json"])
+        assert status_result.exit_code == 0, status_result.output
+        payload = json.loads(status_result.output)
+        assert payload["jobs_failed"] == 0
+        assert payload["collections"] == 1
+        assert payload["sources"] > 0
+        assert payload["processed"] == 0
+
     def test_sync_then_process_produces_knowledge(self, corpus: Settings) -> None:
         result = runner.invoke(app, ["status", "--json"])
         import json
