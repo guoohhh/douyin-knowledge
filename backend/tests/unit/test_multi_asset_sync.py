@@ -374,3 +374,201 @@ def test_video_swap_does_not_disturb_coexisting_images(session: Session, tmp_pat
     assert old_video is not None and new_video is not None
     assert old_video.download_state == SourceAsset.DOWNLOAD_UNAVAILABLE
     assert new_video.download_state == SourceAsset.DOWNLOAD_PENDING
+
+
+# ------------------------------------------------- reactivation: sync-retired → current
+
+
+def test_sync_retired_image_reappearing_becomes_pending_again(
+    session: Session, tmp_path: Path
+) -> None:
+    """A,B,C → A,C → A,B,C: B disappears then returns, must become acquirable."""
+    service = _service(session, tmp_path)
+    service.sync_sources([_album(IMG_A, IMG_B, IMG_C)])
+    session.commit()
+    for asset in _assets(session):
+        asset.download_state = SourceAsset.DOWNLOAD_READY
+    session.commit()
+
+    service.sync_sources([_album(IMG_A, IMG_C, title="album v2")])
+    session.commit()
+    b_retired = _by_url(_assets(session), IMG_B)
+    assert b_retired is not None
+    assert b_retired.download_state == SourceAsset.DOWNLOAD_UNAVAILABLE
+    assert "disappeared" in b_retired.download_error
+
+    service.sync_sources([_album(IMG_A, IMG_B, IMG_C, title="album v3")])
+    session.commit()
+    session.expire_all()
+
+    b_reactivated = _by_url(_assets(session), IMG_B)
+    assert b_reactivated is not None
+    assert b_reactivated.id == b_retired.id, "same row is reused, not a new insert"
+    assert b_reactivated.download_state == SourceAsset.DOWNLOAD_PENDING, (
+        "sync-retired asset reappearing must become pending so acquisition can fetch it"
+    )
+    assert b_reactivated.download_error is None
+    assert b_reactivated.download_attempts == 0
+    assert b_reactivated.downloaded_at_ms is None
+    assert b_reactivated.sha256 is None, "local bytes were deleted at retirement"
+
+
+def test_sync_retired_ready_asset_resets_to_pending_not_ready(
+    session: Session, tmp_path: Path
+) -> None:
+    """A sync-retired asset that was READY before retirement must return as PENDING."""
+    service = _service(session, tmp_path)
+    service.sync_sources([_album(IMG_A, IMG_B)])
+    session.commit()
+    b_asset = _by_url(_assets(session), IMG_B)
+    assert b_asset is not None
+    b_asset.download_state = SourceAsset.DOWNLOAD_READY
+    b_asset.downloaded_at_ms = 5000
+    b_asset.sha256 = "abc123"
+    session.commit()
+
+    service.sync_sources([_album(IMG_A, title="album v2")])
+    session.commit()
+    session.expire_all()
+    b_retired = _by_url(_assets(session), IMG_B)
+    assert b_retired is not None
+    assert b_retired.download_state == SourceAsset.DOWNLOAD_UNAVAILABLE
+
+    service.sync_sources([_album(IMG_A, IMG_B, title="album v3")])
+    session.commit()
+    session.expire_all()
+
+    b_reactivated = _by_url(_assets(session), IMG_B)
+    assert b_reactivated is not None
+    assert b_reactivated.download_state == SourceAsset.DOWNLOAD_PENDING, (
+        "must not remain ready; local file was deleted at retirement"
+    )
+    assert b_reactivated.sha256 is None
+    assert b_reactivated.downloaded_at_ms is None
+
+
+def test_acquisition_terminal_unavailable_stays_terminal_on_reappearance(
+    session: Session, tmp_path: Path
+) -> None:
+    """Asset marked unavailable by acquisition failure must not be reactivated."""
+    service = _service(session, tmp_path)
+    service.sync_sources([_album(IMG_A)])
+    session.commit()
+    a_asset = _by_url(_assets(session), IMG_A)
+    assert a_asset is not None
+    a_asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
+    a_asset.download_error = "file exceeds size limit (50MB)"
+    session.commit()
+
+    service.sync_sources([_album(IMG_A, title="album v2")])
+    session.commit()
+    session.expire_all()
+
+    a_still_terminal = _by_url(_assets(session), IMG_A)
+    assert a_still_terminal is not None
+    assert a_still_terminal.download_state == SourceAsset.DOWNLOAD_UNAVAILABLE, (
+        "acquisition-terminal unavailable must not be reactivated"
+    )
+    assert "exceeds size limit" in a_still_terminal.download_error
+
+
+def test_legacy_superseded_message_is_repairable(session: Session, tmp_path: Path) -> None:
+    """Assets with legacy 'superseded by a newer asset' message must reactivate."""
+    service = _service(session, tmp_path)
+    service.sync_sources([_album(IMG_A)])
+    session.commit()
+    a_asset = _by_url(_assets(session), IMG_A)
+    assert a_asset is not None
+    a_asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
+    a_asset.download_error = "superseded by a newer asset for this source"
+    session.commit()
+
+    service.sync_sources([_album(IMG_A, title="album v2")])
+    session.commit()
+    session.expire_all()
+
+    a_reactivated = _by_url(_assets(session), IMG_A)
+    assert a_reactivated is not None
+    assert a_reactivated.download_state == SourceAsset.DOWNLOAD_PENDING
+    assert a_reactivated.download_error is None
+
+
+def test_legacy_media_type_disappeared_message_is_repairable(
+    session: Session, tmp_path: Path
+) -> None:
+    """Assets with legacy 'media type disappeared' message must reactivate."""
+    service = _service(session, tmp_path)
+    service.sync_sources([_album(IMG_A)])
+    session.commit()
+    a_asset = _by_url(_assets(session), IMG_A)
+    assert a_asset is not None
+    a_asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
+    a_asset.download_error = "media type disappeared from authoritative capture"
+    session.commit()
+
+    service.sync_sources([_album(IMG_A, title="album v2")])
+    session.commit()
+    session.expire_all()
+
+    a_reactivated = _by_url(_assets(session), IMG_A)
+    assert a_reactivated is not None
+    assert a_reactivated.download_state == SourceAsset.DOWNLOAD_PENDING
+    assert a_reactivated.download_error is None
+
+
+# ------------------------------------------------- unchanged payload reconciliation
+
+
+def test_unchanged_payload_reconciles_assets_without_duplicate_snapshot(
+    session: Session, tmp_path: Path
+) -> None:
+    """Asset reconciliation runs even when source hash is unchanged."""
+    service = _service(session, tmp_path)
+    service.sync_sources([_album(IMG_A, IMG_B)])
+    session.commit()
+    b_asset = _by_url(_assets(session), IMG_B)
+    assert b_asset is not None
+    b_asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
+    b_asset.download_error = "disappeared from the authoritative capture"
+    session.commit()
+
+    from douyin_knowledge.db.models.capture import SourceSnapshot
+
+    snapshots_before = session.scalars(select(SourceSnapshot)).all()
+    assert len(snapshots_before) == 1
+
+    # Re-sync the exact same payload
+    service.sync_sources([_album(IMG_A, IMG_B)])
+    session.commit()
+    session.expire_all()
+
+    snapshots_after = session.scalars(select(SourceSnapshot)).all()
+    assert len(snapshots_after) == 1, "unchanged source must not create duplicate snapshot"
+
+    b_reactivated = _by_url(_assets(session), IMG_B)
+    assert b_reactivated is not None
+    assert b_reactivated.download_state == SourceAsset.DOWNLOAD_PENDING, (
+        "asset reconciliation must run even when source hash unchanged"
+    )
+
+
+def test_repeated_unchanged_sync_stays_idempotent(session: Session, tmp_path: Path) -> None:
+    """Multiple syncs of identical payload must not churn state or multiply rows."""
+    service = _service(session, tmp_path)
+    service.sync_sources([_album(IMG_A, IMG_B)])
+    session.commit()
+    for asset in _assets(session):
+        asset.download_state = SourceAsset.DOWNLOAD_READY
+    session.commit()
+
+    service.sync_sources([_album(IMG_A, IMG_B)])
+    session.commit()
+    after_second = {(a.id, a.download_state) for a in _assets(session)}
+
+    service.sync_sources([_album(IMG_A, IMG_B)])
+    session.commit()
+    session.expire_all()
+    after_third = {(a.id, a.download_state) for a in _assets(session)}
+
+    assert after_third == after_second, "repeated unchanged sync must be idempotent"
+    assert len(_current(session)) == 2

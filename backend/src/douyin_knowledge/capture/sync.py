@@ -205,7 +205,13 @@ class CaptureSyncService:
 
             if changed:
                 self._write_snapshot(source, captured, stats)
-                self._sync_assets(source, captured, stats)
+
+            # Asset reconciliation runs on every authoritative capture, not just when the
+            # source snapshot hash changes. This allows reactivating sync-retired assets
+            # when they reappear, even if the source metadata (title, creator, etc.) is
+            # unchanged. Without this, a database full of unavailable assets cannot be
+            # repaired by re-syncing the same authoritative payload.
+            self._sync_assets(source, captured, stats)
 
             if collection is not None:
                 self._touch_membership(source, collection)
@@ -391,7 +397,7 @@ class CaptureSyncService:
                 )
             ).first()
             if existing is not None:
-                self._refresh_asset_url(existing, url)
+                self._reactivate_or_refresh_asset(existing, url)
                 continue
 
             self.session.add(
@@ -426,13 +432,52 @@ class CaptureSyncService:
         # One rule retires everything no longer in the authoritative set.
         self._retire_absent_assets(source, set(current), stats)
 
-    def _refresh_asset_url(self, asset: SourceAsset, url: str) -> None:
-        """Update the signed URL without disturbing local state.
+    def _reactivate_or_refresh_asset(self, asset: SourceAsset, url: str) -> None:
+        """Reactivate a sync-retired asset or refresh the URL of a stable one.
 
-        The fingerprint matched, so this is the same remote file re-signed. Overwriting
-        `download_state` here would discard a good local copy on every sync and make
-        ASR re-run forever; only `remote_url` is allowed to move.
+        When an asset reappears in authoritative capture, distinguish two cases:
+
+        1. Sync-retired: marked unavailable because it disappeared from a prior capture.
+           These are *repairable* — the asset is back, so reset it to pending and clear
+           the error. Local bytes were deleted at retirement, so it must not stay ready.
+
+        2. Acquisition-terminal or ready: marked unavailable due to permanent acquisition
+           failure (oversized, no URL, rejected by policy), or successfully downloaded.
+           These are *stable* — only refresh the signed URL, leave state alone.
+
+        Legacy sync-retirement messages handled:
+        - "disappeared from the authoritative capture"
+        - "superseded by a newer asset for this source"
+        - "media type disappeared from authoritative capture"
         """
+        if asset.download_state == SourceAsset.DOWNLOAD_UNAVAILABLE and asset.download_error:
+            # Check if this is a sync-retired asset by examining the error message
+            sync_retirement_markers = [
+                "disappeared from the authoritative capture",
+                "superseded by a newer asset",
+                "media type disappeared",
+            ]
+            is_sync_retired = any(marker in asset.download_error for marker in sync_retirement_markers)
+
+            if is_sync_retired:
+                # Reactivate: asset is back, make it acquirable again
+                asset.download_state = SourceAsset.DOWNLOAD_PENDING
+                asset.download_error = None
+                asset.download_attempts = 0
+                asset.downloaded_at_ms = None
+                # Clear byte-level fields since local file was deleted at retirement
+                asset.sha256 = None
+                asset.byte_size = None
+                # Preserve structural metadata (width/height/duration) from capture
+                # Update the signed URL
+                asset.remote_url = url
+                self.session.flush()
+                return
+
+        # Not sync-retired, or already in a good state: only refresh the signed URL.
+        # The fingerprint matched, so this is the same remote file re-signed. Overwriting
+        # `download_state` here would discard a good local copy on every sync and make
+        # ASR re-run forever; only `remote_url` is allowed to move.
         if asset.remote_url != url:
             asset.remote_url = url
             self.session.flush()
