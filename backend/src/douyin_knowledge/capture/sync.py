@@ -64,6 +64,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from douyin_knowledge.capture.models import (
         CapturedCollection,
         CapturedCreator,
+        CapturedMedia,
         CapturedSource,
     )
 
@@ -204,7 +205,13 @@ class CaptureSyncService:
 
             if changed:
                 self._write_snapshot(source, captured, stats)
-                self._sync_assets(source, captured, stats)
+
+            # Asset reconciliation runs on every authoritative capture, not just when the
+            # source snapshot hash changes. This allows reactivating sync-retired assets
+            # when they reappear, even if the source metadata (title, creator, etc.) is
+            # unchanged. Without this, a database full of unavailable assets cannot be
+            # repaired by re-syncing the same authoritative payload.
+            self._sync_assets(source, captured, stats)
 
             if collection is not None:
                 self._touch_membership(source, collection)
@@ -350,8 +357,20 @@ class CaptureSyncService:
         level-2 `EvidenceUnit` directly. This is why the demo reaches level 2
         without ffmpeg or an ASR key.
         """
-        # Track which asset types are present in this capture
-        current_kinds: set[str] = set()
+        # Resolve the *complete* authoritative asset set before touching any row.
+        #
+        # This ordering is the fix for the album bug. Reconciling one media item at a
+        # time meant each new same-kind asset retired the one before it: an album of
+        # images A, B, C processed B as though A had already disappeared, because the
+        # identity query autoflushed A into the table first. An album is many
+        # `kind="image"` items on one source, and `(source_id, asset_type,
+        # remote_url_fingerprint)` already admits that, so the set is the unit of
+        # reconciliation -- not the item.
+        #
+        # Keying by `(kind, fingerprint)` also absorbs duplicates inside one payload
+        # (a cover repeated among the album images, or the same file re-signed twice):
+        # they collapse to one entry, so they cannot produce two rows for one file.
+        current: dict[tuple[str, str], CapturedMedia] = {}
 
         for media in captured.media:
             if media.kind == "subtitle" and media.text:
@@ -365,35 +384,37 @@ class CaptureSyncService:
                 # every acquisition pass has to re-examine and reject.
                 continue
 
-            current_kinds.add(media.kind)
-            fingerprint = url_fingerprint(media.url)
+            current.setdefault((media.kind, url_fingerprint(media.url)), media)
+
+        for (kind, fingerprint), media in current.items():
+            url = media.url
+            assert url is not None  # noqa: S101 - guarded when `current` was built
             existing = self.session.scalars(
                 select(SourceAsset).where(
                     SourceAsset.source_id == source.id,
-                    SourceAsset.asset_type == media.kind,
+                    SourceAsset.asset_type == kind,
                     SourceAsset.remote_url_fingerprint == fingerprint,
                 )
             ).first()
             if existing is not None:
-                self._refresh_asset_url(existing, media.url)
+                self._reactivate_or_refresh_asset(existing, url)
                 continue
 
-            self._replace_stale_assets(source, media.kind, fingerprint, stats)
             self.session.add(
                 SourceAsset(
                     source_id=source.id,
-                    asset_type=media.kind,
+                    asset_type=kind,
                     # 'cache' means: safe to delete and re-fetch. Nothing here is
                     # irreplaceable, because the URLs are provider-signed anyway.
                     retention_class="cache",
                     storage_key=self.media_store.build_storage_key(
                         platform=source.platform,
                         external_id=source.external_id,
-                        asset_type=media.kind,
-                        url=media.url,
+                        asset_type=kind,
+                        url=url,
                         mime_type=media.mime_type,
                     ),
-                    remote_url=media.url,
+                    remote_url=url,
                     remote_url_fingerprint=fingerprint,
                     # Recorded, not fetched. Acquisition is a separate job so a sync of a
                     # thousand items does not block on a thousand downloads, and so the
@@ -408,77 +429,110 @@ class CaptureSyncService:
             )
             stats.assets += 1
 
-        # Retire assets whose type disappeared entirely from the new capture
-        self._retire_disappeared_assets(source, current_kinds, stats)
+        # One rule retires everything no longer in the authoritative set.
+        self._retire_absent_assets(source, set(current), stats)
 
-    def _refresh_asset_url(self, asset: SourceAsset, url: str) -> None:
-        """Update the signed URL without disturbing local state.
+    def _reactivate_or_refresh_asset(self, asset: SourceAsset, url: str) -> None:
+        """Reactivate a sync-retired asset or refresh the URL of a stable one.
 
-        The fingerprint matched, so this is the same remote file re-signed. Overwriting
-        `download_state` here would discard a good local copy on every sync and make
-        ASR re-run forever; only `remote_url` is allowed to move.
+        When an asset reappears in authoritative capture, distinguish two cases:
+
+        1. Sync-retired: marked unavailable because it disappeared from a prior capture.
+           These are *repairable* — the asset is back, so reset it to pending and clear
+           the error. Local bytes were deleted at retirement, so it must not stay ready.
+
+        2. Acquisition-terminal or ready: marked unavailable due to permanent acquisition
+           failure (oversized, no URL, rejected by policy), or successfully downloaded.
+           These are *stable* — only refresh the signed URL, leave state alone.
+
+        Legacy sync-retirement messages handled:
+        - "disappeared from the authoritative capture"
+        - "superseded by a newer asset for this source"
+        - "media type disappeared from authoritative capture"
         """
+        if asset.download_state == SourceAsset.DOWNLOAD_UNAVAILABLE and asset.download_error:
+            # Check if this is a sync-retired asset by examining the error message
+            sync_retirement_markers = [
+                "disappeared from the authoritative capture",
+                "superseded by a newer asset",
+                "media type disappeared",
+            ]
+            is_sync_retired = any(marker in asset.download_error for marker in sync_retirement_markers)
+
+            if is_sync_retired:
+                # Reactivate: asset is back, make it acquirable again
+                asset.download_state = SourceAsset.DOWNLOAD_PENDING
+                asset.download_error = None
+                asset.download_attempts = 0
+                asset.downloaded_at_ms = None
+                # Clear byte-level fields since local file was deleted at retirement
+                asset.sha256 = None
+                asset.byte_size = None
+                # Preserve structural metadata (width/height/duration) from capture
+                # Update the signed URL
+                asset.remote_url = url
+                self.session.flush()
+                return
+
+        # Not sync-retired, or already in a good state: only refresh the signed URL.
+        # The fingerprint matched, so this is the same remote file re-signed. Overwriting
+        # `download_state` here would discard a good local copy on every sync and make
+        # ASR re-run forever; only `remote_url` is allowed to move.
         if asset.remote_url != url:
             asset.remote_url = url
             self.session.flush()
 
-    def _replace_stale_assets(
-        self, source: Source, kind: str, fingerprint: str, stats: SyncStats
+    def _retire_absent_assets(
+        self,
+        source: Source,
+        current: set[tuple[str, str]],
+        stats: SyncStats,
     ) -> None:
-        """Retire same-kind assets whose remote file is no longer the current one.
+        """Retire every asset of this source that the authoritative capture no longer lists.
 
-        A different fingerprint for the same source and kind means the provider is now
-        pointing at different content -- re-uploaded, re-encoded, or replaced. The old
-        local file is stale: keeping it `ready` would let ASR transcribe the superseded
-        video and attach that evidence to the current source. So the bytes go and the
-        row is marked `unavailable`, which is terminal and keeps it out of the
-        acquisition queue while preserving the historical record that it existed.
+        Membership in `current` -- the `(asset_type, remote_url_fingerprint)` pairs just
+        reconciled -- is the single test. That one rule covers what used to be two
+        separate passes, because "the provider replaced this upload" and "this kind is
+        gone entirely" are the same fact seen from different angles: the stored identity
+        is not in the current set. Merging them is also what makes coexistence work. The
+        old same-kind pass asked "does any other fingerprint exist for this kind?", which
+        is unanswerable one item at a time -- for an album, every sibling looks like a
+        replacement of the one before it.
 
-        Legacy rows with a NULL fingerprint (pre-DEC-014) are retired too: their
-        `storage_key` was a URL, so there is no trustworthy local file behind them.
+        Retiring means: delete the local bytes and mark the row `unavailable`, which is
+        terminal. Leaving it `ready` would let ASR transcribe superseded content and
+        attach that evidence to the current source (DEC-014). The row itself stays as the
+        historical record that the asset once existed. `download_error` says
+        "disappeared" for both shapes deliberately: from the stored row's point of view
+        being replaced and being dropped are indistinguishable, and a single phrasing
+        keeps the message honest about what was actually observed.
+
+        Two cases fall out of the same test rather than needing their own branch. A legacy
+        NULL-fingerprint row (pre-DEC-014) can never match a captured pair, so it retires
+        -- correct, since its `storage_key` was a URL and no trustworthy local file backs
+        it. And an empty `current` retires everything, which is what a capture carrying no
+        media means.
+
+        Assets already `unavailable` are skipped, so a repeated sync does not re-delete
+        files or inflate `assets_superseded`.
         """
-        stale = self.session.scalars(
+        stored = self.session.scalars(
             select(SourceAsset).where(
                 SourceAsset.source_id == source.id,
-                SourceAsset.asset_type == kind,
-                SourceAsset.remote_url_fingerprint.is_distinct_from(fingerprint),
+                SourceAsset.download_state != SourceAsset.DOWNLOAD_UNAVAILABLE,
             )
         ).all()
-        for asset in stale:
-            if asset.download_state == SourceAsset.DOWNLOAD_UNAVAILABLE:
-                continue
+        absent = [
+            asset
+            for asset in stored
+            if (asset.asset_type, asset.remote_url_fingerprint or "") not in current
+        ]
+        for asset in absent:
             self.media_store.delete(asset.storage_key)
             asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
-            asset.download_error = "superseded by a newer asset for this source"
+            asset.download_error = "disappeared from the authoritative capture"
             stats.assets_superseded += 1
-        if stale:
-            self.session.flush()
-
-    def _retire_disappeared_assets(
-        self, source: Source, current_kinds: set[str], stats: SyncStats
-    ) -> None:
-        """Retire assets whose type is no longer present in the authoritative capture.
-
-        When a source initially has video A (downloaded and ready), but a later
-        authoritative capture contains no video at all, the old asset must not remain
-        eligible as current ASR input. This handles complete media disappearance, not
-        just replacement (video A → video B), which `_replace_stale_assets` covers.
-        """
-        stmt = select(SourceAsset).where(
-            SourceAsset.source_id == source.id,
-            SourceAsset.download_state != SourceAsset.DOWNLOAD_UNAVAILABLE,
-        )
-        if current_kinds:
-            # An empty `current_kinds` means the capture carried no media at all, so
-            # every existing asset has disappeared and no exclusion filter applies.
-            stmt = stmt.where(SourceAsset.asset_type.notin_(current_kinds))
-        disappeared = self.session.scalars(stmt).all()
-        for asset in disappeared:
-            self.media_store.delete(asset.storage_key)
-            asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
-            asset.download_error = "media type disappeared from authoritative capture"
-            stats.assets_superseded += 1
-        if disappeared:
+        if absent:
             self.session.flush()
 
     def _store_subtitle_evidence(

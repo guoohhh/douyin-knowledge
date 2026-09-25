@@ -143,6 +143,7 @@ def test_map_source(provider: DouyinCaptureProvider) -> None:
         datetime(2024, 1, 15, 10, 30, 0, tzinfo=timezone(timedelta(seconds=28800))).timestamp() * 1000
     )
     assert source.published_at_ms == expected_ts
+    assert source.saved_at_ms is None
     assert source.duration_ms == 15000
     assert source.availability == "available"
     assert source.creator.display_name == "测试用户"

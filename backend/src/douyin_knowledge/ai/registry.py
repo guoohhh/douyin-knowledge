@@ -101,6 +101,16 @@ def get_asr_provider(settings: Settings) -> ASRProvider:
     if provider == "openai":
         from douyin_knowledge.ai.adapters.openai_adapter import OpenAIASRProvider
         return OpenAIASRProvider(api_key=settings.openai_api_key)
+    if provider == "doubao":
+        from douyin_knowledge.ai.adapters.doubao_adapter import DoubaoASRProvider
+        if not settings.doubao_asr_api_key:
+            raise ConfigurationError("asr_provider=doubao requires DK_DOUBAO_ASR_API_KEY")
+        return DoubaoASRProvider(
+            api_key=settings.doubao_asr_api_key,
+            resource_id=settings.doubao_asr_resource_id,
+            endpoint=settings.doubao_asr_endpoint,
+            timeout_s=settings.doubao_asr_timeout_s,
+        )
     raise ConfigurationError(f"unknown asr_provider {provider!r}")
 
 

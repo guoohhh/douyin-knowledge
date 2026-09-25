@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     )
     douyin_sidecar_url: str = "http://127.0.0.1:8000"
     douyin_sidecar_api_key: str | None = Field(default=None, repr=False)
+    douyin_sidecar_identity: str | None = Field(
+        default=None,
+        description="Pinned sidecar identity id used for authenticated Douyin reads",
+    )
     douyin_sidecar_timeout_s: float = 30.0
     capture_fixture_dir: Path | None = Field(
         default=None, description="Defaults to the packaged demo fixture set"
@@ -67,7 +71,7 @@ class Settings(BaseSettings):
         default="mock",
         description="Primary AI provider: 'mock' for testing, 'openai' for production",
     )
-    asr_provider: Literal["mock", "openai"] | None = Field(
+    asr_provider: Literal["mock", "openai", "doubao"] | None = Field(
         default=None,
         description="Override ASR provider; defaults to ai_provider",
     )
@@ -95,6 +99,13 @@ class Settings(BaseSettings):
         default="text-embedding-3-small",
         description="Model for vector embeddings",
     )
+
+    doubao_asr_api_key: str | None = Field(default=None, repr=False)
+    doubao_asr_resource_id: str = "volc.seedasr.sauc.duration"
+    doubao_asr_endpoint: str = (
+        "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
+    )
+    doubao_asr_timeout_s: float = 300.0
 
     # ---- model roles (ARCHITECTURE.md section 16) -------------------------
     # Each role is an *override*: left unset, the name is derived from the active
@@ -261,6 +272,8 @@ class Settings(BaseSettings):
         if kind == "vision":
             return self.openai_vision_model or "gpt-4o"
         if kind == "asr":
+            if provider == "doubao":
+                return "doubao-seed-asr-2.0"
             return "whisper-1"
         if kind == "ocr":
             return self.openai_vision_model or "gpt-4o"
@@ -273,10 +286,20 @@ class Settings(BaseSettings):
             self.provider_for_role(role) != "mock" for role in self._ROLE_KIND
         )
 
+    def missing_provider_credentials(self) -> list[str]:
+        """Return env names for credentials required by the selected providers."""
+        providers = {self.provider_for_role(role) for role in self._ROLE_KIND}
+        missing: list[str] = []
+        if "openai" in providers and not self.openai_api_key:
+            missing.append("DK_OPENAI_API_KEY")
+        if "doubao" in providers and not self.doubao_asr_api_key:
+            missing.append("DK_DOUBAO_ASR_API_KEY")
+        return missing
+
     def redacted(self) -> dict[str, object]:
         """Settings dump safe for logs and the settings API. Secrets become booleans."""
         data = self.model_dump(mode="json")
-        for secret in ("openai_api_key", "douyin_sidecar_api_key"):
+        for secret in ("openai_api_key", "douyin_sidecar_api_key", "doubao_asr_api_key"):
             data[secret] = bool(getattr(self, secret))
         return data
 
