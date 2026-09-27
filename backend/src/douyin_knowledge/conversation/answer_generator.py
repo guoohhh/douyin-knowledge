@@ -255,8 +255,12 @@ class AnswerGenerator:
                 # independent confirmations when it is one. Distinct values are *not*
                 # merged -- that is a conflict and it is rendered below.
                 grouped: dict[tuple[str, str], list[str]] = {}
-                for claim in support.satisfied_by:
-                    citation = citations.by_claim.get(claim.id)
+                # Citable claims only: a constraint line states a value on a creator's
+                # authority, so an uncitable claim has no authority to state it with. With
+                # the unfiltered list, a group whose every claim missed the citation budget
+                # produced a line with no marker at all.
+                for claim in citations.renderable_claims(support.satisfied_by):
+                    citation = citations.by_claim[claim.id]
                     value = (
                         claim.value_number
                         if claim.value_number is not None
@@ -264,7 +268,7 @@ class AnswerGenerator:
                     )
                     key = (_format_value(value), claim.attribution or "未知作者")
                     markers = grouped.setdefault(key, [])
-                    if citation is not None and citation.marker not in markers:
+                    if citation.marker not in markers:
                         markers.append(citation.marker)
                 for (value_text, attribution), markers in grouped.items():
                     lines.append(
@@ -275,9 +279,10 @@ class AnswerGenerator:
                 label = _CONSTRAINT_LABELS.get(field_name, field_name)
                 rendered: list[str] = []
                 seen: set[tuple[str, str]] = set()
-                for claim in match.supports[field_name].all_eligible:
-                    citation = citations.by_claim.get(claim.id)
-                    marker = citation.marker if citation else ""
+                for claim in citations.renderable_claims(
+                    match.supports[field_name].all_eligible
+                ):
+                    citation = citations.by_claim[claim.id]
                     value = (
                         claim.value_number
                         if claim.value_number is not None
@@ -288,7 +293,21 @@ class AnswerGenerator:
                     if key in seen:
                         continue
                     seen.add(key)
-                    rendered.append(f"{attribution}说 {_format_value(value)}{marker}")
+                    rendered.append(
+                        f"{attribution}说 {_format_value(value)}{citation.marker}"
+                    )
+                # A disagreement needs at least two citable sides to be reportable. Below
+                # that there is nothing to attribute the disagreement *to*, and the honest
+                # move is silence rather than a conflict notice quoting one value.
+                #
+                # Known accepted gap: if two values conflict and only one is citable, the
+                # support line above states the citable one with no conflict notice, which
+                # reads more settled than the archive is. Grounding is preserved -- every
+                # rendered value is attributable -- but completeness is not. Stating an
+                # uncitable value to flag the conflict would trade a real guarantee for a
+                # softer one, so the gap is documented rather than closed that way.
+                if len({value for value, _ in seen}) < 2:
+                    continue
                 conflicts.append(
                     f"{match.entity.canonical_name} 的{label}在不同来源之间不一致："
                     f"{'；'.join(rendered)}"
@@ -508,11 +527,18 @@ class AnswerGenerator:
     def _render_claims(
         self, result: RetrievalResult, citations: CitationSet
     ) -> tuple[list[str], list[str]]:
-        """Render claims grouped by predicate so disagreement becomes visible."""
+        """Render claims grouped by predicate so disagreement becomes visible.
+
+        Only claims the current `CitationSet` can cite are rendered. This is the line the
+        real Stage 3C failure crossed: `微调阶段 requires_mastering：Lora QLora Prefix Tuning
+        等一系列微调技术` reached the user with no marker, and from that text there was no
+        route back to an evidence unit, a source or a timestamp. A fact that cannot be
+        attributed is dropped, not stated bare -- completeness may degrade, grounding may not.
+        """
         from douyin_knowledge.wiki.composer import render_claim_value
 
         by_predicate: dict[str, list[Any]] = {}
-        for claim in result.claims:
+        for claim in citations.renderable_claims(result.claims):
             by_predicate.setdefault(claim.predicate, []).append(claim)
 
         lines: list[str] = []
@@ -521,10 +547,9 @@ class AnswerGenerator:
             values: list[tuple[str, str]] = []
             for claim in claims:
                 value = render_claim_value(claim)
-                citation = citations.by_claim.get(claim.id)
-                marker = citation.marker if citation else ""
+                citation = citations.by_claim[claim.id]
                 if value:
-                    values.append((value, marker))
+                    values.append((value, citation.marker))
 
             if not values:
                 continue
@@ -544,11 +569,14 @@ class AnswerGenerator:
     def _render_excerpts(
         self, result: RetrievalResult, citations: CitationSet, limit: int = 4
     ) -> list[str]:
+        """Quote only chunks this citation set can attribute.
+
+        This path was already correct; it now asks `CitationSet` the same question the other
+        renderers ask, so the rule has one definition instead of four.
+        """
         lines: list[str] = []
-        for chunk in result.chunks[:limit]:
-            citation = citations.by_chunk.get(chunk.chunk_id)
-            if citation is None:
-                continue
+        for chunk in citations.renderable_chunks(result.chunks)[:limit]:
+            citation = citations.by_chunk[chunk.chunk_id]
             snippet = (citation.snippet or chunk.text).strip()
             if not snippet:
                 continue
@@ -654,14 +682,19 @@ class AnswerGenerator:
         # Source order follows first appearance in retrieval order, so the most relevant
         # source is still presented first and marker numbers still ascend with relevance.
         grouped: dict[str, list[tuple[Any, Any]]] = {}
-        for chunk in result.chunks[:MAX_EVIDENCE_IN_PROMPT]:
-            citation = citations.by_chunk.get(chunk.chunk_id)
-            if citation is None:
-                continue
-            grouped.setdefault(chunk.source_id, []).append((chunk, citation))
+        for chunk in citations.renderable_chunks(result.chunks)[:MAX_EVIDENCE_IN_PROMPT]:
+            grouped.setdefault(chunk.source_id, []).append(
+                (chunk, citations.by_chunk[chunk.chunk_id])
+            )
 
+        # Filtered to citable claims *before* the display budget is applied. An uncitable
+        # claim shown here invites the model to assert a fact it has no ordinal for, which
+        # the grounding validator then rejects -- so the whole answer is lost to a claim that
+        # could never have been cited anyway. Truncating first would also let an uncitable
+        # claim take a prompt slot from a citable one.
+        renderable = citations.renderable_claims(result.claims)
         claims_by_source: dict[str, list[Any]] = {}
-        for claim in result.claims[:MAX_CLAIMS_IN_PROMPT]:
+        for claim in renderable[:MAX_CLAIMS_IN_PROMPT]:
             claims_by_source.setdefault(claim.source_id, []).append(claim)
 
         ordered_sources = list(grouped)
@@ -695,8 +728,8 @@ class AnswerGenerator:
                     f"{(citation.snippet or chunk.text).strip()}"
                 )
             for claim in claims_by_source.get(source_id, []):
-                citation = citations.by_claim.get(claim.id)
-                marker = f"[{citation.ordinal}]" if citation else ""
+                # Guaranteed present: `renderable_claims` filtered this list above.
+                marker = f"[{citations.by_claim[claim.id].ordinal}]"
                 provenance = (
                     "作者主观评价"
                     if claim.provenance_type == "creator_opinion"

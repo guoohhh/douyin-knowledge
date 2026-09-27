@@ -18,6 +18,7 @@ at all, which is why hybrid answers keep their two halves visually separate.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -88,7 +89,15 @@ class Citation:
 
 @dataclass
 class CitationSet:
-    """Ordered citations plus lookups the generator uses to place markers."""
+    """Ordered citations plus lookups the generator uses to place markers.
+
+    This set is also the *authority on what may be asserted*. Retrieval relevance and
+    user-assertability are different questions: a claim can be worth ranking and worth
+    keeping in diagnostics while being impossible to attribute to anything the user could
+    check. The `renderable_*` helpers below answer the second question, and they live here
+    because this class minted the provenance -- asking each renderer to remember
+    ``if citation is not None`` is what produced the Stage 3C failure in four places at once.
+    """
 
     citations: list[Citation] = field(default_factory=list)
     by_chunk: dict[str, Citation] = field(default_factory=dict)
@@ -99,6 +108,27 @@ class CitationSet:
 
     def as_list(self) -> list[dict[str, Any]]:
         return [c.as_dict() for c in self.citations]
+
+    # -------------------------------------------------- renderable knowledge
+
+    def can_cite_claim(self, claim_id: str) -> bool:
+        """Whether this claim may be asserted to the user at all."""
+        return claim_id in self.by_claim
+
+    def can_cite_chunk(self, chunk_id: str) -> bool:
+        return chunk_id in self.by_chunk
+
+    def renderable_claims(self, claims: Iterable[Any]) -> list[Any]:
+        """The subset of `claims` that carries provenance in this set.
+
+        Callers should filter *before* truncating to a display budget. Filtering after
+        would spend display slots on claims that are then dropped, so a citable fact could
+        lose its place to an uncitable one.
+        """
+        return [claim for claim in claims if self.can_cite_claim(claim.id)]
+
+    def renderable_chunks(self, chunks: Iterable[Any]) -> list[Any]:
+        return [chunk for chunk in chunks if self.can_cite_chunk(chunk.chunk_id)]
 
 
 class CitationBuilder:
@@ -188,8 +218,15 @@ class CitationBuilder:
                 citation_set.by_claim[claim.id] = existing
                 continue
 
+            # `continue`, not `break`. Minting is budgeted, but *reuse* costs no ordinal, so
+            # a claim that cannot mint must not end the loop -- the claims after it may still
+            # attach to citations already minted above, for free. With `break` here, one
+            # unreusable claim early in the list denied provenance to every later claim: on
+            # the real Agent-learning shape, 14 claims with 12 of their evidence units
+            # already cited produced a completely empty `by_claim`, and the renderers then
+            # asserted all 14 of them with no marker.
             if ordinal >= limit:
-                break
+                continue
             ordinal += 1
             citation = Citation(
                 ordinal=ordinal,
