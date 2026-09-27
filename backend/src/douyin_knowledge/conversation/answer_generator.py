@@ -9,10 +9,13 @@ for the questions this product is built around — 人均多少、几点关门�
 trustworthy than paraphrasing it.
 
 *Model mode* passes retrieved evidence to a chat model with an explicit citation
-protocol, then **validates the output**: any ``[n]`` marker the model emits that
-does not correspond to a real citation is stripped. A model that cites [7] when
-six sources were supplied is the exact failure RETRIEVAL.md 14 forbids, and
-prompting alone does not prevent it.
+protocol, then **validates the output against the grounding contract** in
+``conversation.grounding``. A model that cites [7] when six sources were supplied
+is the exact failure RETRIEVAL.md 14 forbids, and prompting alone does not
+prevent it. Neither does stripping the bad marker: the sentence it supported is
+still an unsupported assertion afterwards, only now nothing marks it as one. So a
+violating answer is **refused whole** and the deterministic composition below is
+returned in its place. Unsupported model prose is never a normal grounded answer.
 
 Both modes obey the scope contract: ``personal_required`` and ``personal_first``
 answers may only assert what local evidence supports, and an empty retrieval
@@ -26,7 +29,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from douyin_knowledge.ai.providers import ChatMessage
-from douyin_knowledge.conversation.citation_builder import CitationSet
+from douyin_knowledge.conversation.citation_builder import CitationSet, format_timestamp
+from douyin_knowledge.conversation.grounding import (
+    unknown_ordinals,
+    validate_grounding,
+    violations_as_list,
+)
 from douyin_knowledge.conversation.scope import (
     SCOPE_GENERAL,
     SCOPE_HYBRID,
@@ -43,15 +51,34 @@ logger = get_logger(__name__)
 MAX_EVIDENCE_IN_PROMPT = 8
 MAX_CLAIMS_IN_PROMPT = 20
 
+#: How each evidence kind is described to the answer model. Reliability differs between
+#: them -- a caption is what the creator typed, ASR is what they said -- and the model
+#: cannot weigh that if every snippet is presented identically.
+_EVIDENCE_KIND_LABELS = {
+    "asr": "语音转写",
+    "subtitle": "字幕",
+    "title": "视频标题",
+    "caption": "视频文案",
+    "transcript": "转写文本",
+    "paragraph": "正文段落",
+    "image": "图片内容",
+    "video": "视频内容",
+}
+
 _SYSTEM_PROMPT = """你是一个个人知识助手。用户的收藏视频已经被处理成结构化证据。
 
 硬性规则：
 1. 只能使用下面提供的证据回答。证据里没有的信息，不要补充、不要推测。
-2. 每条实质性事实后面必须加引用标记，格式为 [n]，n 是证据编号。
-3. 不确定就说不确定。证据不足就直说证据不足。
+2. 每条实质性事实后面必须加引用标记，格式为 [n]，n 必须是下面出现过的证据编号。
+   只允许 [1] 或 [1,2] 这种纯数字形式。不要写 [第五步]、[来源]、[证据] 这类
+   方括号标签——它们不是引用，会导致整个回答被判为不合格并丢弃。
+3. 不确定就说不确定。证据不足就直说证据不足。宁可少说，不要在没有编号支持的
+   情况下陈述事实。
 4. 如果不同来源说法冲突，两种说法都要写出来，并说明它们来自不同来源。
 5. 不要把作者的主观评价写成客观事实。原文是"我觉得好吃"就不要写成"很好吃"。
-6. 用中文回答，简洁直接，不要客套话。"""
+6. 证据按「来源」分组。同一个来源块里的条目来自同一个视频。不要把同一来源的
+   两条证据描述成两个不同的视频，也不要说其中一条与这个视频无关。
+7. 用中文回答，简洁直接，不要客套话。"""
 
 _GENERAL_SYSTEM_PROMPT = """你是一个知识助手。这个问题不是在问用户的收藏内容，
 所以你可以用通用知识回答。
@@ -547,15 +574,38 @@ class AnswerGenerator:
         )
 
         valid_ordinals = {c.ordinal for c in citations.citations}
-        content, removed = _validate_citation_markers(response.content, valid_ordinals)
-        if removed:
-            # Logged rather than silently accepted: repeated hallucinated
-            # markers are a signal the prompt or model needs changing.
-            logger.warning(
-                "answer_citation_markers_stripped",
-                extra={"removed": sorted(removed), "valid": sorted(valid_ordinals)},
-            )
+        violations = validate_grounding(response.content, valid_ordinals)
+        removed = unknown_ordinals(response.content, valid_ordinals)
 
+        if violations:
+            # Fail closed. The model's prose is discarded whole rather than repaired,
+            # because every available repair leaves an unsupported assertion standing:
+            # deleting `[99]` from 还有分店[99] yields 还有分店, which asserts the same
+            # unsupported thing with the evidence of its unsupportedness removed. The
+            # deterministic answer below is composed from claims and evidence by this
+            # module, so it cannot be ungrounded -- no model wrote it.
+            logger.warning(
+                "answer_grounding_contract_violated",
+                extra={
+                    "violations": violations_as_list(violations),
+                    "valid": sorted(valid_ordinals),
+                    "model": response.model,
+                },
+            )
+            fallback = self._deterministic_answer(query, result, citations, decision)
+            fallback.generator = "deterministic_fallback"
+            fallback.model_name = response.model
+            fallback.diagnostics = {
+                **fallback.diagnostics,
+                "stripped_markers": sorted(removed),
+                "grounding_violations": violations_as_list(violations),
+                "rejected_model_answer": True,
+            }
+            if decision.scope == SCOPE_HYBRID:
+                fallback.content = f"### 来自你的收藏\n\n{fallback.content}"
+            return fallback
+
+        content = response.content.strip()
         if decision.scope == SCOPE_HYBRID:
             content = f"### 来自你的收藏\n\n{content}"
 
@@ -565,7 +615,11 @@ class AnswerGenerator:
             citations=citations.as_list(),
             generator="model",
             model_name=response.model,
-            diagnostics={**dict(result.diagnostics), "stripped_markers": sorted(removed)},
+            diagnostics={
+                **dict(result.diagnostics),
+                "stripped_markers": sorted(removed),
+                "grounding_violations": [],
+            },
         )
 
     def _build_prompt(
@@ -575,27 +629,86 @@ class AnswerGenerator:
         citations: CitationSet,
         decision: ScopeDecision,
     ) -> str:
+        """Present evidence grouped by source, because a flat list hides co-origin.
+
+        The 手抓饼 answer said the 芹菜 evidence was "unrelated to the 手抓饼 video" when
+        ``Claim.source_id``, ``EvidenceUnit.source_id`` and the retrieved chunk were all
+        that one source. Nothing was wrong with the provenance; the *prompt* was a flat
+        interleaved list of ``[n] label`` lines, and a model reading it has no way to tell
+        which snippets came from the same video -- two entries from one source look exactly
+        like one entry each from two. So it guessed, and guessed that they were unrelated.
+
+        Grouping is a presentation change and nothing more. Every marker still comes from
+        `CitationBuilder`; this method reads ordinals and never mints one, so the
+        no-fake-provenance guarantee is untouched. What changes is that source identity,
+        evidence kind, timestamp and claim provenance are all stated explicitly instead of
+        being implicit in an ordering the model cannot see.
+        """
         from douyin_knowledge.wiki.composer import render_claim_value
 
-        parts: list[str] = ["证据："]
+        parts: list[str] = [
+            "证据（按来源分组。同一个「来源」块内的所有条目来自同一个视频，"
+            "不是不同的视频；不要把它们说成互不相关的来源）："
+        ]
+
+        # Source order follows first appearance in retrieval order, so the most relevant
+        # source is still presented first and marker numbers still ascend with relevance.
+        grouped: dict[str, list[tuple[Any, Any]]] = {}
         for chunk in result.chunks[:MAX_EVIDENCE_IN_PROMPT]:
             citation = citations.by_chunk.get(chunk.chunk_id)
             if citation is None:
                 continue
-            head = f"[{citation.ordinal}] {citation.label or ''}".strip()
-            parts.append(f"{head}\n{(citation.snippet or chunk.text).strip()}")
+            grouped.setdefault(chunk.source_id, []).append((chunk, citation))
 
-        claim_lines: list[str] = []
+        claims_by_source: dict[str, list[Any]] = {}
         for claim in result.claims[:MAX_CLAIMS_IN_PROMPT]:
-            citation = citations.by_claim.get(claim.id)
-            marker = f"[{citation.ordinal}]" if citation else ""
-            value = render_claim_value(claim)
-            subject = self._subject_label(claim)
-            provenance = "作者主观评价" if claim.provenance_type == "creator_opinion" else "作者陈述"
-            claim_lines.append(f"{marker} {subject} {claim.predicate} = {value}（{provenance}）")
-        if claim_lines:
-            parts.append("结构化陈述：")
-            parts.extend(claim_lines)
+            claims_by_source.setdefault(claim.source_id, []).append(claim)
+
+        ordered_sources = list(grouped)
+        for source_id in claims_by_source:
+            if source_id not in ordered_sources:
+                ordered_sources.append(source_id)
+
+        for index, source_id in enumerate(ordered_sources, start=1):
+            entries = grouped.get(source_id, [])
+            title = next(
+                (c.source_title for _, c in entries if c.source_title),
+                None,
+            ) or next(
+                (
+                    citations.by_claim[claim.id].source_title
+                    for claim in claims_by_source.get(source_id, [])
+                    if claim.id in citations.by_claim
+                    and citations.by_claim[claim.id].source_title
+                ),
+                None,
+            )
+            block: list[str] = [
+                f"来源 {index}：{title or '未命名来源'}（source_id={source_id}）"
+            ]
+            for chunk, citation in entries:
+                kind = _EVIDENCE_KIND_LABELS.get(chunk.chunk_type, chunk.chunk_type)
+                timestamp = format_timestamp(citation.start_ms)
+                stamp = f" @ {timestamp}" if timestamp else ""
+                block.append(
+                    f"  [{citation.ordinal}]（{kind}{stamp}）"
+                    f"{(citation.snippet or chunk.text).strip()}"
+                )
+            for claim in claims_by_source.get(source_id, []):
+                citation = citations.by_claim.get(claim.id)
+                marker = f"[{citation.ordinal}]" if citation else ""
+                provenance = (
+                    "作者主观评价"
+                    if claim.provenance_type == "creator_opinion"
+                    else "作者陈述"
+                )
+                attribution = claim.attribution or "未知作者"
+                block.append(
+                    f"  {marker} 结构化陈述：{self._subject_label(claim)} "
+                    f"{claim.predicate} = {render_claim_value(claim)}"
+                    f"（{provenance}，来自 {attribution}）"
+                )
+            parts.append("\n".join(block))
 
         parts.append(f"\n用户问题：{query}")
         if decision.scope == SCOPE_HYBRID:
@@ -611,22 +724,6 @@ def _strip_citation_markers(text: str) -> str:
     import re
 
     return re.sub(r"\[\d+\]", "", text).strip()
-
-
-def _validate_citation_markers(text: str, valid: set[int]) -> tuple[str, set[int]]:
-    """Drop markers that point at citations we did not supply."""
-    import re
-
-    removed: set[int] = set()
-
-    def replace(match: re.Match[str]) -> str:
-        ordinal = int(match.group(1))
-        if ordinal in valid:
-            return match.group(0)
-        removed.add(ordinal)
-        return ""
-
-    return re.sub(r"\[(\d+)\]", replace, text).strip(), removed
 
 
 __all__ = [
