@@ -637,14 +637,23 @@ class AnswerGenerator:
 
         This path was already correct; it now asks `CitationSet` the same question the other
         renderers ask, so the rule has one definition instead of four.
+
+        `limit` counts quoted lines, not chunks. One chunk can project several evidence
+        citations, and the thing worth bounding is how much text the user reads -- bounding
+        chunks instead would have let one broad chunk's window set the answer's length.
+        Quoting the whole window rather than one unit of it is what lets 八元。 appear next
+        to the 手抓饼。 it answers: each line carries its own marker and its own timestamp,
+        so no line borrows another's provenance.
         """
         lines: list[str] = []
-        for chunk in citations.renderable_chunks(result.chunks)[:limit]:
-            citation = citations.by_chunk[chunk.chunk_id]
-            snippet = (citation.snippet or chunk.text).strip()
-            if not snippet:
-                continue
-            lines.append(f"- {snippet}{citation.marker}")
+        for chunk in citations.renderable_chunks(result.chunks):
+            for citation in citations.citations_for_chunk(chunk.chunk_id):
+                if len(lines) >= limit:
+                    return lines
+                snippet = (citation.snippet or chunk.text).strip()
+                if not snippet:
+                    continue
+                lines.append(f"- {snippet}{citation.marker}")
         return lines
 
     # --------------------------------------------------------------- model
@@ -745,11 +754,21 @@ class AnswerGenerator:
 
         # Source order follows first appearance in retrieval order, so the most relevant
         # source is still presented first and marker numbers still ascend with relevance.
+        # `MAX_EVIDENCE_IN_PROMPT` bounds evidence *lines*, not chunks: one chunk projects a
+        # window of several evidence citations and the model has to see all of them, because
+        # the unit that answers the question is routinely not the unit that matched it. On
+        # the real failure, showing one unit per chunk is what sent the model
+        # `[1]（语音转写 @ 01:55）补钙啊？` in answer to 手抓饼多少钱.
         grouped: dict[str, list[tuple[Any, Any]]] = {}
-        for chunk in citations.renderable_chunks(result.chunks)[:MAX_EVIDENCE_IN_PROMPT]:
-            grouped.setdefault(chunk.source_id, []).append(
-                (chunk, citations.by_chunk[chunk.chunk_id])
-            )
+        shown = 0
+        for chunk in citations.renderable_chunks(result.chunks):
+            if shown >= MAX_EVIDENCE_IN_PROMPT:
+                break
+            for citation in citations.citations_for_chunk(chunk.chunk_id):
+                if shown >= MAX_EVIDENCE_IN_PROMPT:
+                    break
+                grouped.setdefault(chunk.source_id, []).append((chunk, citation))
+                shown += 1
 
         # Filtered to citable claims *before* the display budget is applied. An uncitable
         # claim shown here invites the model to assert a fact it has no ordinal for, which

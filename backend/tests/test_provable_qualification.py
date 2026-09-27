@@ -41,12 +41,18 @@ from __future__ import annotations
 import re
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from douyin_knowledge.conversation.answer_generator import AnswerGenerator
 from douyin_knowledge.conversation.citation_builder import CitationBuilder
 from douyin_knowledge.conversation.scope import classify_scope
-from douyin_knowledge.db.models.entities import Entity
+from douyin_knowledge.db.models.entities import Claim, ClaimEvidence, Entity
+from douyin_knowledge.db.models.processing import (
+    EvidenceUnit,
+    RetrievalChunk,
+    RetrievalChunkEvidence,
+)
 from douyin_knowledge.retrieval.query_plan import (
     ClaimConstraint,
     LocationConstraint,
@@ -54,7 +60,6 @@ from douyin_knowledge.retrieval.query_plan import (
     UserStateConstraint,
 )
 from douyin_knowledge.retrieval.retriever import HybridRetriever
-from tests.test_citable_answer_contract import _paragraphs
 from tests.test_structured_retrieval import Corpus, _index
 
 QUERY = "帮我找徐汇区人均100以下的日料"
@@ -68,6 +73,91 @@ FLOOD = 20
 @pytest.fixture
 def corpus(session: Session) -> Corpus:
     return Corpus(session)
+
+
+#: Flood size for the tests that need the starved match to be *partially* citable. Smaller
+#: than `FLOOD` so that `_chunk_for_claim`'s single chunk still fits inside the retrieval
+#: limit: with a full flood it ranks eleventh of ten and never reaches the citation builder,
+#: which starves the match completely and destroys the precondition those tests rest on.
+FLOOD_PARTIAL = 9
+
+
+def _chunk_for_claim(corpus: Corpus, entity: Entity, predicate: str, text: str) -> None:
+    """A chunk grounded in exactly one claim's evidence, and nothing else's.
+
+    This is how a match ends up citable for one required constraint and not another without
+    anything being wrong: the cuisine sentence got its own retrievable paragraph, the price
+    sentence did not, and the budget ran out before the price claim could mint. `Corpus.chunk`
+    cannot express that -- it links every evidence unit on the source, which makes all three
+    claims citable at once.
+
+    The shape used to appear by accident. `CitationBuilder` overwrote
+    ``evidence_to_citation`` once per chunk while citing only one unit per chunk, so a
+    flooded source left most of the budget unspent and the split fell out of the leftovers.
+    Now that a chunk cites the evidence it actually resolves to, the fixture has to say what
+    it means.
+    """
+    claim = corpus.session.scalars(
+        select(Claim).where(
+            Claim.subject_entity_id == entity.id, Claim.predicate == predicate
+        )
+    ).one()
+    evidence_id = corpus.session.scalars(
+        select(ClaimEvidence.evidence_id).where(ClaimEvidence.claim_id == claim.id)
+    ).one()
+    chunk = RetrievalChunk(
+        source_id=claim.source_id,
+        processing_run_id=claim.processing_run_id,
+        chunk_type="paragraph",
+        ordinal=99,
+        text=text,
+        content_hash=f"c_one_claim_{claim.id}",
+    )
+    corpus.session.add(chunk)
+    corpus.session.flush()
+    corpus.session.add(
+        RetrievalChunkEvidence(retrieval_chunk_id=chunk.id, evidence_id=evidence_id)
+    )
+    corpus.session.flush()
+
+
+def _flood(corpus: Corpus, source, run, texts: list[str]) -> None:
+    """Paragraph chunks, each grounded in its own evidence unit.
+
+    `_paragraphs` links every chunk to *all* of the source's existing evidence, which was
+    fine when a chunk minted one citation regardless. Once a chunk projects a window of its
+    evidence, chunk 2 onward resolve to units chunk 1 already cited and reuse those
+    ordinals, so twenty chunks consumed three slots and this file's whole starvation
+    precondition evaporated -- every test here failed on its own setup, not on the rule.
+
+    A real paragraph chunk is grounded in the text of that paragraph, so that is what this
+    builds. Twenty distinct units is what actually exhausts a twelve-citation budget, and it
+    exhausts it the way production does.
+    """
+    for index, text in enumerate(texts, start=1):
+        evidence = EvidenceUnit(
+            source_id=source.id,
+            kind="transcript",
+            raw_text=text,
+            normalized_text=text,
+            content_hash=f"h_flood_{run.id}_{index}",
+        )
+        corpus.session.add(evidence)
+        corpus.session.flush()
+        chunk = RetrievalChunk(
+            source_id=source.id,
+            processing_run_id=run.id,
+            chunk_type="paragraph",
+            ordinal=index,
+            text=text,
+            content_hash=f"c_flood_{run.id}_{index}",
+        )
+        corpus.session.add(chunk)
+        corpus.session.flush()
+        corpus.session.add(
+            RetrievalChunkEvidence(retrieval_chunk_id=chunk.id, evidence_id=evidence.id)
+        )
+        corpus.session.flush()
 
 
 def _restaurant(
@@ -97,7 +187,7 @@ def _restaurant(
         evidence_text=f"{name} 人均 {price:g}",
     )
     if flood:
-        _paragraphs(
+        _flood(
             corpus,
             source,
             run,
@@ -338,8 +428,12 @@ class TestEveryRequiredConstraintMustBeCitable:
     def test_a_cited_cuisine_does_not_prove_an_uncited_price(
         self, session, corpus
     ) -> None:
-        _restaurant(corpus, "小林日料", price=80, flood=FLOOD)
-        _restaurant(corpus, "大山日料", price=90)
+        _restaurant(corpus, "小林日料", price=80, flood=FLOOD_PARTIAL)
+        second = _restaurant(corpus, "大山日料", price=90)
+        # The cuisine sentence is retrievable on its own; the price sentence is not. So this
+        # match's cuisine can be cited through the chunk and its price cannot be cited at
+        # all -- which is the precondition, not an accident of the budget.
+        _chunk_for_claim(corpus, second, "cuisine", "大山日料 是日料")
         result, citations, answer = _answer(session, _plan_from(session))
         assert result.structured is not None
         _, starved_names = _partition(result, citations)
@@ -349,8 +443,8 @@ class TestEveryRequiredConstraintMustBeCitable:
             for m in result.structured.matches
             if m.entity.canonical_name == starved_names[0]
         )
-        # The precondition that makes this test meaningful: one required field IS citable
-        # for this match, so an "any citation for the entity" rule would have let it render.
+        # One required field IS citable for this match, so an "any citation for the entity"
+        # rule would have let it render.
         assert _citable(starved, citations, "cuisine") > 0
         assert _citable(starved, citations, "price_per_person") == 0
         assert starved_names[0] not in _listed(answer.content)
@@ -359,8 +453,9 @@ class TestEveryRequiredConstraintMustBeCitable:
         self, session, corpus
     ) -> None:
         """The withheld match's own source IS cited -- just not for the constraint."""
-        _restaurant(corpus, "小林日料", price=80, flood=FLOOD)
-        _restaurant(corpus, "大山日料", price=90)
+        _restaurant(corpus, "小林日料", price=80, flood=FLOOD_PARTIAL)
+        second = _restaurant(corpus, "大山日料", price=90)
+        _chunk_for_claim(corpus, second, "cuisine", "大山日料 是日料")
         result, citations, answer = _answer(session, _plan_from(session))
         assert result.structured is not None
         _, starved_names = _partition(result, citations)
@@ -419,8 +514,9 @@ class TestOptionalConstraintsStayOptional:
     def test_an_uncitable_optional_constraint_does_not_withhold_the_match(
         self, session, corpus
     ) -> None:
-        _restaurant(corpus, "小林日料", price=80, flood=FLOOD)
-        _restaurant(corpus, "大山日料", price=90)
+        _restaurant(corpus, "小林日料", price=80, flood=FLOOD_PARTIAL)
+        second = _restaurant(corpus, "大山日料", price=90)
+        _chunk_for_claim(corpus, second, "cuisine", "大山日料 是日料")
         plan = QueryPlan(
             raw_query=QUERY,
             scope="personal_required",

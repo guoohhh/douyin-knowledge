@@ -715,7 +715,7 @@ class TestExcerptsRemainCitationBacked:
         )
         excerpts = "\n".join(_section(answer.content, "相关原文："))
         uncited_chunks = [
-            c for c in result.chunks if c.chunk_id not in citations.by_chunk
+            c for c in result.chunks if not citations.can_cite_chunk(c.chunk_id)
         ]
         for chunk in uncited_chunks:
             assert chunk.text not in excerpts

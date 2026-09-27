@@ -372,11 +372,19 @@ class HybridRetriever:
         ).all()
         by_id = {chunk.id: (chunk, title) for chunk, title in rows}
 
+        # Ordered by time, then by id. A chunk may link many evidence units -- the real
+        # 手抓饼 ASR chunk links 56 across 2m22s -- and everything downstream that picks
+        # *which* of them to cite reads this list. Unordered, that pick was whatever order
+        # SQLite happened to return rows in for an ``IN (...)``, which is not a documented
+        # guarantee and in practice varied with insertion order: the same corpus projected
+        # a different evidence unit depending on the order rows were written. The id
+        # tiebreak covers units with no timestamp and units sharing one.
         evidence_map: dict[str, list[str]] = {}
         for chunk_id, evidence_id in self.session.execute(
-            select(RetrievalChunkEvidence.retrieval_chunk_id, RetrievalChunkEvidence.evidence_id).where(
-                RetrievalChunkEvidence.retrieval_chunk_id.in_(chunk_ids)
-            )
+            select(RetrievalChunkEvidence.retrieval_chunk_id, RetrievalChunkEvidence.evidence_id)
+            .join(EvidenceUnit, EvidenceUnit.id == RetrievalChunkEvidence.evidence_id)
+            .where(RetrievalChunkEvidence.retrieval_chunk_id.in_(chunk_ids))
+            .order_by(EvidenceUnit.start_ms, EvidenceUnit.end_ms, EvidenceUnit.id)
         ):
             evidence_map.setdefault(chunk_id, []).append(evidence_id)
 
