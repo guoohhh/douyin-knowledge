@@ -39,6 +39,16 @@ def get_chat_model(settings: Settings) -> ChatModel:
             model=settings.openai_chat_model or "gpt-4o-mini",
             api_key=settings.openai_api_key,
         )
+    if provider == "deepseek":
+        from douyin_knowledge.ai.adapters.deepseek_adapter import DeepSeekChatModel
+        if not settings.deepseek_api_key:
+            raise ConfigurationError("ai_provider=deepseek requires DK_DEEPSEEK_API_KEY")
+        return DeepSeekChatModel(
+            model=settings.deepseek_chat_model,
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            timeout_s=settings.deepseek_timeout_s,
+        )
     raise ConfigurationError(f"unknown ai_provider {provider!r}")
 
 
@@ -73,6 +83,16 @@ def get_structured_model(settings: Settings) -> StructuredModel:
         return OpenAIStructuredModel(
             model=settings.openai_chat_model or "gpt-4o-mini",
             api_key=settings.openai_api_key,
+        )
+    if provider == "deepseek":
+        from douyin_knowledge.ai.adapters.deepseek_adapter import DeepSeekStructuredModel
+        if not settings.deepseek_api_key:
+            raise ConfigurationError("ai_provider=deepseek requires DK_DEEPSEEK_API_KEY")
+        return DeepSeekStructuredModel(
+            model=settings.deepseek_chat_model,
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            timeout_s=settings.deepseek_timeout_s,
         )
     raise ConfigurationError(f"unknown ai_provider {provider!r}")
 

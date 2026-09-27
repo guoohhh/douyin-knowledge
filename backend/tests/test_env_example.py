@@ -83,6 +83,7 @@ def test_no_secret_has_a_value(env_lines: list[str]) -> None:
     active = _assignments(env_lines)
     for key in (
         "DK_OPENAI_API_KEY",
+        "DK_DEEPSEEK_API_KEY",
         "DK_DOUYIN_SIDECAR_API_KEY",
         "DK_DOUBAO_ASR_API_KEY",
     ):

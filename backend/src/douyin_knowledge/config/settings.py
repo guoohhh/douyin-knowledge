@@ -67,9 +67,9 @@ class Settings(BaseSettings):
     )
 
     # ---- ai providers ----------------------------------------------------
-    ai_provider: Literal["mock", "openai"] = Field(
+    ai_provider: Literal["mock", "openai", "deepseek"] = Field(
         default="mock",
-        description="Primary AI provider: 'mock' for testing, 'openai' for production",
+        description="Primary text AI provider: mock, OpenAI, or DeepSeek",
     )
     asr_provider: Literal["mock", "openai", "doubao"] | None = Field(
         default=None,
@@ -99,6 +99,11 @@ class Settings(BaseSettings):
         default="text-embedding-3-small",
         description="Model for vector embeddings",
     )
+
+    deepseek_api_key: str | None = Field(default=None, repr=False)
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_timeout_s: float = 120.0
+    deepseek_chat_model: str = "deepseek-flash"
 
     doubao_asr_api_key: str | None = Field(default=None, repr=False)
     doubao_asr_resource_id: str = "volc.seedasr.sauc.duration"
@@ -277,6 +282,8 @@ class Settings(BaseSettings):
             return "whisper-1"
         if kind == "ocr":
             return self.openai_vision_model or "gpt-4o"
+        if provider == "deepseek":
+            return self.deepseek_chat_model
         return self.openai_chat_model or "gpt-4o-mini"
 
     def uses_real_providers(self) -> bool:
@@ -292,6 +299,8 @@ class Settings(BaseSettings):
         missing: list[str] = []
         if "openai" in providers and not self.openai_api_key:
             missing.append("DK_OPENAI_API_KEY")
+        if "deepseek" in providers and not self.deepseek_api_key:
+            missing.append("DK_DEEPSEEK_API_KEY")
         if "doubao" in providers and not self.doubao_asr_api_key:
             missing.append("DK_DOUBAO_ASR_API_KEY")
         return missing
@@ -299,7 +308,12 @@ class Settings(BaseSettings):
     def redacted(self) -> dict[str, object]:
         """Settings dump safe for logs and the settings API. Secrets become booleans."""
         data = self.model_dump(mode="json")
-        for secret in ("openai_api_key", "douyin_sidecar_api_key", "doubao_asr_api_key"):
+        for secret in (
+            "openai_api_key",
+            "deepseek_api_key",
+            "douyin_sidecar_api_key",
+            "doubao_asr_api_key",
+        ):
             data[secret] = bool(getattr(self, secret))
         return data
 

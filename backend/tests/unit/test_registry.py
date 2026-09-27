@@ -6,7 +6,7 @@ import pytest
 
 from douyin_knowledge.ai.adapters.doubao_adapter import DoubaoASRProvider
 from douyin_knowledge.ai.adapters.mock_adapter import MockASRProvider
-from douyin_knowledge.ai.registry import get_asr_provider
+from douyin_knowledge.ai.registry import get_asr_provider, get_chat_model, get_structured_model
 from douyin_knowledge.capture.douyin_provider import DouyinCaptureProvider
 from douyin_knowledge.capture.fixture_provider import FixtureCaptureProvider
 from douyin_knowledge.capture.registry import get_capture_provider
@@ -93,3 +93,55 @@ def test_doubao_asr_requires_provider_specific_key() -> None:
 
 def test_mock_asr_registry_is_unchanged() -> None:
     assert isinstance(get_asr_provider(Settings(ai_provider="mock")), MockASRProvider)
+
+
+def test_deepseek_settings_are_read_and_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DK_AI_PROVIDER", "deepseek")
+    monkeypatch.setenv("DK_DEEPSEEK_API_KEY", "deepseek-secret")
+    monkeypatch.setenv("DK_DEEPSEEK_CHAT_MODEL", "deepseek-flash")
+    settings = Settings(_env_file=None)
+
+    assert settings.ai_provider == "deepseek"
+    assert settings.model_for_role("extraction") == "deepseek-flash"
+    assert settings.deepseek_api_key == "deepseek-secret"
+    assert settings.redacted()["deepseek_api_key"] is True
+    assert "deepseek-secret" not in repr(settings)
+    assert settings.missing_provider_credentials() == []
+
+
+def test_deepseek_requires_its_own_key() -> None:
+    settings = Settings(
+        ai_provider="deepseek",
+        asr_provider="mock",
+        embedding_provider="mock",
+        ocr_provider="mock",
+    )
+    assert settings.missing_provider_credentials() == ["DK_DEEPSEEK_API_KEY"]
+    with pytest.raises(ConfigurationError, match="DK_DEEPSEEK_API_KEY"):
+        get_chat_model(settings)
+    with pytest.raises(ConfigurationError, match="DK_DEEPSEEK_API_KEY"):
+        get_structured_model(settings)
+
+
+def test_registry_builds_distinct_deepseek_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
+    import douyin_knowledge.ai.adapters.deepseek_adapter as adapter
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(adapter, "OpenAI", FakeOpenAI)
+    settings = Settings(
+        ai_provider="deepseek",
+        asr_provider="mock",
+        embedding_provider="mock",
+        ocr_provider="mock",
+        deepseek_api_key="deepseek-secret",
+    )
+
+    chat = get_chat_model(settings)
+    structured = get_structured_model(settings)
+    assert isinstance(chat, adapter.DeepSeekChatModel)
+    assert isinstance(structured, adapter.DeepSeekStructuredModel)
+    assert chat.model == "deepseek-flash"
+    assert structured.model == "deepseek-flash"
