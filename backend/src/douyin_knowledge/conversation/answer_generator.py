@@ -45,6 +45,7 @@ from douyin_knowledge.observability.logging import get_logger
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from douyin_knowledge.ai.providers import ChatModel
     from douyin_knowledge.retrieval.retriever import RetrievalResult
+    from douyin_knowledge.retrieval.structured import StructuredMatch, StructuredResult
 
 logger = get_logger(__name__)
 
@@ -135,6 +136,56 @@ def _format_value(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
+
+
+def _partition_by_provable_qualification(
+    structured: StructuredResult, citations: CitationSet
+) -> tuple[list[StructuredMatch], list[StructuredMatch]]:
+    """Split matches into those this answer can prove qualified, and those it cannot.
+
+    Qualifying in the executor and being presentable as qualified are different
+    statements. ``1. 小林日料`` under the heading 符合条件 asserts that this entity meets the
+    user's hard constraints, and when the claim that cleared 人均 < 100 has no citation in
+    the current set, the answer has made that assertion on nothing -- the support lines
+    below it are silently missing the very constraint the user asked about.
+
+    So a match is renderable only when *every* claim-derived required constraint has at
+    least one citable satisfying claim. Every one, not any: a cited 菜系 line does not
+    prove the price, and accepting "some citation somewhere for this entity" would let an
+    unrelated excerpt from the same video stand in for the constraint that actually
+    decided qualification.
+
+    What is deliberately *not* required:
+
+    * Optional constraints (``required=False``). An optional constraint that cannot be
+      cited simply goes unrendered; demanding provenance for it would quietly promote it
+      to mandatory and drop results that legitimately qualified without it.
+    * Entity type and subtype narrowing. Those are our own annotations, not a creator's
+      assertion, so there is no creator provenance to demand.
+    * User state (DEC-018). 想去 is the user's own declaration; a user-state-only match
+      has no claim-derived required field at all, so this function returns it unchanged.
+
+    `StructuredResult` is not mutated. Retrieval diagnostics must keep reporting what the
+    executor actually found, so the withheld matches stay in `structured.matches` and only
+    the *rendering* is narrowed.
+    """
+    required_fields = structured.plan.required_claim_fields
+    renderable: list[StructuredMatch] = []
+    withheld: list[StructuredMatch] = []
+    for match in structured.matches:
+        provable = True
+        for field_name in required_fields:
+            support = match.supports.get(field_name)
+            # A missing support entry for a *required* field should be unreachable: the
+            # executor rejects a candidate that cannot satisfy one. Treated as unprovable
+            # rather than skipped, because the fallback for an unexpected shape has to be
+            # the safe direction, and `if field_name in match.supports` would have silently
+            # made an absent constraint count as satisfied.
+            if support is None or not citations.renderable_claims(support.satisfied_by):
+                provable = False
+                break
+        (renderable if provable else withheld).append(match)
+    return renderable, withheld
 
 
 @dataclass
@@ -239,13 +290,15 @@ class AnswerGenerator:
         structured = result.structured
         assert structured is not None  # guarded by the caller
 
+        renderable, withheld = _partition_by_provable_qualification(structured, citations)
+
         lines: list[str] = [
-            f"在你的收藏里找到 {len(structured.matches)} 个符合条件的结果。",
+            f"在你的收藏里找到 {len(renderable)} 个符合条件的结果。",
             "",
         ]
         conflicts: list[str] = []
 
-        for index, match in enumerate(structured.matches, start=1):
+        for index, match in enumerate(renderable, start=1):
             lines.append(f"{index}. {match.entity.canonical_name}")
             for field_name, support in match.supports.items():
                 label = _CONSTRAINT_LABELS.get(field_name, field_name)
@@ -313,6 +366,17 @@ class AnswerGenerator:
                     f"{'；'.join(rendered)}"
                 )
         lines.append("")
+
+        if withheld:
+            # A system statement about this answer's own limits, not a creator fact, so it
+            # needs no citation. Saying nothing would be the dishonest option in the other
+            # direction: the executor did find these, and silently dropping them would
+            # misreport the search as having found less than it did.
+            lines.append(
+                f"另有 {len(withheld)} 个结果在本次回答里拿不到可核查的出处，"
+                "因此没有列为符合条件的结果。"
+            )
+            lines.append("")
 
         if conflicts:
             lines.append("注意：以下信息在不同来源之间存在分歧，需要你自己判断：")
