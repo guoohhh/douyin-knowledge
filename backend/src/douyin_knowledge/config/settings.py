@@ -111,6 +111,16 @@ class Settings(BaseSettings):
         "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
     )
     doubao_asr_timeout_s: float = 300.0
+    # Long media is transcribed as several bounded WebSocket sessions, because one long
+    # session does not reliably finish: a real 841.8 s source failed twice (WebSocket 1006
+    # after a ping timeout; upstream 45000081 "Timeout waiting next packet") while 180/300/
+    # 480/600 s probes of the same audio all succeeded. These are operational knobs for a
+    # provider reliability problem, *not* a documented provider limit -- no such limit was
+    # found -- which is why the segment length is configurable rather than a constant.
+    doubao_asr_segment_s: float = Field(default=300.0, gt=0)
+    doubao_asr_overlap_s: float = Field(default=1.0, ge=0)
+    doubao_asr_max_attempts: int = Field(default=3, ge=1)
+    doubao_asr_retry_backoff_s: float = Field(default=2.0, ge=0)
 
     # ---- model roles (ARCHITECTURE.md section 16) -------------------------
     # Each role is an *override*: left unset, the name is derived from the active

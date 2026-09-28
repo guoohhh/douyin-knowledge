@@ -130,6 +130,10 @@ def get_asr_provider(settings: Settings) -> ASRProvider:
             resource_id=settings.doubao_asr_resource_id,
             endpoint=settings.doubao_asr_endpoint,
             timeout_s=settings.doubao_asr_timeout_s,
+            segment_s=settings.doubao_asr_segment_s,
+            overlap_s=settings.doubao_asr_overlap_s,
+            max_attempts=settings.doubao_asr_max_attempts,
+            retry_backoff_s=settings.doubao_asr_retry_backoff_s,
         )
     raise ConfigurationError(f"unknown asr_provider {provider!r}")
 

@@ -106,20 +106,26 @@ def test_empty_transcript_is_a_valid_response(tmp_path: Path) -> None:
     ],
 )
 def test_malformed_responses_fail_loudly(tmp_path: Path, response: dict[str, object]) -> None:
+    # sleep is injected because one of these cases -- the session that ends before the
+    # final package -- is a genuinely retryable truncation, so it now spends the retry
+    # budget before failing. The assertion is about failing loudly, not about waiting.
     provider = DoubaoASRProvider(
         api_key="not-a-real-key",
         transport=lambda _path, _language: [response],
+        sleep=lambda _seconds: None,
     )
     with pytest.raises(ASRFailed):
         provider.transcribe(str(_wav(tmp_path)))
 
 
 def test_api_error_preserves_non_secret_upstream_code(tmp_path: Path) -> None:
+    # An upstream non-zero code is retryable now, so sleep is injected to keep this fast.
     provider = DoubaoASRProvider(
         api_key="not-a-real-key",
         transport=lambda _path, _language: [
             _response(code=45000001, payload_msg={"message": "authentication failed"})
         ],
+        sleep=lambda _seconds: None,
     )
     with pytest.raises(ASRFailed) as info:
         provider.transcribe(str(_wav(tmp_path)))
@@ -128,14 +134,28 @@ def test_api_error_preserves_non_secret_upstream_code(tmp_path: Path) -> None:
 
 
 def test_network_failure_becomes_retryable_asr_failure(tmp_path: Path) -> None:
+    """A transport failure is retried to the budget and then surfaced, not swallowed.
+
+    `sleep` is injected because the real backoff is 2 s then 4 s, and six seconds of wall
+    clock in a unit suite is six seconds nobody will keep paying.
+    """
+    attempts = 0
+    slept: list[float] = []
+
     def failed_transport(_path: Path, _language: str | None) -> list[dict[str, object]]:
+        nonlocal attempts
+        attempts += 1
         raise OSError("connection reset")
 
-    provider = DoubaoASRProvider(api_key="not-a-real-key", transport=failed_transport)
+    provider = DoubaoASRProvider(
+        api_key="not-a-real-key", transport=failed_transport, sleep=slept.append
+    )
     with pytest.raises(ASRFailed) as info:
         provider.transcribe(str(_wav(tmp_path)))
     assert info.value.retryable is True
     assert info.value.context["error_type"] == "OSError"
+    assert attempts == 3
+    assert slept == [2.0, 4.0]
 
 
 def test_mp4_requires_ffmpeg_when_not_installed(tmp_path: Path) -> None:
