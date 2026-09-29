@@ -754,18 +754,21 @@ def _stitch_boundaries(owned: list[_OwnedUtterance]) -> list[TranscriptSegment]:
     if not candidates:
         return [item.utterance for item in owned]
 
-    merged: list[TranscriptSegment] = []
-    consumed: set[int] = set()
-    for index, item in enumerate(owned):
-        if index in consumed:
-            continue
-        partner = candidates.get(index)
-        if partner is None:
-            merged.append(item.utterance)
-            continue
-        right_index, overlap = partner
-        merged.append(_stitch(item, owned[right_index], overlap))
-        consumed.add(right_index)
+    # Decide everything before emitting anything. An earlier version walked `owned` in
+    # global order and suppressed the right half as it reached it, which quietly assumed the
+    # left half sorts first. Ownership is decided by midpoint, not by start, so a right-hand
+    # utterance that opens before the boundary and runs past it can start earlier than its
+    # left-hand partner while both are owned correctly -- and then the right half had already
+    # been published by the time the pair was discovered, so it appeared twice: once alone
+    # and once inside the stitch. Deciding first makes the result independent of order.
+    paired = {index for pair in candidates.items() for index in (pair[0], pair[1][0])}
+    merged = [
+        _stitch(owned[left_index], owned[right_index], overlap)
+        for left_index, (right_index, overlap) in candidates.items()
+    ]
+    merged.extend(
+        item.utterance for index, item in enumerate(owned) if index not in paired
+    )
     merged.sort(key=lambda item: (item.start_ms, item.end_ms, item.text))
     return merged
 
@@ -794,12 +797,18 @@ def _stitch_candidates(owned: list[_OwnedUtterance]) -> dict[int, tuple[int, int
             if overlap:
                 pairs.append((left_index, right_index, overlap))
 
-    lefts = Counter(pair[0] for pair in pairs)
-    rights = Counter(pair[1] for pair in pairs)
+    # Membership is counted across both roles at once, not per role. An index that is the
+    # left of one candidate and the right of another is just as ambiguous as one with two
+    # partners on the same side: whichever pair got accepted would be decided by iteration
+    # order, and the loser's text would be merged into a segment it does not belong to.
+    # Counting roles separately misses that case entirely.
+    membership = Counter(
+        index for left_index, right_index, _ in pairs for index in (left_index, right_index)
+    )
     return {
         left_index: (right_index, overlap)
         for left_index, right_index, overlap in pairs
-        if lefts[left_index] == 1 and rights[right_index] == 1
+        if membership[left_index] == 1 and membership[right_index] == 1
     }
 
 

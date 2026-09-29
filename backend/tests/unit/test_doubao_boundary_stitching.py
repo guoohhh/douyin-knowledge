@@ -26,11 +26,12 @@ from pathlib import Path
 
 import pytest
 
+from douyin_knowledge.ai.adapters import doubao_adapter
 from douyin_knowledge.ai.adapters.doubao_adapter import (
     MIN_STITCH_OVERLAP_CHARS,
     DoubaoASRProvider,
 )
-from douyin_knowledge.ai.providers import ASRResponse
+from douyin_knowledge.ai.providers import ASRResponse, TranscriptSegment
 
 #: The real prepared WAV's duration, which produced the 3-segment plan below.
 REAL_DURATION_MS = 841_721
@@ -174,6 +175,23 @@ def _three_sessions(
 #: is untouched without that filler ever being a stitch candidate.
 def _filler(text: str, start_ms: int, origin: int) -> dict[str, object]:
     return _local(text, (start_ms, start_ms + 2_000), origin)
+
+
+def _owned(
+    text: str, start_ms: int, end_ms: int, origin: int
+) -> doubao_adapter._OwnedUtterance:
+    """An already-owned utterance, for the one invariant no real transcript can produce."""
+    return doubao_adapter._OwnedUtterance(
+        TranscriptSegment(text=text, start_ms=start_ms, end_ms=end_ms), origin
+    )
+
+
+def _overlap(
+    left: doubao_adapter._OwnedUtterance, right: doubao_adapter._OwnedUtterance
+) -> int:
+    left_norm, _ = doubao_adapter._normalize(left.text)
+    right_norm, _ = doubao_adapter._normalize(right.text)
+    return doubao_adapter._overlap_chars(left_norm, right_norm)
 
 
 def _texts(response: ASRResponse) -> list[str]:
@@ -506,6 +524,122 @@ class TestMergedMetadataIsConservative:
         response = _transcribe(real_wav, replies)
         merged = next(s for s in response.segments if REPEAT_300 in s.text)
         assert merged.confidence is None
+
+
+class TestTheRightSideMayStartEarlier:
+    """A stitch must not depend on which half happens to sort first.
+
+    Nothing guarantees the left-session utterance starts earlier globally. Ownership is
+    decided by midpoint, not by start, so a right-hand utterance that opens *before* the
+    boundary and runs past it can start earlier than the left-hand one while both are still
+    owned correctly:
+
+        left  / origin 0   299.500-300.400   midpoint 299.950  -> segment 0's core
+        right / origin 1   299.000-301.100   midpoint 300.050  -> segment 1's core
+
+    Global sorting then puts `right` first, and a pass that emits as it walks has already
+    published `right` by the time it reaches `left` and discovers the pair.
+    """
+
+    #: Shares 到了十分价钱一分货 with RIGHT_300, so the existing exact rule matches.
+    LEFT = "而且我再说一遍到了十分价钱一分货"
+    LEFT_SPAN = (299_500, 300_400)
+    RIGHT = "到了十分价钱一分货的这个阶段你是否喜欢"
+    RIGHT_SPAN = (299_000, 301_100)
+    UNIQUE_LEFT = "而且我再说一遍"
+    UNIQUE_RIGHT = "的这个阶段你是否喜欢"
+
+    def _replies(self) -> list[list[dict[str, object]]]:
+        return _three_sessions(
+            [_filler("先说一下这家店的位置", 120_000, 0), _local(self.LEFT, self.LEFT_SPAN, 0)],
+            [_local(self.RIGHT, self.RIGHT_SPAN, 1)],
+            [_filler("最后总结一下", 700_000, 2)],
+        )
+
+    def test_the_right_half_really_does_sort_first(self, real_wav: Path) -> None:
+        """Guards the premise: if this stops holding the test below proves nothing."""
+        assert self.RIGHT_SPAN[0] < self.LEFT_SPAN[0]
+        left_mid = sum(self.LEFT_SPAN) // 2
+        right_mid = sum(self.RIGHT_SPAN) // 2
+        assert left_mid < 300_000 <= right_mid
+
+    def test_the_unstitched_right_half_is_not_also_emitted(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, self._replies())
+        assert self.RIGHT not in _texts(response)
+
+    def test_only_one_stitched_segment_results(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, self._replies())
+        touching = [text for text in _texts(response) if REPEAT_300 in text]
+        assert len(touching) == 1
+
+    def test_the_repeated_phrase_occurs_once(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, self._replies())
+        assert response.full_text.count(REPEAT_300) == 1
+
+    def test_both_unique_sides_survive(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, self._replies())
+        assert self.UNIQUE_LEFT in response.full_text
+        assert self.UNIQUE_RIGHT in response.full_text
+
+    def test_the_span_is_the_union(self, real_wav: Path) -> None:
+        """Here the right half supplies *both* ends: it opens earlier and closes later.
+
+        299.000-301.100, not 299.500-300.400. The left half is entirely inside it, which is
+        exactly the shape that breaks any rule keyed on which utterance came first.
+        """
+        response = _transcribe(real_wav, self._replies())
+        expected = (
+            min(self.LEFT_SPAN[0], self.RIGHT_SPAN[0]),
+            max(self.LEFT_SPAN[1], self.RIGHT_SPAN[1]),
+        )
+        assert expected == (self.RIGHT_SPAN[0], self.RIGHT_SPAN[1])
+        assert expected in _spans(response)
+
+    def test_the_segment_count_drops_by_exactly_one(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, self._replies())
+        assert len(response.segments) == 3
+
+
+class TestPairMembershipIsExclusive:
+    """An index may take part in at most one accepted pair, in any role."""
+
+    def test_a_shared_right_half_leaves_everything_unresolved(self, real_wav: Path) -> None:
+        """Two left utterances both matching one right utterance.
+
+        Already covered from the left side; asserted here from the right to pin that
+        exclusivity is about pair *membership*, not about a dict key happening to be unique.
+        """
+        first = "我再说一遍到了十分价钱一分货"
+        second = "换个说法到了十分价钱一分货"
+        replies = _three_sessions(
+            [
+                _local(first, (296_000, 300_200), 0),
+                _local(second, (297_000, 300_400), 0),
+            ],
+            [_local(RIGHT_300, RIGHT_300_SPAN, 1)],
+            [_filler("最后总结一下", 700_000, 2)],
+        )
+        response = _transcribe(real_wav, replies)
+        assert first in _texts(response)
+        assert second in _texts(response)
+        assert RIGHT_300 in _texts(response)
+
+    def test_an_index_that_is_both_a_left_and_a_right_blocks_both_pairs(self) -> None:
+        """A chain A-B-C, where B is B(right of A) and B(left of C).
+
+        Tested against `_stitch_candidates` rather than through `transcribe()` because this
+        shape is not reachable from a plausible transcript: to be a right at one seam and a
+        left at the next, B would have to intersect both, i.e. span ~300 s as a single
+        utterance. It is guarded anyway because counting the two roles separately accepts it
+        -- B appears once as a left and once as a right -- and then which pair wins is
+        iteration order, with B's text merged into a segment it only half belongs to.
+        """
+        a = _owned("我再说一遍到了十分价钱一分货", 296_000, 300_200, 0)
+        b = _owned("到了十分价钱一分货家网红的猫头鹰", 299_000, 601_000, 1)
+        c = _owned("家网红的猫头鹰泡芙非常的近", 599_080, 602_600, 2)
+        assert _overlap(a, b) >= MIN_STITCH_OVERLAP_CHARS
+        assert _overlap(b, c) >= MIN_STITCH_OVERLAP_CHARS
+        assert doubao_adapter._stitch_candidates([a, b, c]) == {}
 
 
 class TestAtRealTranscriptScale:
