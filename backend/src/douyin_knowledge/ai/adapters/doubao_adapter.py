@@ -41,6 +41,7 @@ import tempfile
 import time
 import uuid
 import wave
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -71,9 +72,38 @@ DEFAULT_OVERLAP_S = 1.0
 Speech does not stop at arithmetic boundaries. Without this, a segment cut mid-word gives
 the recogniser half a syllable of context and it guesses -- and the word that gets
 mangled is the one at the boundary, which is as likely to be the answer to a question as
-anything else. One second is the narrowest value the boundary tests hold at; the overlap
-is context only and never contributes a returned utterance, so widening it costs upload
-bytes and model time rather than correctness.
+anything else. One second is the narrowest value the boundary tests hold at.
+
+An earlier version of this note claimed the overlap is context only and never contributes
+a returned utterance. The real 841.7 s run disproved that: the provider regroups speech
+into different utterances depending on how much context follows, so at each boundary both
+neighbours return an utterance covering the seam, each containing unique speech. See
+`MIN_STITCH_OVERLAP_CHARS` and `_stitch_boundaries`.
+"""
+
+MIN_STITCH_OVERLAP_CHARS = 7
+"""Normalized characters two boundary utterances must share before they are stitched.
+
+A conservative operational threshold, not a linguistic guarantee. It is set by the real
+evidence: the 600 s boundary of the validated run repeated exactly 7 characters
+(家网红的猫头鹰) and the 300 s boundary repeated 9 (到了十分价钱一分货), so 7 is the
+narrowest value that resolves both real cases.
+
+Shorter matches are not reliable evidence of duplication -- a few common characters recur
+constantly in speech -- and the cost of being wrong is asymmetric. Failing to stitch leaves
+visible duplication that a reader can see and a later pass can revisit; stitching wrongly
+deletes speech that was really said, silently. So this biases toward false negatives, and
+should only be lowered against real corpus data showing missed duplicates.
+"""
+
+_MAX_BOUNDARY_DRIFT_MS = 5_000
+"""How far from a production boundary a stitch candidate may sit.
+
+Audio overlap is 1 s, but utterance boundaries drift further than the audio does: the real
+pairs intersected by 1.560 s and 1.750 s while individual utterances extended up to 8 s
+past the cut. This bounds the search to the seam without assuming the drift equals the
+overlap. Intersection and ownership already do most of the narrowing; this is the backstop
+that keeps "near the boundary" from quietly meaning "anywhere".
 """
 
 DEFAULT_MAX_ATTEMPTS = 3
@@ -614,12 +644,19 @@ def _reconcile(
     midpoint falls in exactly one of them, and the segment owning that interval is the one
     that keeps it. No text comparison, no threshold, stable under any punctuation the
     provider chooses.
+
+    Ownership is necessary but not sufficient. It assumes each piece of speech belongs to
+    one utterance whose position is stable across sessions, and the real 841.7 s run showed
+    it is not: the provider regroups speech into different utterances depending on how much
+    context follows it, so at each boundary the two neighbours return *different* utterances
+    that share a repeated phrase, each legitimately owned, each containing unique speech.
+    Ownership keeps both, correctly, and `_stitch_boundaries` then removes the repetition.
     """
-    kept: list[TranscriptSegment] = []
+    kept: list[_OwnedUtterance] = []
     for segment, utterances in zip(plan, per_segment, strict=True):
         is_last = segment.index == len(plan) - 1
         kept.extend(
-            utterance
+            _OwnedUtterance(utterance, segment.index)
             for utterance in utterances
             if segment.owns(utterance.start_ms, utterance.end_ms, is_last=is_last)
         )
@@ -628,7 +665,174 @@ def _reconcile(
     # downstream consumer of `segments[0]` should have to rely on, and an utterance that
     # starts inside the overlap can precede the previous segment's last owned utterance.
     kept.sort(key=lambda item: (item.start_ms, item.end_ms, item.text))
-    return kept
+    return _stitch_boundaries(kept)
+
+
+@dataclass(frozen=True)
+class _OwnedUtterance:
+    """An utterance plus which provider session produced it.
+
+    Origin is what makes the stitching pass boundary-local rather than a transcript-wide
+    deduplicator. Without it, two ordinary consecutive utterances from the *same* session
+    that happen to share a phrase look identical to a genuine cross-session duplicate, and
+    merging those would delete speech that really was said twice.
+    """
+
+    utterance: TranscriptSegment
+    origin: int
+
+    @property
+    def start_ms(self) -> int:
+        return self.utterance.start_ms
+
+    @property
+    def end_ms(self) -> int:
+        return self.utterance.end_ms
+
+    @property
+    def text(self) -> str:
+        return self.utterance.text
+
+
+def _normalize(text: str) -> tuple[str, list[int]]:
+    """Comparable characters, plus where each one came from in the raw string.
+
+    Returns the normalized text and a parallel list mapping each normalized index back to
+    its index in `text`. The mapping is the point: the two sides of a boundary are punctuated
+    differently, so a match found in normalized space has to be translated back to a raw
+    offset. Slicing the raw string by a normalized character count instead is the obvious
+    shortcut and it eats real characters whenever the counts differ.
+    """
+    kept: list[str] = []
+    origins: list[int] = []
+    for index, char in enumerate(text):
+        if not char.isalnum():  # Drops whitespace and punctuation, keeps CJK and digits.
+            continue
+        kept.append(char)
+        origins.append(index)
+    return "".join(kept), origins
+
+
+def _overlap_chars(left_norm: str, right_norm: str) -> int:
+    """Longest normalized suffix of `left_norm` that is a prefix of `right_norm`.
+
+    Longest rather than shortest: the repeated phrase is the whole shared region, and
+    removing less than all of it leaves part of the duplicate behind.
+    """
+    limit = min(len(left_norm), len(right_norm))
+    for length in range(limit, MIN_STITCH_OVERLAP_CHARS - 1, -1):
+        if left_norm[-length:] == right_norm[:length]:
+            return length
+    return 0
+
+
+def _intersects(left: _OwnedUtterance, right: _OwnedUtterance) -> bool:
+    return left.end_ms > right.start_ms and right.end_ms > left.start_ms
+
+
+def _stitch_boundaries(owned: list[_OwnedUtterance]) -> list[TranscriptSegment]:
+    """Merge duplicated speech across session boundaries, conservatively.
+
+    The invariant that forces this pass: audio overlap != ASR utterance-boundary overlap.
+    Adjacent sessions hear overlapping audio, but the provider groups it into utterances
+    whose start and end move by seconds, so a boundary produces two utterances that share a
+    phrase in the middle while each holds unique speech at its far end.
+
+    Whole-utterance winner rules are therefore all wrong -- later-wins, earlier-wins,
+    midpoint, edge distance. Both real examples have unique speech on *both* sides, so every
+    one of those rules deletes something that was said. The fix is to keep both texts and
+    remove only the repetition, producing one slightly broader evidence atom spanning the
+    union of the two intervals. Slightly broader is safe; a fabricated timestamp for an
+    artificially trimmed fragment is not.
+
+    A pair is only considered when all of these hold, and any doubt leaves it alone:
+    adjacent sessions, near their shared boundary, intersecting in time, and a normalized
+    left-suffix/right-prefix match of at least `MIN_STITCH_OVERLAP_CHARS`. No fuzzy
+    similarity, no transcript-wide comparison.
+    """
+    candidates = _stitch_candidates(owned)
+    if not candidates:
+        return [item.utterance for item in owned]
+
+    merged: list[TranscriptSegment] = []
+    consumed: set[int] = set()
+    for index, item in enumerate(owned):
+        if index in consumed:
+            continue
+        partner = candidates.get(index)
+        if partner is None:
+            merged.append(item.utterance)
+            continue
+        right_index, overlap = partner
+        merged.append(_stitch(item, owned[right_index], overlap))
+        consumed.add(right_index)
+    merged.sort(key=lambda item: (item.start_ms, item.end_ms, item.text))
+    return merged
+
+
+def _stitch_candidates(owned: list[_OwnedUtterance]) -> dict[int, tuple[int, int]]:
+    """Unambiguous left index -> (right index, normalized overlap length).
+
+    Ambiguity is dropped rather than resolved. If one utterance could stitch to two
+    different partners, choosing between them is a guess, and a wrong guess deletes real
+    speech -- so both candidates are discarded and the duplication stays visible.
+    """
+    pairs: list[tuple[int, int, int]] = []
+    for left_index, left in enumerate(owned):
+        left_norm, _ = _normalize(left.text)
+        if len(left_norm) < MIN_STITCH_OVERLAP_CHARS:
+            continue
+        for right_index, right in enumerate(owned):
+            if right.origin != left.origin + 1:
+                continue  # Same session, or sessions that never shared audio.
+            if not _intersects(left, right):
+                continue  # No shared audio means the phrase was said twice, not heard twice.
+            if abs(right.start_ms - left.end_ms) > _MAX_BOUNDARY_DRIFT_MS:
+                continue  # Too far from the seam to be a boundary artefact.
+            right_norm, _ = _normalize(right.text)
+            overlap = _overlap_chars(left_norm, right_norm)
+            if overlap:
+                pairs.append((left_index, right_index, overlap))
+
+    lefts = Counter(pair[0] for pair in pairs)
+    rights = Counter(pair[1] for pair in pairs)
+    return {
+        left_index: (right_index, overlap)
+        for left_index, right_index, overlap in pairs
+        if lefts[left_index] == 1 and rights[right_index] == 1
+    }
+
+
+def _stitch(
+    left: _OwnedUtterance, right: _OwnedUtterance, overlap: int
+) -> TranscriptSegment:
+    """One segment holding both texts once, spanning the union of both intervals."""
+    right_norm, origins = _normalize(right.text)
+    # Translate the normalized match length into a raw offset. `origins[overlap]` is where
+    # the first non-duplicated normalized character sits in the raw string; anything before
+    # it is duplicate text or the punctuation between duplicate characters.
+    cut = origins[overlap] if overlap < len(right_norm) else len(right.text)
+    remainder = right.text[cut:]
+    return TranscriptSegment(
+        text=left.text + remainder,
+        start_ms=min(left.start_ms, right.start_ms),
+        end_ms=max(left.end_ms, right.end_ms),
+        # The merged text spans both halves, so it is only as reliable as the weaker half.
+        # A missing confidence stays missing: inventing one for half the text would make the
+        # merged segment look better attested than it is.
+        confidence=(
+            min(left.utterance.confidence, right.utterance.confidence)
+            if left.utterance.confidence is not None and right.utterance.confidence is not None
+            else None
+        ),
+        # Agreement only. Two sessions disagreeing about who spoke is not grounds for
+        # picking one, and a wrong speaker id is worse than no speaker id.
+        speaker_id=(
+            left.utterance.speaker_id
+            if left.utterance.speaker_id == right.utterance.speaker_id
+            else None
+        ),
+    )
 
 
 def _wav_duration_ms(path: Path) -> int | None:
