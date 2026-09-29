@@ -340,11 +340,11 @@ This is the intended long-term structure. Sections marked [seeded] already have 
     - archive when support disappears
     - known gap: indexed but not retrieval surface
 15. **Stage 3D long-media reliability** [seeded]
-    - real 841.8 s failure
-    - provider-side nondeterminism
-    - segmented sessions
-    - overlap ownership
-    - timestamp reconciliation
+    - real 841.721 s validation source
+    - provider-side long-session nondeterminism
+    - segmented provider sessions — REAL VALIDATED
+    - global timestamp restoration — REAL VALIDATED
+    - cross-boundary reconciliation — midpoint-only rule DISPROVEN / diagnostic ongoing
     - bounded retry and safe diagnostics
 16. **Testing and real-account E2E methodology** [partial]
     - fixtures vs contract tests vs live sidecar tests
@@ -392,8 +392,8 @@ This section is an index. Each story should later become a full narrative chapte
 | Evidence budget can delete the answer | Redundant metadata chunks can crowd out long ASR evidence despite correct retrieval | e6dd0ba82e35; test_grounded_answer_contract.py |
 | Qualification needs renderable provenance | Executor qualification is not enough; every required claim-derived condition must be citable before saying a result qualifies | 2f6be242e21d; test_provable_qualification.py |
 | Chunk is not citation | One ASR chunk may map to dozens of evidence units; selecting one arbitrary unit can cite unrelated speech | e6afd9f8d173; test_evidence_projection.py |
-| Long-media WebSocket reliability | 841.8 s media failed nondeterministically despite healthy media and successful shorter probes | b08efb04f975; test_doubao_long_media_asr.py |
-| Segmented ASR invariant | Core intervals tile exactly; overlap is context only; midpoint ownership deduplicates; timestamps stay on original media timeline | b08efb04f975; doubao_adapter.py |
+| Long-media WebSocket reliability | A real 841.721 s prepared WAV completed successfully when split into three bounded Doubao sessions; all sessions succeeded with zero retries | b08efb04f975; real Stage 3D validation |
+| Segmented ASR status | Bounded provider sessions and restoration to the original media timeline are REAL VALIDATED. Midpoint-only overlap reconciliation is DISPROVEN as sufficient because adjacent sessions can segment the same underlying speech into different utterance boundaries | b08efb04f975; real Stage 3D boundary diagnostics |
 | Wiki is compiled state | Policy/current-run/grounding changes can remove support and archive pages without deleting history | Wiki builder + DEC-019 |
 
 ---
@@ -748,70 +748,196 @@ Primary tests:
 
 ## 13. Seed story: long-media ASR reliability is a provider-adapter concern
 
-### Observed real failure
+### Original blocker
 
-At b08, the repository records a real 841.8-second source that failed twice in different ways:
+Before segmentation, the repository recorded a real long-media source that failed nondeterministically in one full-length WebSocket session:
 
 - one attempt ended with WebSocket 1006 / keepalive ping timeout after only part of the audio/result stream progressed;
 - another sent the full audio but ended with upstream code 45000081, “Timeout waiting next packet”.
 
-The same healthy media decoded through EOF with ffmpeg. Controlled 180/300/480/600-second probes succeeded.
+The media itself was healthy and ffmpeg decoded it through EOF. Shorter controlled probes succeeded. The correct conclusion was therefore not “Doubao has an 841-second hard limit”; the evidence only justified that one long provider session was not reliable enough for this pipeline.
 
-The code explicitly avoids turning this evidence into a fictional “provider maximum duration”. The failure was treated as provider-side and nondeterministic.
+### Production segmentation at b08
 
-### First version
+The latest real validation at:
 
-The original Doubao adapter converted media once to 16 kHz mono WAV and sent the whole prepared audio through one WebSocket session.
+~~~text
+b08efb04f975641b41c0a368eba0a35bf88245bd
+~~~
 
-That design remains the short-media path.
+used:
 
-### Final segmented path
+~~~text
+source: src_a0e0631c136e141dff7008
+prepared WAV: 841.721 s
 
-Long media is planned into 300-second **core** intervals with 1-second contextual overlap.
+production segmentation:
+0: core 0–300 / coverage 0–301
+1: core 300–600 / coverage 299–601
+2: core 600–841.721 / coverage 599–841.721
+~~~
 
-Important distinction:
+Real result:
 
-- coverage interval = audio sent to the provider;
-- core interval = time the segment owns.
+~~~text
+all 3 Doubao sessions succeeded
+retries = 0
+151 TranscriptSegments
+4734 transcript chars
+timestamps 0.680–837.590 s
+no timestamp reset
+no out-of-range timestamps
+~~~
 
-Provider-local timestamps are offset by coverage_start_ms so every downstream timestamp remains relative to the original media.
+This is enough to mark three claims as **REAL VALIDATED**:
 
-### Why not fuzzy text deduplication?
+1. segmented provider sessions solve the observed long-session reliability blocker for this real source;
+2. restoring provider-local timestamps onto the original media timeline works in the production segmentation path;
+3. the bounded-session architecture is operationally sound enough to continue Stage 3D validation.
 
-Both neighboring segments hear the overlap and may transcribe the same speech differently. Punctuation or wording can differ.
+It is **not** evidence that cross-boundary transcript reconciliation is solved.
 
-Instead, ownership is temporal:
+### The midpoint-only reconciliation hypothesis failed real validation
 
-> keep an utterance if its midpoint falls in the segment's core interval.
+The implementation at b08 uses overlapping coverage and assigns each returned utterance to one segment according to the midpoint of that utterance relative to non-overlapping core intervals.
 
-Core intervals tile the media exactly, so every point has one owner. Overlap is only recognition context.
+Unit tests established useful arithmetic properties:
 
-### Failure semantics
+- core intervals tile the media;
+- coverage intervals overlap only for context;
+- a timestamp has one temporal owner under the midpoint rule;
+- provider-local timestamps can be shifted back to the original media timeline.
 
-Each segment has a bounded retry budget with deterministic backoff.
+Those properties are true, but the real run exposed a stronger problem that the tests did not model.
 
-If one segment exhausts retries, the whole transcribe() fails.
+Around the 300-second boundary:
 
-Returning 11 minutes of a 14-minute transcript as if it were complete would create silent holes in the user's knowledge base, which is worse than a visible processing failure.
+~~~text
+295.640–300.880
+299.320–308.400
+
+both repeat: “到了十分价钱一分货”
+~~~
+
+Around the 600-second boundary:
+
+~~~text
+593.190–600.830
+599.080–602.600
+
+both repeat: “家网红的猫头鹰”
+~~~
+
+The adjacent provider sessions did not return the same speech with the same utterance boundaries. The recognizer segmented the shared underlying audio differently in each session.
+
+Therefore:
+
+> audio overlap != ASR utterance-boundary overlap
+
+A temporal midpoint rule can give every **returned utterance** one owner, but it cannot guarantee that two differently bounded utterances are not two renderings of the same underlying speech.
+
+This disproves the previous retrospective wording that “midpoint ownership deduplicates”.
+
+### Current status
+
+~~~text
+segmented sessions             REAL VALIDATED
+global timestamp restoration   REAL VALIDATED
+bounded-session architecture   REAL VALIDATED
+midpoint-only reconciliation   BLOCKED / insufficient
+downstream EvidenceUnit run    NOT RUN
+~~~
+
+The downstream EvidenceUnit run was deliberately not continued after this validation because the transcript still contained cross-boundary duplicate speech. Persisting that output would turn a known reconciliation defect into durable evidence.
+
+### What we are doing next
+
+Do **not** promote a new deduplication algorithm into this retrospective yet.
+
+The current work is a narrow diagnostic intended to identify the weakest deterministic cross-boundary rule that removes genuine duplicates without deleting legitimate repeated speech.
+
+The important engineering lesson at this point is methodological:
+
+> Do not confuse a property of the segmentation geometry with a property of an external recognizer's semantic segmentation.
+
+The overlap/core arithmetic is deterministic. ASR utterance boundaries are not.
+
+### Failure semantics that remain valid
+
+Each provider segment still has a bounded retry budget with deterministic backoff.
+
+If one segment exhausts retries, the whole transcription must fail rather than return a silently incomplete long-media transcript.
+
+Returning 11 minutes of a 14-minute video as though it were complete would create invisible gaps in the knowledge base, which is worse than a visible processing failure.
 
 ### Security detail
 
 Transport exception objects may carry requests containing X-Api-Key. Failure context therefore whitelists known-safe attributes instead of serializing exception/request objects.
 
-### Invariants
+### Accepted invariants at this validation point
 
-1. Segmentation is invisible to downstream callers.
-2. Evidence timestamps always address the original media timeline.
-3. Overlap may improve recognition but may never duplicate durable evidence.
-4. Partial long-media transcription never masquerades as complete.
-5. Retry is bounded and only for transient classes.
+1. Long media may be split into bounded provider sessions without exposing segmentation to downstream interfaces.
+2. Provider-local timestamps must be restored to the original media timeline before any durable evidence is written.
+3. A bounded session policy is an operational reliability control, not a claim about a documented provider duration limit.
+4. Partial long-media transcription must never masquerade as complete.
+5. Retry is bounded and reserved for transient classes.
 6. Diagnostics must preserve useful provider codes without leaking secrets.
+7. Cross-boundary duplicate removal is **not yet an accepted invariant**; midpoint-only ownership is insufficient on real ASR output.
+8. No downstream EvidenceUnit should be persisted from a validation run once transcript reconciliation is known to be incorrect.
 
 Evidence:
 
 - b08efb04f975641b41c0a368eba0a35bf88245bd
-- ai/adapters/doubao_adapter.py
-- tests/unit/test_doubao_long_media_asr.py
+- backend/src/douyin_knowledge/ai/adapters/doubao_adapter.py
+- backend/tests/unit/test_doubao_long_media_asr.py
+- real Stage 3D validation of src_a0e0631c136e141dff7008
+
+
+---
+
+
+## 13A. Confirmed V1 product decisions — decision record only
+
+These are now confirmed product decisions. This section intentionally does **not** describe them as implemented or historically validated yet. Implementation status and engineering history should be added only when code/commit/real-run evidence exists.
+
+### Capture Scope
+
+V1 should support:
+
+~~~text
+default 收藏 → 视频
+one named collection
+multiple named collections
+~~~
+
+This expands the product requirement beyond the currently documented Stage 3 named-collection validation path. Do not infer from this decision that the default 收藏 path is already supported by the current DTK integration.
+
+### Daily incremental sync
+
+V1 product behavior:
+
+~~~text
+default local schedule: 03:00
+missed run: catch up on next application startup
+manual sync: always available
+~~~
+
+This is a product scheduling contract, not yet an implementation-history claim in this retrospective.
+
+### Provider configuration
+
+V1 should allow the user to choose independently:
+
+~~~text
+main AI provider / model
+ASR provider / model
+~~~
+
+Security requirement:
+
+> Secret keys must never be echoed to the user or logged as plaintext.
+
+The current architecture already has provider-role separation and secret-aware configuration patterns, but this subsection records only the newly confirmed V1 product decision. Detailed implementation history should be added later from code and tests.
 
 ---
 
@@ -954,9 +1080,9 @@ Talk about ClaimEvidence vs semantic support, Chinese ASR normalization, numeric
 
 Talk about a chunk linked to 56 evidence units, arbitrary single evidence projection, multi-evidence windows and the distinction between retrieval granularity and citation granularity.
 
-### Story E — “Long audio was not a duration-limit problem”
+### Story E — “Long audio required separating transport reliability from transcript reconciliation”
 
-Talk about evidence from two different provider failures, successful shorter probes, resisting an unsupported causal claim, bounded segmentation, temporal overlap ownership and fail-closed partial transcription.
+Talk about the original nondeterministic long-session failures, successful bounded-session validation on the real 841.721 s source, correct global timestamp restoration, and the later discovery that temporal midpoint ownership was insufficient because adjacent ASR sessions chose different utterance boundaries for the same speech. The key lesson is that solving provider-session reliability did not automatically solve semantic cross-boundary reconciliation.
 
 ### Story F — “Using two coding agents as an engineering experiment”
 
