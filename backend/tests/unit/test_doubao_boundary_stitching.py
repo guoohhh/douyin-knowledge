@@ -24,6 +24,8 @@ from __future__ import annotations
 import wave
 from pathlib import Path
 
+import pytest
+
 from douyin_knowledge.ai.adapters.doubao_adapter import (
     MIN_STITCH_OVERLAP_CHARS,
     DoubaoASRProvider,
@@ -142,11 +144,22 @@ def _provider(replies: list[list[dict[str, object]]], **overrides: object) -> Do
     return DoubaoASRProvider(**kwargs)  # type: ignore[arg-type]
 
 
+@pytest.fixture(scope="session")
+def real_wav(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One shared 841.721 s WAV for the whole module.
+
+    Session-scoped because it is 26.9 MB of silence and every test here wants the identical
+    file: only the scripted transport replies differ. Writing it per test filled the disk and
+    made pytest's own tmp_path allocation fail, which surfaces as unrelated errors in other
+    modules rather than as anything pointing here.
+    """
+    return _wav(tmp_path_factory.mktemp("boundary") / "real.wav", REAL_DURATION_MS)
+
+
 def _transcribe(
-    tmp_path: Path, replies: list[list[dict[str, object]]], **overrides: object
+    real_wav: Path, replies: list[list[dict[str, object]]], **overrides: object
 ) -> ASRResponse:
-    wav = _wav(tmp_path / "real.wav", REAL_DURATION_MS)
-    return _provider(replies, **overrides).transcribe(str(wav))
+    return _provider(replies, **overrides).transcribe(str(real_wav))
 
 
 def _three_sessions(
@@ -192,59 +205,59 @@ def _real_600_boundary() -> list[list[dict[str, object]]]:
 class TestTheReal300SecondBoundary:
     """295.640-300.880 against 299.320-308.400, sharing 到了十分价钱一分货."""
 
-    def test_the_repeated_phrase_appears_once(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, _real_300_boundary())
+    def test_the_repeated_phrase_appears_once(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, _real_300_boundary())
         assert response.full_text.count(REPEAT_300) == 1
 
-    def test_the_left_unique_speech_survives(self, tmp_path: Path) -> None:
+    def test_the_left_unique_speech_survives(self, real_wav: Path) -> None:
         """A later-session-wins rule would delete this. It is real speech."""
-        response = _transcribe(tmp_path, _real_300_boundary())
+        response = _transcribe(real_wav, _real_300_boundary())
         assert UNIQUE_300_LEFT in response.full_text
 
-    def test_the_right_unique_speech_survives(self, tmp_path: Path) -> None:
+    def test_the_right_unique_speech_survives(self, real_wav: Path) -> None:
         """An earlier-session-wins rule would delete this. It is also real speech."""
-        response = _transcribe(tmp_path, _real_300_boundary())
+        response = _transcribe(real_wav, _real_300_boundary())
         assert UNIQUE_300_RIGHT in response.full_text
 
-    def test_the_pair_becomes_one_segment(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, _real_300_boundary())
+    def test_the_pair_becomes_one_segment(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, _real_300_boundary())
         stitched = [text for text in _texts(response) if REPEAT_300 in text]
         assert len(stitched) == 1
 
     def test_the_stitched_text_is_left_plus_the_unduplicated_right(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
-        response = _transcribe(tmp_path, _real_300_boundary())
+        response = _transcribe(real_wav, _real_300_boundary())
         expected = LEFT_300 + RIGHT_300[len(REPEAT_300) :]
         assert expected in _texts(response)
 
-    def test_the_span_is_the_union_of_the_two_real_intervals(self, tmp_path: Path) -> None:
+    def test_the_span_is_the_union_of_the_two_real_intervals(self, real_wav: Path) -> None:
         """295.640-308.400: no invented timestamp for a trimmed fragment."""
-        response = _transcribe(tmp_path, _real_300_boundary())
+        response = _transcribe(real_wav, _real_300_boundary())
         assert (LEFT_300_SPAN[0], RIGHT_300_SPAN[1]) in _spans(response)
 
 
 class TestTheReal600SecondBoundary:
     """593.190-600.830 against 599.080-602.600, sharing 家网红的猫头鹰 -- exactly 7 chars."""
 
-    def test_the_repeated_phrase_appears_once(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, _real_600_boundary())
+    def test_the_repeated_phrase_appears_once(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, _real_600_boundary())
         assert response.full_text.count(REPEAT_600) == 1
 
-    def test_both_unique_sides_survive(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, _real_600_boundary())
+    def test_both_unique_sides_survive(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, _real_600_boundary())
         assert UNIQUE_600_LEFT in response.full_text
         assert UNIQUE_600_RIGHT in response.full_text
 
     def test_the_stitched_text_is_left_plus_the_unduplicated_right(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
-        response = _transcribe(tmp_path, _real_600_boundary())
+        response = _transcribe(real_wav, _real_600_boundary())
         expected = LEFT_600 + RIGHT_600[len(REPEAT_600) :]
         assert expected in _texts(response)
 
-    def test_the_span_is_the_union_of_the_two_real_intervals(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, _real_600_boundary())
+    def test_the_span_is_the_union_of_the_two_real_intervals(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, _real_600_boundary())
         assert (LEFT_600_SPAN[0], RIGHT_600_SPAN[1]) in _spans(response)
 
     def test_a_seven_character_overlap_is_exactly_at_the_threshold(self) -> None:
@@ -256,7 +269,7 @@ class TestStitchingIsBoundaryLocal:
     """The stitcher is not a deduplicator. It may only look where overlap is produced."""
 
     def test_neighbours_from_the_same_session_are_never_stitched(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
         """Two ordinary consecutive utterances that happen to share a phrase.
 
@@ -276,12 +289,12 @@ class TestStitchingIsBoundaryLocal:
             [_filler("中间的内容", 400_000, 1)],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert LEFT_600 in _texts(response)
         assert RIGHT_600 in _texts(response)
         assert response.full_text.count(REPEAT_600) == 2
 
-    def test_non_adjacent_sessions_are_never_stitched(self, tmp_path: Path) -> None:
+    def test_non_adjacent_sessions_are_never_stitched(self, real_wav: Path) -> None:
         """Minute 2 cannot stitch to minute 11 merely because a phrase recurs.
 
         Sessions 0 and 2 share no audio at all, so any text they share is coincidence or
@@ -296,11 +309,11 @@ class TestStitchingIsBoundaryLocal:
             [_filler("中间的内容", 400_000, 1)],
             [_local(RIGHT_600, (700_000, 703_520), 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert response.full_text.count(REPEAT_600) == 2
 
     def test_an_identical_phrase_far_from_the_boundary_is_never_stitched(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
         """Adjacent sessions, but the two utterances are minutes apart in global time."""
         replies = _three_sessions(
@@ -308,14 +321,14 @@ class TestStitchingIsBoundaryLocal:
             [_local(RIGHT_600, (450_000, 453_520), 1)],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert response.full_text.count(REPEAT_600) == 2
 
 
 class TestConservativeRefusals:
     """Unresolved duplication beats deleting real speech. These cases must not stitch."""
 
-    def test_time_disjoint_utterances_are_not_stitched(self, tmp_path: Path) -> None:
+    def test_time_disjoint_utterances_are_not_stitched(self, real_wav: Path) -> None:
         """A real suffix/prefix match, adjacent sessions, near the cut -- but no intersection.
 
         Without intersecting audio the shared phrase was not transcribed twice; it was said
@@ -326,10 +339,10 @@ class TestConservativeRefusals:
             [_local(RIGHT_600, (300_500, 304_020), 1)],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert response.full_text.count(REPEAT_600) == 2
 
-    def test_an_overlap_below_the_threshold_is_left_alone(self, tmp_path: Path) -> None:
+    def test_an_overlap_below_the_threshold_is_left_alone(self, real_wav: Path) -> None:
         """Six shared characters. Short matches are common words, not proof of duplication."""
         short = "非常的近"
         replies = _three_sessions(
@@ -337,11 +350,11 @@ class TestConservativeRefusals:
             [_local(short + "走过去就到了", RIGHT_300_SPAN, 1)],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert len(short) < MIN_STITCH_OVERLAP_CHARS
         assert response.full_text.count(short) == 2
 
-    def test_ambiguous_candidates_are_left_untouched(self, tmp_path: Path) -> None:
+    def test_ambiguous_candidates_are_left_untouched(self, real_wav: Path) -> None:
         """Two right-hand utterances both match the same left one.
 
         Picking one would be a guess, and a wrong guess deletes speech. Refusing leaves
@@ -355,7 +368,7 @@ class TestConservativeRefusals:
                 _local(REPEAT_600 + "就在旁边", (599_200, 603_000), 2),
             ],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert LEFT_600 in _texts(response)
         assert RIGHT_600 in _texts(response)
 
@@ -363,7 +376,7 @@ class TestConservativeRefusals:
 class TestNormalizationDoesNotCorruptTheText:
     """Matching may ignore punctuation. What comes back must still read correctly."""
 
-    def test_punctuation_differences_still_match(self, tmp_path: Path) -> None:
+    def test_punctuation_differences_still_match(self, real_wav: Path) -> None:
         """The provider punctuates the same phrase differently on each side of the cut.
 
         This is the normal case, not an edge case: with less following context the recogniser
@@ -376,13 +389,13 @@ class TestNormalizationDoesNotCorruptTheText:
             [_local(right, RIGHT_300_SPAN, 1)],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         # The seam itself: the differently-punctuated repeat must be gone from the right
         # side, and the right side's own text must survive intact after it.
         assert left + "的这个阶段，你是否喜欢" in _texts(response)
         assert "到了十分价钱" not in response.full_text.replace(left, "", 1)
 
-    def test_the_kept_text_is_not_sliced_by_normalized_length(self, tmp_path: Path) -> None:
+    def test_the_kept_text_is_not_sliced_by_normalized_length(self, real_wav: Path) -> None:
         """The right side's punctuation makes raw and normalized lengths differ.
 
         Slicing the raw string by a normalized character count is the obvious shortcut and
@@ -396,10 +409,10 @@ class TestNormalizationDoesNotCorruptTheText:
             [_local(right, RIGHT_300_SPAN, 1)],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert left + "的这个阶段" in _texts(response)
 
-    def test_whitespace_around_the_seam_does_not_block_a_match(self, tmp_path: Path) -> None:
+    def test_whitespace_around_the_seam_does_not_block_a_match(self, real_wav: Path) -> None:
         left = "而且我再说一遍 到了十分价钱一分货"
         right = " 到了十分价钱一分货 的这个阶段"
         replies = _three_sessions(
@@ -407,40 +420,40 @@ class TestNormalizationDoesNotCorruptTheText:
             [_local(right, RIGHT_300_SPAN, 1)],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert response.full_text.count("到了十分价钱一分货") == 1
         assert "的这个阶段" in response.full_text
 
 
 class TestTheRestOfTheTranscriptIsUnaffected:
-    def test_ordinary_utterances_pass_through_untouched(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, _real_300_boundary())
+    def test_ordinary_utterances_pass_through_untouched(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, _real_300_boundary())
         assert "先说一下这家店的位置" in _texts(response)
         assert "最后总结一下" in _texts(response)
 
-    def test_segments_stay_ordered_after_a_stitch(self, tmp_path: Path) -> None:
+    def test_segments_stay_ordered_after_a_stitch(self, real_wav: Path) -> None:
         """A merged segment starts earlier than its right-hand half did."""
-        response = _transcribe(tmp_path, _real_300_boundary())
+        response = _transcribe(real_wav, _real_300_boundary())
         starts = [segment.start_ms for segment in response.segments]
         assert starts == sorted(starts)
 
-    def test_no_timestamp_resets_to_zero_mid_transcript(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, _real_600_boundary())
+    def test_no_timestamp_resets_to_zero_mid_transcript(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, _real_600_boundary())
         assert all(segment.start_ms > 0 for segment in response.segments[1:])
 
-    def test_no_timestamp_exceeds_the_media_duration(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, _real_600_boundary())
+    def test_no_timestamp_exceeds_the_media_duration(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, _real_600_boundary())
         assert all(segment.end_ms <= REAL_DURATION_MS for segment in response.segments)
 
-    def test_full_text_matches_the_stitched_segments(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, _real_300_boundary())
+    def test_full_text_matches_the_stitched_segments(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, _real_300_boundary())
         assert response.full_text == "".join(_texts(response))
 
 
 class TestMergedMetadataIsConservative:
     """A stitched segment must not claim more than both halves agreed on."""
 
-    def test_an_agreed_speaker_is_preserved(self, tmp_path: Path) -> None:
+    def test_an_agreed_speaker_is_preserved(self, real_wav: Path) -> None:
         replies = _three_sessions(
             [
                 _filler("先说一下这家店的位置", 120_000, 0),
@@ -449,11 +462,11 @@ class TestMergedMetadataIsConservative:
             [_local(RIGHT_300, RIGHT_300_SPAN, 1, speaker="spk_1")],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         merged = next(s for s in response.segments if REPEAT_300 in s.text)
         assert merged.speaker_id == "spk_1"
 
-    def test_a_disputed_speaker_becomes_none(self, tmp_path: Path) -> None:
+    def test_a_disputed_speaker_becomes_none(self, real_wav: Path) -> None:
         """Two sessions disagreeing about who spoke is not a basis for picking one."""
         replies = _three_sessions(
             [
@@ -463,11 +476,11 @@ class TestMergedMetadataIsConservative:
             [_local(RIGHT_300, RIGHT_300_SPAN, 1, speaker="spk_2")],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         merged = next(s for s in response.segments if REPEAT_300 in s.text)
         assert merged.speaker_id is None
 
-    def test_confidence_is_the_lower_of_the_two(self, tmp_path: Path) -> None:
+    def test_confidence_is_the_lower_of_the_two(self, real_wav: Path) -> None:
         """The merged text spans both halves, so it is only as trustworthy as the weaker."""
         replies = _three_sessions(
             [
@@ -477,11 +490,11 @@ class TestMergedMetadataIsConservative:
             [_local(RIGHT_300, RIGHT_300_SPAN, 1, confidence=0.72)],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         merged = next(s for s in response.segments if REPEAT_300 in s.text)
         assert merged.confidence == 0.72
 
-    def test_a_missing_confidence_does_not_become_a_number(self, tmp_path: Path) -> None:
+    def test_a_missing_confidence_does_not_become_a_number(self, real_wav: Path) -> None:
         replies = _three_sessions(
             [
                 _filler("先说一下这家店的位置", 120_000, 0),
@@ -490,7 +503,7 @@ class TestMergedMetadataIsConservative:
             [_local(RIGHT_300, RIGHT_300_SPAN, 1)],
             [_filler("最后总结一下", 700_000, 2)],
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         merged = next(s for s in response.segments if REPEAT_300 in s.text)
         assert merged.confidence is None
 
@@ -529,7 +542,7 @@ class TestAtRealTranscriptScale:
         return replies
 
     def test_exactly_the_two_real_seams_merge_and_nothing_else(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
         """Two merges out of 166 utterances, with a phrase recurring dozens of times.
 
@@ -541,15 +554,15 @@ class TestAtRealTranscriptScale:
         """
         replies = self._dense_with_real_seams()
         sent = sum(len(_response_utterances(reply)) for reply in replies)
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert len(response.segments) == sent - 2
 
-    def test_both_seams_still_resolve_at_scale(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, self._dense_with_real_seams())
+    def test_both_seams_still_resolve_at_scale(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, self._dense_with_real_seams())
         assert response.full_text.count(REPEAT_300) == 1
         assert response.full_text.count(REPEAT_600) == 1
 
-    def test_the_recurring_filler_phrase_is_never_collapsed(self, tmp_path: Path) -> None:
+    def test_the_recurring_filler_phrase_is_never_collapsed(self, real_wav: Path) -> None:
         """It recurs dozens of times legitimately. All of them must survive."""
         replies = self._dense_with_real_seams()
         recurring = "这家店各方面都很均衡"
@@ -559,13 +572,13 @@ class TestAtRealTranscriptScale:
             for utterance in _response_utterances(reply)
             if isinstance(utterance, dict) and utterance["text"] == recurring
         )
-        response = _transcribe(tmp_path, replies)
+        response = _transcribe(real_wav, replies)
         assert sent > 20
         # +1 because LEFT_600 opens with the same phrase and survives inside its stitch.
         assert response.full_text.count(recurring) == sent + 1
 
-    def test_timestamps_stay_monotonic_at_scale(self, tmp_path: Path) -> None:
-        response = _transcribe(tmp_path, self._dense_with_real_seams())
+    def test_timestamps_stay_monotonic_at_scale(self, real_wav: Path) -> None:
+        response = _transcribe(real_wav, self._dense_with_real_seams())
         starts = [segment.start_ms for segment in response.segments]
         assert starts == sorted(starts)
         assert all(0 <= s.start_ms <= s.end_ms <= REAL_DURATION_MS for s in response.segments)

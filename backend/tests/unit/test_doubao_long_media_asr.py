@@ -117,6 +117,18 @@ def _provider(transport: object, **overrides: object) -> DoubaoASRProvider:
     return DoubaoASRProvider(**kwargs)  # type: ignore[arg-type]
 
 
+@pytest.fixture(scope="session")
+def real_wav(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One shared 841.767 s WAV for every test that needs the real shape.
+
+    Session-scoped because it is 26.9 MB of silence and each of these tests wants the same
+    file; only the transport script differs. Writing it per test put ~800 MB into pytest's
+    tmp directory per run, which eventually exhausted the disk and made tmp_path allocation
+    fail in *other* modules -- an error that points nowhere near the cause.
+    """
+    return _wav(tmp_path_factory.mktemp("longmedia") / "real.wav", REAL_DURATION_MS)
+
+
 class TestShortMediaKeepsTheSimplePath:
     """Most sources are seconds long. That case never failed and must not change."""
 
@@ -153,14 +165,14 @@ class TestShortMediaKeepsTheSimplePath:
 
 
 class TestLongMediaSplitsIntoBoundedSessions:
-    def test_the_real_841_second_shape_needs_several_sessions(self, tmp_path: Path) -> None:
+    def test_the_real_841_second_shape_needs_several_sessions(self, real_wav: Path) -> None:
         """The source that failed 2/2 as a single session."""
         recorder = Recorder()
-        _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        _provider(recorder).transcribe(str(real_wav))
         assert len(recorder.durations_ms) == 3
 
     def test_no_session_exceeds_the_segment_policy_plus_its_overlap(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
         """The reliability property, stated as a bound rather than as a count.
 
@@ -169,18 +181,18 @@ class TestLongMediaSplitsIntoBoundedSessions:
         the actual requirement.
         """
         recorder = Recorder()
-        _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        _provider(recorder).transcribe(str(real_wav))
         ceiling = int((SEGMENT_S + 2 * OVERLAP_S) * 1000)
         assert recorder.durations_ms
         assert max(recorder.durations_ms) <= ceiling
 
-    def test_no_session_receives_the_whole_file(self, tmp_path: Path) -> None:
+    def test_no_session_receives_the_whole_file(self, real_wav: Path) -> None:
         recorder = Recorder()
-        _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        _provider(recorder).transcribe(str(real_wav))
         assert REAL_DURATION_MS not in recorder.durations_ms
 
     def test_the_sessions_cover_the_media_with_only_overlap_to_spare(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
         """Nothing is skipped. A silently unsent minute is a silently missing minute.
 
@@ -188,18 +200,18 @@ class TestLongMediaSplitsIntoBoundedSessions:
         anything less means a gap, anything more means a segment was sent twice.
         """
         recorder = Recorder()
-        _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        _provider(recorder).transcribe(str(real_wav))
         overlaps = (len(recorder.durations_ms) - 1) * 2 * int(OVERLAP_S * 1000)
         assert sum(recorder.durations_ms) == REAL_DURATION_MS + overlaps
 
-    def test_the_language_reaches_every_session(self, tmp_path: Path) -> None:
+    def test_the_language_reaches_every_session(self, real_wav: Path) -> None:
         recorder = Recorder()
         _provider(recorder).transcribe(
-            str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)), language="zh-CN"
+            str(real_wav), language="zh-CN"
         )
         assert recorder.languages == ["zh-CN"] * len(recorder.durations_ms)
 
-    def test_the_segment_policy_is_configurable(self, tmp_path: Path) -> None:
+    def test_the_segment_policy_is_configurable(self, real_wav: Path) -> None:
         """Because it is an operational choice about a provider that may change.
 
         A shorter segment length has to produce more sessions with no other change, which is
@@ -207,7 +219,7 @@ class TestLongMediaSplitsIntoBoundedSessions:
         """
         recorder = Recorder()
         _provider(recorder, segment_s=120.0).transcribe(
-            str(_wav(tmp_path / "a.wav", REAL_DURATION_MS))
+            str(real_wav)
         )
         assert len(recorder.durations_ms) == 8
 
@@ -230,7 +242,7 @@ class TestTimestampsAreOriginalMediaTimestamps:
     """
 
     def test_a_second_segment_utterance_becomes_a_global_timestamp(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
         recorder = Recorder(
             [
@@ -241,13 +253,13 @@ class TestTimestampsAreOriginalMediaTimestamps:
                 [_response()],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert [(s.start_ms, s.end_ms) for s in result.segments] == [
             (1_000, 2_000),
             (329_000, 330_000),
         ]
 
-    def test_the_offset_is_coverage_not_core(self, tmp_path: Path) -> None:
+    def test_the_offset_is_coverage_not_core(self, real_wav: Path) -> None:
         """The subtle way to get this wrong: offset by core start and lose the overlap.
 
         Segment 2's audio begins 1 s *before* its core, so its local 1 s is 300 s globally,
@@ -267,10 +279,10 @@ class TestTimestampsAreOriginalMediaTimestamps:
                 [_response()],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert [(s.start_ms, s.end_ms) for s in result.segments] == [(300_000, 302_000)]
 
-    def test_a_final_segment_utterance_lands_inside_the_media(self, tmp_path: Path) -> None:
+    def test_a_final_segment_utterance_lands_inside_the_media(self, real_wav: Path) -> None:
         """A timestamp past the end of the video is a citation nobody can check."""
         recorder = Recorder(
             [
@@ -279,11 +291,11 @@ class TestTimestampsAreOriginalMediaTimestamps:
                 [_response(_utterance("结尾。", 240_000, 241_000))],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert result.segments
         assert all(s.end_ms <= REAL_DURATION_MS for s in result.segments)
 
-    def test_confidence_and_speaker_survive_segmentation(self, tmp_path: Path) -> None:
+    def test_confidence_and_speaker_survive_segmentation(self, real_wav: Path) -> None:
         recorder = Recorder(
             [
                 [_response()],
@@ -301,7 +313,7 @@ class TestTimestampsAreOriginalMediaTimestamps:
                 [_response()],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert [(s.confidence, s.speaker_id) for s in result.segments] == [(0.91, "2")]
 
 
@@ -314,7 +326,7 @@ class TestOverlapDoesNotDuplicate:
     midpoint keeps it, and exactly one does.
     """
 
-    def test_speech_in_the_overlap_is_kept_once(self, tmp_path: Path) -> None:
+    def test_speech_in_the_overlap_is_kept_once(self, real_wav: Path) -> None:
         # 299.5 s, i.e. inside segment 1's core and inside segment 2's overlap. Both
         # sessions hear it and both report it; one keeps it.
         recorder = Recorder(
@@ -324,11 +336,11 @@ class TestOverlapDoesNotDuplicate:
                 [_response()],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert len(result.segments) == 1
 
     def test_the_owner_is_decided_by_midpoint_not_by_who_heard_it_first(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
         """An utterance mostly inside segment 2 belongs to segment 2, even though 1 heard it.
 
@@ -342,11 +354,11 @@ class TestOverlapDoesNotDuplicate:
                 [_response()],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert [s.text for s in result.segments] == ["第二段听到的。"]
 
     def test_differing_punctuation_across_the_overlap_does_not_produce_two_copies(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
         """Deliberately unequal strings: text comparison would keep both, or need a threshold.
 
@@ -359,10 +371,10 @@ class TestOverlapDoesNotDuplicate:
                 [_response()],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert [s.text for s in result.segments] == ["这个多少钱"]
 
-    def test_an_answer_at_a_boundary_is_retained_exactly_once(self, tmp_path: Path) -> None:
+    def test_an_answer_at_a_boundary_is_retained_exactly_once(self, real_wav: Path) -> None:
         """The failure mode that matters: losing or doubling the line that answers a question.
 
         手抓饼。/ 多少钱？ falls just before the cut and 八元。 just after. All three must
@@ -388,13 +400,13 @@ class TestOverlapDoesNotDuplicate:
                 [_response()],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert [s.text for s in result.segments] == ["手抓饼。", "多少钱？", "八元。"]
         assert [s.start_ms for s in result.segments] == [298_000, 299_000, 300_100]
 
 
 class TestOrderingAndFullText:
-    def test_segments_are_sorted_on_the_global_timeline(self, tmp_path: Path) -> None:
+    def test_segments_are_sorted_on_the_global_timeline(self, real_wav: Path) -> None:
         recorder = Recorder(
             [
                 [_response(_utterance("三。", 200_000, 201_000), _utterance("一。", 1_000, 2_000))],
@@ -402,11 +414,11 @@ class TestOrderingAndFullText:
                 [_response(_utterance("五。", 5_000, 6_000))],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         starts = [s.start_ms for s in result.segments]
         assert starts == sorted(starts)
 
-    def test_full_text_is_the_reconciled_transcript(self, tmp_path: Path) -> None:
+    def test_full_text_is_the_reconciled_transcript(self, real_wav: Path) -> None:
         recorder = Recorder(
             [
                 [_response(_utterance("前半句，", 298_000, 299_000))],
@@ -414,10 +426,10 @@ class TestOrderingAndFullText:
                 [_response()],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert result.full_text == "前半句，后半句。"
 
-    def test_full_text_does_not_repeat_overlap_text(self, tmp_path: Path) -> None:
+    def test_full_text_does_not_repeat_overlap_text(self, real_wav: Path) -> None:
         """Concatenating the provider's per-segment `text` fields would say it twice."""
         recorder = Recorder(
             [
@@ -426,14 +438,14 @@ class TestOrderingAndFullText:
                 [_response()],
             ]
         )
-        result = _provider(recorder).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        result = _provider(recorder).transcribe(str(real_wav))
         assert result.full_text == "重复的话。"
 
-    def test_the_response_looks_like_any_other_asr_response(self, tmp_path: Path) -> None:
+    def test_the_response_looks_like_any_other_asr_response(self, real_wav: Path) -> None:
         """No caller should be able to tell segmentation happened."""
         recorder = Recorder()
         result = _provider(recorder).transcribe(
-            str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)), language="zh-CN"
+            str(real_wav), language="zh-CN"
         )
         assert result.model == "doubao-seed-asr-2.0"
         assert result.language == "zh-CN"
@@ -446,7 +458,7 @@ class TestPerSegmentRetry:
     is for. The budget is what stops one failing provider from pinning a worker.
     """
 
-    def test_a_transient_segment_failure_succeeds_on_retry(self, tmp_path: Path) -> None:
+    def test_a_transient_segment_failure_succeeds_on_retry(self, real_wav: Path) -> None:
         calls: list[int] = []
 
         def transport(path: Path, _language: str | None) -> list[dict[str, object]]:
@@ -456,13 +468,13 @@ class TestPerSegmentRetry:
             return [_response(_utterance("说了句话。", 1_000, 2_000))]
 
         result = _provider(transport).transcribe(
-            str(_wav(tmp_path / "a.wav", REAL_DURATION_MS))
+            str(real_wav)
         )
         # Three segments, one of which needed two attempts.
         assert len(calls) == 4
         assert len(result.segments) == 3
 
-    def test_the_upstream_session_failure_is_retried(self, tmp_path: Path) -> None:
+    def test_the_upstream_session_failure_is_retried(self, real_wav: Path) -> None:
         """Upstream 45000081 is the attempt-2 shape: a 1000 close carrying a session error."""
         calls: list[int] = []
 
@@ -480,10 +492,10 @@ class TestPerSegmentRetry:
                 ]
             return [_response()]
 
-        _provider(transport).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        _provider(transport).transcribe(str(real_wav))
         assert len(calls) == 4
 
-    def test_a_truncated_session_is_retried(self, tmp_path: Path) -> None:
+    def test_a_truncated_session_is_retried(self, real_wav: Path) -> None:
         """Results that stop before the final package: attempt 1 against the real source."""
         calls: list[int] = []
 
@@ -493,10 +505,10 @@ class TestPerSegmentRetry:
                 return [{"code": 0, "is_last_package": False, "payload_msg": None}]
             return [_response()]
 
-        _provider(transport).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+        _provider(transport).transcribe(str(real_wav))
         assert len(calls) == 4
 
-    def test_the_backoff_is_bounded_and_deterministic(self, tmp_path: Path) -> None:
+    def test_the_backoff_is_bounded_and_deterministic(self, real_wav: Path) -> None:
         slept: list[float] = []
 
         def transport(_path: Path, _language: str | None) -> list[dict[str, object]]:
@@ -504,11 +516,11 @@ class TestPerSegmentRetry:
 
         provider = _provider(transport, sleep=slept.append)
         with pytest.raises(ASRFailed):
-            provider.transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+            provider.transcribe(str(real_wav))
         # 2 s then 4 s, then it stops. No sleep after the last attempt.
         assert slept == [2.0, 4.0]
 
-    def test_retries_are_bounded_per_segment(self, tmp_path: Path) -> None:
+    def test_retries_are_bounded_per_segment(self, real_wav: Path) -> None:
         calls: list[int] = []
 
         def transport(_path: Path, _language: str | None) -> list[dict[str, object]]:
@@ -517,7 +529,7 @@ class TestPerSegmentRetry:
 
         provider = _provider(transport, max_attempts=2)
         with pytest.raises(ASRFailed):
-            provider.transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+            provider.transcribe(str(real_wav))
         # Stops at the first segment's budget rather than working through the other two.
         assert len(calls) == 2
 
@@ -526,7 +538,7 @@ class TestPartialTranscriptsCannotMasqueradeAsSuccess:
     """A missing middle is invisible downstream, so it must not be returned."""
 
     def test_retry_exhaustion_on_one_segment_fails_the_whole_call(
-        self, tmp_path: Path
+        self, real_wav: Path
     ) -> None:
         def transport(path: Path, _language: str | None) -> list[dict[str, object]]:
             with wave.open(str(path), "rb") as audio:
@@ -537,9 +549,9 @@ class TestPartialTranscriptsCannotMasqueradeAsSuccess:
 
         provider = _provider(transport)
         with pytest.raises(ASRFailed):
-            provider.transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+            provider.transcribe(str(real_wav))
 
-    def test_no_response_object_escapes_a_failed_segment(self, tmp_path: Path) -> None:
+    def test_no_response_object_escapes_a_failed_segment(self, real_wav: Path) -> None:
         """Belt and braces: the raise must not be reachable around.
 
         Written as "nothing was returned" rather than "an exception was raised" because the
@@ -558,13 +570,13 @@ class TestPartialTranscriptsCannotMasqueradeAsSuccess:
         returned = None
         with pytest.raises(ASRFailed):
             returned = _provider(transport).transcribe(
-                str(_wav(tmp_path / "a.wav", REAL_DURATION_MS))
+                str(real_wav)
             )
         assert returned is None
 
 
 class TestNonTransientFailuresAreNotRetried:
-    def test_authentication_failure_is_not_retried(self, tmp_path: Path) -> None:
+    def test_authentication_failure_is_not_retried(self, real_wav: Path) -> None:
         """A rejected key will still be rejected in two seconds.
 
         Retrying it burns the budget and buries the one error message that says what to fix.
@@ -576,10 +588,10 @@ class TestNonTransientFailuresAreNotRetried:
             raise ConfigurationError("Doubao ASR authentication was rejected")
 
         with pytest.raises(ConfigurationError):
-            _provider(transport).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+            _provider(transport).transcribe(str(real_wav))
         assert len(calls) == 1
 
-    def test_a_malformed_response_is_not_retried(self, tmp_path: Path) -> None:
+    def test_a_malformed_response_is_not_retried(self, real_wav: Path) -> None:
         """Protocol errors are deterministic: three attempts is one failure, slower."""
         calls: list[int] = []
 
@@ -588,14 +600,14 @@ class TestNonTransientFailuresAreNotRetried:
             return [_response(_utterance("缺少时间戳。", 1_000, None))]  # type: ignore[arg-type]
 
         with pytest.raises(ASRFailed):
-            _provider(transport).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+            _provider(transport).transcribe(str(real_wav))
         assert len(calls) == 1
 
-    def test_a_bad_segment_policy_is_a_configuration_error(self, tmp_path: Path) -> None:
+    def test_a_bad_segment_policy_is_a_configuration_error(self, real_wav: Path) -> None:
         """Overlap as long as a segment cannot tile anything; that is a config bug, not ASR."""
         provider = _provider(Recorder(), overlap_s=SEGMENT_S)
         with pytest.raises(ConfigurationError):
-            provider.transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+            provider.transcribe(str(real_wav))
 
 
 class TestDiagnosticsAreSafeAndSpecific:
@@ -606,7 +618,7 @@ class TestDiagnosticsAreSafeAndSpecific:
     fields belong in `DKError.context`, structured.
     """
 
-    def _failure(self, tmp_path: Path) -> ASRFailed:
+    def _failure(self, real_wav: Path) -> ASRFailed:
         class Closed(OSError):
             def __init__(self) -> None:
                 super().__init__("no close frame received or sent")
@@ -617,27 +629,27 @@ class TestDiagnosticsAreSafeAndSpecific:
             raise Closed()
 
         with pytest.raises(ASRFailed) as info:
-            _provider(transport).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+            _provider(transport).transcribe(str(real_wav))
         return info.value
 
-    def test_the_failing_segment_is_identified(self, tmp_path: Path) -> None:
-        context = self._failure(tmp_path).context
+    def test_the_failing_segment_is_identified(self, real_wav: Path) -> None:
+        context = self._failure(real_wav).context
         assert context["segment_index"] == 0
         assert context["segment_start_ms"] == 0
         assert context["segment_end_ms"] == 300_000
 
-    def test_the_attempt_count_is_recorded(self, tmp_path: Path) -> None:
-        context = self._failure(tmp_path).context
+    def test_the_attempt_count_is_recorded(self, real_wav: Path) -> None:
+        context = self._failure(real_wav).context
         assert context["attempt"] == 3
         assert context["max_attempts"] == 3
 
-    def test_the_websocket_close_code_and_reason_survive(self, tmp_path: Path) -> None:
+    def test_the_websocket_close_code_and_reason_survive(self, real_wav: Path) -> None:
         """1006 + "keepalive ping timeout" is the whole of attempt 1's diagnosis."""
-        context = self._failure(tmp_path).context
+        context = self._failure(real_wav).context
         assert context["websocket_close_code"] == 1006
         assert context["websocket_close_reason"] == "keepalive ping timeout"
 
-    def test_the_upstream_business_code_and_message_survive(self, tmp_path: Path) -> None:
+    def test_the_upstream_business_code_and_message_survive(self, real_wav: Path) -> None:
         """45000081 is what classified this as PROVIDER_SERVER_FAILURE rather than a local bug."""
 
         def transport(_path: Path, _language: str | None) -> list[dict[str, object]]:
@@ -650,17 +662,17 @@ class TestDiagnosticsAreSafeAndSpecific:
             ]
 
         with pytest.raises(ASRFailed) as info:
-            _provider(transport).transcribe(str(_wav(tmp_path / "a.wav", REAL_DURATION_MS)))
+            _provider(transport).transcribe(str(real_wav))
         assert info.value.context["upstream_code"] == 45000081
         assert "Timeout waiting next packet" in info.value.context["upstream_message"]
 
-    def test_no_secret_reaches_the_error_context(self, tmp_path: Path) -> None:
+    def test_no_secret_reaches_the_error_context(self, real_wav: Path) -> None:
         """SEC-001 where it is easiest to lose: an exception carrying the request that made it.
 
         The API key is a constructor argument and the auth header is on the failing request,
         so anything that serialised the exception wholesale would leak it into a log.
         """
-        rendered = repr(self._failure(tmp_path).to_dict())
+        rendered = repr(self._failure(real_wav).to_dict())
         assert "not-a-real-key" not in rendered
         assert "X-Api-Key" not in rendered
 
