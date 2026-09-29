@@ -7,6 +7,8 @@ Verifies:
 - Knowledge aggregation
 """
 
+import logging
+
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -229,6 +231,53 @@ def test_entity_resolver_deduplication(session):
     # At minimum, verify that resolution was attempted
     resolved_entities = session.query(Entity).all()
     assert len(resolved_entities) > 0
+
+
+def test_entity_creation_logs_safe_context_at_info_level(session, caplog):
+    """Creating an entity must not collide with reserved LogRecord attributes."""
+    source = Source(
+        platform="douyin",
+        external_id="test_resolver_logging",
+        source_type="video",
+        source_url="https://example.com/test_resolver_logging",
+    )
+    session.add(source)
+    session.flush()
+
+    run = ProcessingRun(
+        source_id=source.id,
+        run_kind="full",
+        schema_version="1.0",
+        target_level=2,
+        processor_version="0.1.0",
+        status="running",
+    )
+    session.add(run)
+    session.flush()
+
+    mention = EntityMention(
+        source_id=source.id,
+        processing_run_id=run.id,
+        mention_text="好运茶餐厅",
+        normalized_text="好运茶餐厅",
+        entity_type_hint="place",
+        resolution_status="unresolved",
+    )
+    session.add(mention)
+    session.flush()
+
+    with caplog.at_level(
+        logging.INFO,
+        logger="douyin_knowledge.extraction.entity_resolver",
+    ):
+        outcome = EntityResolver().resolve_mention(session, mention)
+
+    entity = session.get(Entity, outcome.entity_id)
+    assert entity is not None
+    records = [record for record in caplog.records if record.getMessage() == "entity_created"]
+    assert len(records) == 1
+    assert records[0].entity_id == entity.id
+    assert records[0].entity_name == entity.canonical_name
 
 
 def test_claim_extractor_price(session, sample_source_with_evidence):
