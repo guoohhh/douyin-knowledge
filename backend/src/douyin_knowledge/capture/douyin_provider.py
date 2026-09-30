@@ -390,7 +390,11 @@ class DouyinCaptureProvider(CaptureProvider):
             source_url=raw["web_url"],
             cover_url=self._first_image_url((raw.get("media") or {}).get("covers")),
             published_at_ms=self._to_timestamp_ms(raw.get("created_at")),
-            saved_at_ms=int(time.time() * 1000),
+            # DTK's normalized Content has no saved/collected timestamp. The response's
+            # `fetched_at` is transport metadata, not when the user saved the item.
+            # Inventing "now" here makes an unchanged item hash differently on every
+            # sync and manufactures a new snapshot each time.
+            saved_at_ms=None,
             duration_ms=raw.get("duration_ms"),
             availability="available",
             creator=self._map_author(raw["author"]),
@@ -647,4 +651,3 @@ class DouyinCaptureProvider(CaptureProvider):
         except httpx.RequestError as exc:
             raise MediaDownloadFailed(f"download failed: {exc}", url=media.url) from exc
         return destination
-

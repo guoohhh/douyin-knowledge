@@ -28,5 +28,6 @@ def get_capture_provider(settings: Settings) -> CaptureProvider:
         return DouyinCaptureProvider(
             base_url=settings.douyin_sidecar_url,
             api_key=settings.douyin_sidecar_api_key,
+            identity=settings.douyin_sidecar_identity,
         )
     raise ConfigurationError(f"unknown capture provider {kind!r}")

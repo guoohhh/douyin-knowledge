@@ -180,8 +180,9 @@ def doctor(as_json: JsonOpt = False) -> None:
         provider = settings.provider_for_role(role)
         checks[f"{role}_model"] = f"{settings.model_for_role(role)} via {provider}"
 
-    if settings.uses_real_providers() and not settings.openai_api_key:
-        checks["credentials"] = "missing: a real provider is selected but no key is configured"
+    missing_credentials = settings.missing_provider_credentials()
+    if missing_credentials:
+        checks["credentials"] = f"missing: {', '.join(missing_credentials)}"
     else:
         checks["credentials"] = "ok"
 
