@@ -71,6 +71,7 @@ class FixtureCaptureProvider(CaptureProvider):
             s["external_id"]: CapturedSource.model_validate(s) for s in cleaned
         }
         self._membership = membership
+        self._default_favorites: list[str] = []
 
     # ---- provider interface --------------------------------------------
     def health(self) -> ProviderHealth:
@@ -108,6 +109,19 @@ class FixtureCaptureProvider(CaptureProvider):
             has_more=has_more,
         )
 
+    def list_default_favorite_sources(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> SourcePage:
+        offset = int(cursor) if cursor else 0
+        window = self._default_favorites[offset : offset + limit]
+        next_offset = offset + len(window)
+        has_more = next_offset < len(self._default_favorites)
+        return SourcePage(
+            sources=[self._sources[item] for item in window if item in self._sources],
+            next_cursor=str(next_offset) if has_more else None,
+            has_more=has_more,
+        )
+
     def fetch_source(self, external_id: str) -> CapturedSource:
         if external_id in self._unavailable:
             raise SourceUnavailable(
@@ -138,6 +152,10 @@ class FixtureCaptureProvider(CaptureProvider):
         """Simulate the user un-saving an item, to test is_present handling."""
         ids = self._membership.get(collection_id, [])
         self._membership[collection_id] = [i for i in ids if i != external_id]
+
+    def set_default_favorites(self, external_ids: list[str]) -> None:
+        """Deterministic test/demo selection; no named collection is fabricated."""
+        self._default_favorites = list(external_ids)
 
     def add_source(self, payload: dict[str, Any], *, collections: list[str]) -> CapturedSource:
         source = CapturedSource.model_validate({"platform": self.platform, **payload})

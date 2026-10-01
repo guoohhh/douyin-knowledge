@@ -624,6 +624,33 @@ class DouyinCaptureProvider(CaptureProvider):
             has_more=has_more,
         )
 
+    def list_default_favorite_sources(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> SourcePage:
+        """GET /douyin/user/bookmarks on the pinned, imported sidecar identity."""
+        if not self.identity:
+            raise AuthenticationRequired("default favorites require a pinned sidecar identity")
+        data, meta = self._get(
+            f"/{self.platform}/user/bookmarks",
+            {"cursor": cursor, "count": max(1, min(limit, MAX_PAGE_SIZE))},
+        )
+        if not isinstance(data, dict) or "items" not in data or "has_more" not in data:
+            raise ValidationError("sidecar default-favorites page lacks required fields")
+        if not isinstance(data["items"], list) or any(
+            not isinstance(item, dict) for item in data["items"]
+        ):
+            raise ValidationError("sidecar default-favorites items are malformed")
+        if not isinstance(data["has_more"], bool):
+            raise ValidationError("sidecar default-favorites has_more is malformed")
+        items, next_cursor, has_more = self._read_pagination(data, meta)
+        if has_more and (not next_cursor or next_cursor == (cursor or "0")):
+            raise ValidationError("sidecar default-favorites cursor did not advance")
+        return SourcePage(
+            sources=[self._map_source(raw) for raw in items],
+            next_cursor=next_cursor if has_more else None,
+            has_more=has_more,
+        )
+
     def fetch_source(self, external_id: str) -> CapturedSource:
         """GET /{platform}/video?aweme_id=..."""
         data, _meta = self._get(f"/{self.platform}/video", {"aweme_id": external_id})

@@ -17,6 +17,8 @@ from collections.abc import Iterator
 import pytest
 from typer.testing import CliRunner
 
+from douyin_knowledge.capture.fixture_provider import FixtureCaptureProvider
+from douyin_knowledge.capture.scope import CaptureScope, set_capture_scope
 from douyin_knowledge.cli.main import app
 from douyin_knowledge.config.settings import Settings
 from douyin_knowledge.db import init_engine, session_scope
@@ -48,6 +50,16 @@ def cli_env(tmp_path, monkeypatch) -> Iterator[Settings]:
     settings.ensure_directories()
     upgrade_to_head(settings)
     init_engine(settings)
+    with session_scope() as session:
+        set_capture_scope(
+            session,
+            CaptureScope(
+                named_collection_ids=[
+                    item.external_collection_id
+                    for item in FixtureCaptureProvider().list_collections()
+                ]
+            ),
+        )
     try:
         yield settings
     finally:

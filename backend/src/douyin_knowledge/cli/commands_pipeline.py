@@ -69,13 +69,13 @@ def sync(
     settings = _ready()
 
     if collection:
-        job_type = JobType.SYNC_COLLECTION_SOURCES
+        job_type = JobType.SYNC_NAMED_COLLECTION
         payload = {"external_collection_id": collection, "auto_process": process}
-        dedupe = f"sync_collection:{collection}"
+        dedupe = f"sync_named_collection:douyin:{collection}"
     else:
-        job_type = JobType.SYNC_COLLECTIONS
+        job_type = JobType.SYNC_CAPTURE_SCOPE
         payload = {"auto_process": process}
-        dedupe = "sync_collections:all"
+        dedupe = "sync_capture_scope:douyin"
 
     job_id, created = _enqueue(
         job_type, payload=payload, dedupe_key=dedupe, priority=Priority.INTERACTIVE

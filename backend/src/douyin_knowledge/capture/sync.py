@@ -47,9 +47,11 @@ from douyin_knowledge.core.text import content_hash
 from douyin_knowledge.db.models.capture import (
     Collection,
     Creator,
+    DefaultFavoritesSyncState,
     Source,
     SourceAsset,
     SourceCollectionMembership,
+    SourceDefaultFavoriteObservation,
     SourceSnapshot,
 )
 from douyin_knowledge.db.models.processing import EvidenceUnit
@@ -186,6 +188,7 @@ class CaptureSyncService:
         sources: Sequence[CapturedSource],
         *,
         collection: Collection | None = None,
+        default_favorites: bool = False,
         prune_missing: bool = False,
         stats: SyncStats | None = None,
     ) -> SyncStats:
@@ -215,9 +218,18 @@ class CaptureSyncService:
 
             if collection is not None:
                 self._touch_membership(source, collection)
+            if default_favorites:
+                self._touch_default_favorite(source)
 
         if collection is not None and prune_missing:
             stats.memberships_removed += self._mark_absent(collection, seen_ids)
+        if default_favorites and prune_missing:
+            stats.memberships_removed += self._mark_default_favorites_absent(seen_ids)
+            state = self.session.get(DefaultFavoritesSyncState, self.platform)
+            if state is None:
+                state = DefaultFavoritesSyncState(platform=self.platform)
+                self.session.add(state)
+            state.last_completed_at_ms = now_ms()
 
         if collection is not None and prune_missing:
             # Only a complete listing earns this timestamp. `prune_missing` already
@@ -276,6 +288,37 @@ class CaptureSyncService:
             log_walk(walker.walk, pruned=prune)
 
         stats.collections += 1
+        return stats
+
+    def sync_default_favorites(
+        self,
+        provider: Any,
+        *,
+        page_limit: int = 50,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        stats: SyncStats | None = None,
+    ) -> SyncStats:
+        """Walk the distinct default target and reconcile only on explicit completion."""
+        stats = stats or SyncStats()
+        walker = CollectionWalker(
+            provider,
+            "default_favorites",
+            page_limit=page_limit,
+            max_pages=max_pages,
+            list_page=provider.list_default_favorite_sources,
+        )
+        try:
+            for _page_sources in walker.pages():
+                pass
+        finally:
+            complete = walker.walk.safe_to_prune
+            self.sync_sources(
+                walker.sources,
+                default_favorites=True,
+                prune_missing=complete,
+                stats=stats,
+            )
+            log_walk(walker.walk, pruned=complete)
         return stats
 
     def _upsert_source(
@@ -585,6 +628,28 @@ class CaptureSyncService:
             select(SourceCollectionMembership).where(
                 SourceCollectionMembership.collection_id == collection.id,
                 SourceCollectionMembership.is_present == 1,
+            )
+        ).all()
+        removed = 0
+        for row in rows:
+            if row.source_id not in keep:
+                row.is_present = 0
+                removed += 1
+        return removed
+
+    def _touch_default_favorite(self, source: Source) -> None:
+        row = self.session.get(SourceDefaultFavoriteObservation, source.id)
+        if row is None:
+            self.session.add(SourceDefaultFavoriteObservation(source_id=source.id, is_present=1))
+        else:
+            row.last_seen_at_ms = now_ms()
+            row.is_present = 1
+
+    def _mark_default_favorites_absent(self, present_ids: Iterable[str]) -> int:
+        keep = set(present_ids)
+        rows = self.session.scalars(
+            select(SourceDefaultFavoriteObservation).where(
+                SourceDefaultFavoriteObservation.is_present == 1
             )
         ).all()
         removed = 0
