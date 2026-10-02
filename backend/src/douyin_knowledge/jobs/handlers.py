@@ -20,6 +20,7 @@ from douyin_knowledge.ai.registry import (
     get_structured_model,
 )
 from douyin_knowledge.capture.registry import get_capture_provider
+from douyin_knowledge.capture.scope import initialize_capture_scope
 from douyin_knowledge.capture.sync import CaptureSyncService
 from douyin_knowledge.config import Settings
 from douyin_knowledge.core.clock import now_ms
@@ -66,46 +67,81 @@ def _vector_store(settings: Settings) -> VectorStore:
 
 
 def handle_sync_collections(ctx: JobContext) -> None:
-    """Walk every collection the provider exposes and sync it.
+    """Compatibility name for the scope fan-out; no provider content read here."""
+    handle_sync_capture_scope(ctx)
 
-    Follow-up processing is enqueued rather than done inline: a sync of a thousand
-    saved items must not block on a thousand extractions, and each source needs its
-    own retry budget.
-    """
-    provider = get_capture_provider(ctx.settings)
-    service = CaptureSyncService(ctx.session, platform=ctx.settings.capture_provider)
-    payload = ctx.payload
-    auto_process = bool(payload.get("auto_process", True))
 
-    stats = None
-    collections = provider.list_collections()
-    for captured in collections:
-        stats = service.sync_collection(provider, captured, stats=stats)
+def handle_sync_capture_scope(ctx: JobContext) -> None:
+    """Fan out persisted targets; each target owns its retry and completion row."""
+    scope = initialize_capture_scope(ctx.session, ctx.settings)
+    auto_process = bool(ctx.payload.get("auto_process", True))
+    targets = 0
+    if scope.default_favorites:
+        result = ctx.queue.enqueue(
+            JobType.SYNC_DEFAULT_FAVORITES,
+            payload={"auto_process": auto_process},
+            dedupe_key="sync_default_favorites:douyin",
+            priority=Priority.INTERACTIVE,
+        )
+        targets += int(result.created)
+    for external_id in scope.named_collection_ids:
+        result = ctx.queue.enqueue(
+            JobType.SYNC_NAMED_COLLECTION,
+            payload={"external_collection_id": external_id, "auto_process": auto_process},
+            dedupe_key=f"sync_named_collection:douyin:{external_id}",
+            priority=Priority.INTERACTIVE,
+        )
+        targets += int(result.created)
+    ctx.emit("targets_enqueued", f"{targets} target jobs", count=targets)
 
-    if stats is None:
-        ctx.emit("sync_empty", "provider exposed no collections")
+
+def _enqueue_processing(ctx: JobContext, source_ids: list[str]) -> None:
+    if not bool(ctx.payload.get("auto_process", True)):
         return
+    enqueued = 0
+    for source_id in dict.fromkeys(source_ids):
+        result = ctx.queue.enqueue(
+            JobType.PROCESS_SOURCE,
+            source_id=source_id,
+            payload={"target_level": ctx.settings.default_desired_level},
+            dedupe_key=f"process_source:{source_id}",
+            priority=Priority.BULK,
+        )
+        enqueued += int(result.created)
+    ctx.emit("processing_enqueued", f"{enqueued} sources", count=enqueued)
 
-    ctx.emit("sync_complete", f"{stats.sources_created} new", **stats.as_dict())
 
-    if auto_process:
-        enqueued = 0
-        for source_id in dict.fromkeys(stats.source_ids):
-            result = ctx.queue.enqueue(
-                JobType.PROCESS_SOURCE,
-                source_id=source_id,
-                payload={"target_level": ctx.settings.default_desired_level},
-                dedupe_key=f"process_source:{source_id}",
-                priority=Priority.BULK,
-            )
-            enqueued += 1 if result.created else 0
-        ctx.emit("processing_enqueued", f"{enqueued} sources", count=enqueued)
+def handle_sync_default_favorites(ctx: JobContext) -> None:
+    # The claim-time check is before provider construction, therefore before any
+    # sidecar request. Once started, no mid-walk scope check interrupts reconciliation.
+    if not initialize_capture_scope(ctx.session, ctx.settings).default_favorites:
+        ctx.emit("skipped", "default favorites no longer selected")
+        return
+    provider = get_capture_provider(ctx.settings)
+    service = CaptureSyncService(ctx.session, platform=provider.platform)
+    stats = service.sync_default_favorites(provider)
+    ctx.emit("sync_complete", "default favorites", **stats.as_dict())
+    _enqueue_processing(ctx, stats.source_ids)
 
 
 def handle_sync_collection_sources(ctx: JobContext) -> None:
-    """Sync one named collection. Used when the user refreshes a single folder."""
-    external_id = _require(ctx.payload, "external_collection_id")
+    """Compatibility name for one scoped named-collection target."""
+    handle_sync_named_collection(ctx)
+
+
+def handle_sync_named_collection(ctx: JobContext) -> None:
+    """Sync one selected named collection, with its own durable job state."""
+    external_id = ctx.payload.get("external_collection_id") or ctx.payload.get(
+        "collection_external_id"
+    )
+    if not external_id:
+        raise JobPayloadError("job payload is missing an external collection id")
+    if not initialize_capture_scope(ctx.session, ctx.settings).selects_named(str(external_id)):
+        ctx.emit("skipped", "named collection no longer selected", collection_id=external_id)
+        return
     provider = get_capture_provider(ctx.settings)
+    # Legacy fixture collections were stored under platform="fixture". Keep that
+    # identity stable when resuming an already captured demo database.
     service = CaptureSyncService(ctx.session, platform=ctx.settings.capture_provider)
 
     match = next(
@@ -117,6 +153,7 @@ def handle_sync_collection_sources(ctx: JobContext) -> None:
 
     stats = service.sync_collection(provider, match)
     ctx.emit("sync_complete", match.name, **stats.as_dict())
+    _enqueue_processing(ctx, stats.source_ids)
 
 
 # ------------------------------------------------------------------ processing
@@ -401,6 +438,9 @@ def register_default_handlers(registry: HandlerRegistry | None = None) -> Handle
     the complete list of work this system can perform.
     """
     registry = registry or HandlerRegistry()
+    registry.register(JobType.SYNC_CAPTURE_SCOPE, handle_sync_capture_scope)
+    registry.register(JobType.SYNC_DEFAULT_FAVORITES, handle_sync_default_favorites)
+    registry.register(JobType.SYNC_NAMED_COLLECTION, handle_sync_named_collection)
     registry.register(JobType.SYNC_COLLECTIONS, handle_sync_collections)
     registry.register(JobType.SYNC_COLLECTION_SOURCES, handle_sync_collection_sources)
     registry.register(JobType.ACQUIRE_MEDIA, handle_acquire_media)

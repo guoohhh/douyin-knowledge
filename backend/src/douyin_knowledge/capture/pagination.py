@@ -21,6 +21,7 @@ stopped asking.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -101,11 +102,15 @@ class CollectionWalker:
         *,
         page_limit: int = 50,
         max_pages: int = DEFAULT_MAX_PAGES,
+        list_page: Callable[..., SourcePage] | None = None,
     ) -> None:
         self.provider = provider
         self.page_limit = page_limit
         self.max_pages = max_pages
         self.walk = CollectionWalk(external_collection_id=external_collection_id)
+        # A default-favorites walk injects its distinct provider operation here.
+        # No fake Collection or named-collection provider call is involved.
+        self._list_page = list_page
 
     @property
     def sources(self) -> list[CapturedSource]:
@@ -140,8 +145,12 @@ class CollectionWalker:
                     pages=walk.pages,
                 )
 
-            page = self.provider.list_collection_sources(
-                collection_id, cursor=cursor, limit=self.page_limit
+            page = (
+                self._list_page(cursor=cursor, limit=self.page_limit)
+                if self._list_page is not None
+                else self.provider.list_collection_sources(
+                    collection_id, cursor=cursor, limit=self.page_limit
+                )
             )
             walk.pages += 1
             walk.sources.extend(page.sources)

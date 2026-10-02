@@ -308,6 +308,16 @@ PRIMARY KEY(source_id, collection_id)
 
 Do not immediately delete a membership when the source disappears from one folder. Mark `is_present = 0` so historical organization can be preserved.
 
+### Stage 3E default-favorites observations
+
+Default video favorites are not a fake row in `collections`. The
+`source_default_favorite_observations` table has `source_id` as its primary key
+and foreign key to `sources`, plus `first_seen_at_ms`, `last_seen_at_ms`, and
+`is_present`. The `default_favorites_sync_state` table is keyed by `platform`
+and stores nullable `last_completed_at_ms`. A failed or incomplete walk cannot
+advance that marker or mark unseen observations absent. Named collection
+membership continues to use `source_collection_memberships` independently.
+
 ---
 
 ## 9. `source_assets`
@@ -1557,6 +1567,11 @@ wiki_maintain
 export_markdown
 ```
 
+Stage 3E adds `sync_capture_scope`, `sync_default_favorites`, and
+`sync_named_collection`. The first only enqueues durable target jobs. Each target
+has its own dedupe key and retry history. A target deselected before execution
+records a `skipped` event and then the existing `succeeded` status.
+
 Priority convention can reserve higher bands for active-user/query-triggered work.
 
 ---
@@ -1600,6 +1615,12 @@ retrieval.personal_first
 ```
 
 Secrets such as API keys, Douyin cookies, or provider credentials should not be stored here in plaintext. Prefer environment variables, OS keychain/secret storage, or the capture sidecar's own credential storage.
+
+`capture.scope.douyin` holds a version-1 JSON object with `schema_version`,
+`platform`, `default_favorites`, and `named_collection_ids`. `schema_version`
+describes the JSON shape, not a mutable scope revision. The first application
+read persists a scope inferred from already captured named collection rows;
+Alembic migrations do not write this setting.
 
 ---
 

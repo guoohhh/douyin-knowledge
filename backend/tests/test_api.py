@@ -19,9 +19,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
 from douyin_knowledge.api import create_app
+from douyin_knowledge.capture.fixture_provider import FixtureCaptureProvider
 from douyin_knowledge.config import Settings, get_settings
 from douyin_knowledge.jobs.handlers import register_default_handlers
 from douyin_knowledge.jobs.worker import Worker
+from tests.support_capture_scope import select_fixture_collections
 
 
 @pytest.fixture
@@ -73,6 +75,7 @@ def worker(settings: Settings) -> Worker:
 @pytest.fixture
 def populated(client: TestClient, worker: Worker) -> TestClient:
     """A synced, processed, indexed corpus built entirely through the API and queue."""
+    select_fixture_collections(client)
     response = client.post("/api/sources/sync", json={"auto_process": True})
     assert response.status_code == 202, response.text
     drained = worker.drain(max_jobs=500)
@@ -96,6 +99,33 @@ class TestHealth:
 
 
 class TestSyncAndProcess:
+    def test_capture_scope_api_round_trip_and_collection_alias(self, client: TestClient) -> None:
+        scope = client.get("/api/sources/capture-scope")
+        assert scope.status_code == 200
+        assert scope.json() == {
+            "schema_version": 1,
+            "platform": "douyin",
+            "default_favorites": False,
+            "named_collection_ids": [
+                item.external_collection_id for item in FixtureCaptureProvider().list_collections()
+            ],
+        }
+        selected = {
+            "schema_version": 1, "platform": "douyin", "default_favorites": True,
+            "named_collection_ids": ["one"],
+        }
+        assert client.put("/api/sources/capture-scope", json=selected).json() == selected
+        assert client.get("/api/sources/capture-scope").json() == selected
+        assert client.put(
+            "/api/sources/capture-scope", json={**selected, "schema_version": 2}
+        ).status_code == 422
+        job = client.post("/api/sources/sync", json={"collection_id": "one"}).json()
+        assert job["job_type"] == "sync_named_collection"
+        assert client.post(
+            "/api/sources/sync",
+            json={"collection_id": "one", "collection_external_id": "other"},
+        ).status_code == 422
+
     def test_sync_enqueues_and_dedupes(self, client: TestClient) -> None:
         first = client.post("/api/sources/sync", json={}).json()
         second = client.post("/api/sources/sync", json={}).json()
@@ -534,6 +564,7 @@ class TestAdmin:
         nothing at all: it computed decisions no caller ever asked for, so the promise
         that a user can stop a creator from being processed was not kept anywhere.
         """
+        select_fixture_collections(client)
         client.post("/api/sources/sync", json={"auto_process": False})
         worker.drain(max_jobs=500)
 
