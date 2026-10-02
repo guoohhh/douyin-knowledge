@@ -216,9 +216,9 @@ app.add_typer(policy_app, name="policy")
 # Pipeline, query and worker commands live in sibling modules to keep this file readable;
 # importing them here is what registers them on `app`. The import has to be at the bottom:
 # those modules import `app` from this one, so hoisting it to the top is a circular import.
-from douyin_knowledge.cli import commands_pipeline, commands_query  # noqa: E402
+from douyin_knowledge.cli import commands_capture, commands_pipeline, commands_query  # noqa: E402
 
-__all__ = ["app", "main", "commands_pipeline", "commands_query"]
+__all__ = ["app", "main", "commands_capture", "commands_pipeline", "commands_query"]
 
 
 def main() -> None:

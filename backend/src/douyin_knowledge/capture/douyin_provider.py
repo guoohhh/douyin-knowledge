@@ -584,8 +584,10 @@ class DouyinCaptureProvider(CaptureProvider):
             )
             items, next_cursor, has_more = self._read_pagination(data, meta)
             collections.extend(self._map_collection(raw) for raw in items)
-            if not has_more or next_cursor is None:
+            if not has_more:
                 return collections
+            if next_cursor is None:
+                raise ValidationError("sidecar folder list has more pages but no next cursor")
             if next_cursor in seen:
                 raise ValidationError(
                     "sidecar repeated a folder-list cursor; the walk cannot advance",

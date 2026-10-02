@@ -257,6 +257,17 @@ def test_list_collections_rejects_a_repeated_cursor() -> None:
         build(handler).list_collections()
 
 
+def test_list_collections_rejects_incomplete_page_without_cursor() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=envelope({"items": [], "cursor": None, "has_more": True}),
+        )
+
+    with pytest.raises(ValidationError, match="no next cursor"):
+        build(handler).list_collections()
+
+
 # -------------------------------------------------------------------- task path
 
 

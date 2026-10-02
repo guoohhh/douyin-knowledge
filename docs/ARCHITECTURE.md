@@ -249,6 +249,20 @@ implemented by the Douyin adapter through `GET /api/v1/douyin/user/bookmarks`.
 They are not modeled as a `Collection`. The sidecar identity/session remains in
 sidecar configuration, outside the product database.
 
+Stage 3E-4 keeps discovery, selection, and synchronization separate. The read-only
+`GET /api/sources/capture-scope/targets` response joins persisted scope and local
+sync timestamps with `CaptureProvider.list_collections()` metadata. It reports
+default favorites as a distinct capability without reading favorite contents.
+Each named target says whether it was discovered upstream, observed locally, and
+selected. Saved IDs absent from discovery remain visible, even if no local
+`Collection` row exists. Discovery failure returns HTTP 200 with
+`discovery.state=error` and a safe error code; saved scope and local observations
+remain in the response, and the missing upstream list is not presented as a
+successful empty discovery. `GET/PUT /capture-scope` retain their saved-selection
+contract. Selection updates do not discover, sync, or change Processing Policy.
+The scriptable `dk capture scope|discover|set-default|set-collections` commands
+use the same backend operations. `dk sync` continues to fan out saved targets.
+
 ---
 
 ## 7. Domain Architecture

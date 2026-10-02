@@ -21,6 +21,7 @@ from sqlalchemy import Engine
 from douyin_knowledge.api import create_app
 from douyin_knowledge.capture.fixture_provider import FixtureCaptureProvider
 from douyin_knowledge.config import Settings, get_settings
+from douyin_knowledge.core.errors import CaptureUnavailable
 from douyin_knowledge.jobs.handlers import register_default_handlers
 from douyin_knowledge.jobs.worker import Worker
 from tests.support_capture_scope import select_fixture_collections
@@ -99,6 +100,44 @@ class TestHealth:
 
 
 class TestSyncAndProcess:
+    def test_capture_target_discovery_failure_keeps_saved_scope(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        selected = {
+            "schema_version": 1, "platform": "douyin", "default_favorites": False,
+            "named_collection_ids": ["temporarily-missing"],
+        }
+        assert client.put("/api/sources/capture-scope", json=selected).status_code == 200
+
+        def unavailable(_: Settings) -> None:
+            raise CaptureUnavailable("private sidecar detail")
+
+        monkeypatch.setattr("douyin_knowledge.capture.discovery.get_capture_provider", unavailable)
+        response = client.get("/api/sources/capture-scope/targets")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["scope"] == selected
+        assert body["discovery"]["state"] == "error"
+        assert body["discovery"]["error_code"] == "capture_unavailable"
+        assert "private sidecar detail" not in response.text
+        assert body["named_collections"][0]["external_collection_id"] == "temporarily-missing"
+        assert body["named_collections"][0]["discovered"] is False
+        assert client.get("/api/sources/capture-scope").json() == selected
+
+    def test_capture_target_discovery_projects_scope_without_sync(self, client: TestClient) -> None:
+        response = client.get("/api/sources/capture-scope/targets")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["discovery"] == {"state": "ok", "error_code": None, "message": None}
+        assert body["default_favorites"]["available"] is True
+        assert body["default_favorites"]["selected"] is False
+        assert body["default_favorites"]["last_completed_at_ms"] is None
+        assert {item["external_collection_id"] for item in body["named_collections"]} == {
+            item.external_collection_id for item in FixtureCaptureProvider().list_collections()
+        }
+        assert all(item["discovered"] and item["selected"] for item in body["named_collections"])
+        assert client.get("/api/sources").json()["total"] == 0
+
     def test_capture_scope_api_round_trip_and_collection_alias(self, client: TestClient) -> None:
         scope = client.get("/api/sources/capture-scope")
         assert scope.status_code == 200

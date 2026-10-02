@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from douyin_knowledge.api.deps import AppSettings, DbSession, JobQueueDep
+from douyin_knowledge.capture.discovery import CaptureTargets, discover_capture_targets
 from douyin_knowledge.capture.scope import CaptureScope, initialize_capture_scope, set_capture_scope
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.db.models.capture import (
@@ -83,6 +84,11 @@ def _job_response(result: Any) -> JobAccepted:
 @router.get("/capture-scope", response_model=CaptureScope)
 def read_capture_scope(db: DbSession, settings: AppSettings) -> CaptureScope:
     return initialize_capture_scope(db, settings)
+
+
+@router.get("/capture-scope/targets", response_model=CaptureTargets)
+def read_capture_targets(db: DbSession, settings: AppSettings) -> CaptureTargets:
+    return discover_capture_targets(db, settings)
 
 
 @router.put("/capture-scope", response_model=CaptureScope)
