@@ -20,7 +20,7 @@ from douyin_knowledge.ai.registry import (
     get_structured_model,
 )
 from douyin_knowledge.capture.registry import get_capture_provider
-from douyin_knowledge.capture.scope import get_capture_scope
+from douyin_knowledge.capture.scope import initialize_capture_scope
 from douyin_knowledge.capture.sync import CaptureSyncService
 from douyin_knowledge.config import Settings
 from douyin_knowledge.core.clock import now_ms
@@ -73,7 +73,7 @@ def handle_sync_collections(ctx: JobContext) -> None:
 
 def handle_sync_capture_scope(ctx: JobContext) -> None:
     """Fan out persisted targets; each target owns its retry and completion row."""
-    scope = get_capture_scope(ctx.session, provider_kind=ctx.settings.capture_provider)
+    scope = initialize_capture_scope(ctx.session, ctx.settings)
     auto_process = bool(ctx.payload.get("auto_process", True))
     targets = 0
     if scope.default_favorites:
@@ -114,9 +114,7 @@ def _enqueue_processing(ctx: JobContext, source_ids: list[str]) -> None:
 def handle_sync_default_favorites(ctx: JobContext) -> None:
     # The claim-time check is before provider construction, therefore before any
     # sidecar request. Once started, no mid-walk scope check interrupts reconciliation.
-    if not get_capture_scope(
-        ctx.session, provider_kind=ctx.settings.capture_provider
-    ).default_favorites:
+    if not initialize_capture_scope(ctx.session, ctx.settings).default_favorites:
         ctx.emit("skipped", "default favorites no longer selected")
         return
     provider = get_capture_provider(ctx.settings)
@@ -138,9 +136,7 @@ def handle_sync_named_collection(ctx: JobContext) -> None:
     )
     if not external_id:
         raise JobPayloadError("job payload is missing an external collection id")
-    if not get_capture_scope(
-        ctx.session, provider_kind=ctx.settings.capture_provider
-    ).selects_named(str(external_id)):
+    if not initialize_capture_scope(ctx.session, ctx.settings).selects_named(str(external_id)):
         ctx.emit("skipped", "named collection no longer selected", collection_id=external_id)
         return
     provider = get_capture_provider(ctx.settings)

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
 from douyin_knowledge.api import create_app
+from douyin_knowledge.capture.fixture_provider import FixtureCaptureProvider
 from douyin_knowledge.config import Settings, get_settings
 from douyin_knowledge.jobs.handlers import register_default_handlers
 from douyin_knowledge.jobs.worker import Worker
@@ -105,7 +106,9 @@ class TestSyncAndProcess:
             "schema_version": 1,
             "platform": "douyin",
             "default_favorites": False,
-            "named_collection_ids": [],
+            "named_collection_ids": [
+                item.external_collection_id for item in FixtureCaptureProvider().list_collections()
+            ],
         }
         selected = {
             "schema_version": 1, "platform": "douyin", "default_favorites": True,

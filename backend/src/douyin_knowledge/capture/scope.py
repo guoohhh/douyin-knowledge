@@ -7,7 +7,7 @@ from collections already captured in this database; migrations never guess inten
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
@@ -16,6 +16,9 @@ from sqlalchemy.orm import Session
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.db.models.capture import Collection
 from douyin_knowledge.db.models.ops import AppSetting
+
+if TYPE_CHECKING:
+    from douyin_knowledge.config.settings import Settings
 
 CAPTURE_SCOPE_KEY = "capture.scope.douyin"
 
@@ -40,7 +43,12 @@ class CaptureScope(BaseModel):
         return external_id in self.named_collection_ids
 
 
-def get_capture_scope(session: Session, *, provider_kind: str = "douyin") -> CaptureScope:
+def get_capture_scope(
+    session: Session,
+    *,
+    provider_kind: str = "douyin",
+    fixture_collection_ids: list[str] | None = None,
+) -> CaptureScope:
     """Read the setting, bootstrapping exactly once from captured collections."""
     row = session.get(AppSetting, CAPTURE_SCOPE_KEY)
     if row is None:
@@ -53,7 +61,8 @@ def get_capture_scope(session: Session, *, provider_kind: str = "douyin") -> Cap
             .where(Collection.platform.in_(platforms))
             .order_by(Collection.external_collection_id)
         ).all()
-        scope = CaptureScope(named_collection_ids=list(dict.fromkeys(ids)))
+        fallback = fixture_collection_ids if provider_kind == "fixture" else None
+        scope = CaptureScope(named_collection_ids=list(dict.fromkeys(ids or fallback or [])))
         session.add(
             AppSetting(
                 key=CAPTURE_SCOPE_KEY,
@@ -64,6 +73,31 @@ def get_capture_scope(session: Session, *, provider_kind: str = "douyin") -> Cap
         session.flush()
         return scope
     return CaptureScope.model_validate(row.value_json)
+
+
+def initialize_capture_scope(session: Session, settings: Settings) -> CaptureScope:
+    """Initialize a fresh fixture DB from its configured local provider exactly once.
+
+    Existing captured rows win. Real Douyin never reads a provider to infer scope.
+    Once a setting exists, including an explicit empty one, no provider is consulted.
+    """
+    fixture_ids: list[str] | None = None
+    if settings.capture_provider == "fixture" and session.get(AppSetting, CAPTURE_SCOPE_KEY) is None:
+        captured = session.scalar(
+            select(Collection.id).where(Collection.platform.in_(("douyin", "fixture"))).limit(1)
+        )
+        if captured is None:
+            from douyin_knowledge.capture.registry import get_capture_provider
+
+            fixture_ids = [
+                item.external_collection_id
+                for item in get_capture_provider(settings).list_collections()
+            ]
+    return get_capture_scope(
+        session,
+        provider_kind=settings.capture_provider,
+        fixture_collection_ids=fixture_ids,
+    )
 
 
 def set_capture_scope(session: Session, scope: CaptureScope) -> CaptureScope:
@@ -78,4 +112,7 @@ def set_capture_scope(session: Session, scope: CaptureScope) -> CaptureScope:
     return scope
 
 
-__all__ = ["CAPTURE_SCOPE_KEY", "CaptureScope", "get_capture_scope", "set_capture_scope"]
+__all__ = [
+    "CAPTURE_SCOPE_KEY", "CaptureScope", "get_capture_scope",
+    "initialize_capture_scope", "set_capture_scope",
+]

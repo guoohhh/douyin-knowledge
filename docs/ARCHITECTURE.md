@@ -234,11 +234,15 @@ The persisted, non-secret `capture.scope.douyin` setting selects the default vid
 favorites target and zero or more named collection IDs. It decides which upstream
 lists are observed. Processing Policy remains a separate decision after capture;
 editing scope never writes policy rules or decisions. On a database without this
-setting, the first scope read persists `default_favorites=false` and the external
-IDs of already captured named collections. The schema migration creates only
-tables and never infers a scope.
-In fixture mode, legacy `platform=fixture` collection rows also qualify for
-bootstrap; real Douyin mode never imports those synthetic target IDs.
+setting, first initialization persists `default_favorites=false` and the external
+IDs of already captured named collections. If there are no captured collections
+and the configured provider is `fixture`, initialization reads that local fixture
+provider's named collections, including a configured `DK_CAPTURE_FIXTURE_DIR`.
+A fresh real Douyin database persists an empty scope without provider reads.
+An existing empty setting remains an explicit choice and is never repopulated.
+The schema migration creates only tables and never infers a scope. In fixture
+mode, legacy `platform=fixture` collection rows also qualify for bootstrap;
+real Douyin mode never imports those synthetic target IDs.
 
 Default video favorites use `CaptureProvider.list_default_favorite_sources`,
 implemented by the Douyin adapter through `GET /api/v1/douyin/user/bookmarks`.

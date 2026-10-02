@@ -17,8 +17,6 @@ from collections.abc import Iterator
 import pytest
 from typer.testing import CliRunner
 
-from douyin_knowledge.capture.fixture_provider import FixtureCaptureProvider
-from douyin_knowledge.capture.scope import CaptureScope, set_capture_scope
 from douyin_knowledge.cli.main import app
 from douyin_knowledge.config.settings import Settings
 from douyin_knowledge.db import init_engine, session_scope
@@ -50,16 +48,6 @@ def cli_env(tmp_path, monkeypatch) -> Iterator[Settings]:
     settings.ensure_directories()
     upgrade_to_head(settings)
     init_engine(settings)
-    with session_scope() as session:
-        set_capture_scope(
-            session,
-            CaptureScope(
-                named_collection_ids=[
-                    item.external_collection_id
-                    for item in FixtureCaptureProvider().list_collections()
-                ]
-            ),
-        )
     try:
         yield settings
     finally:
@@ -73,6 +61,16 @@ def corpus(cli_env: Settings) -> Settings:
     result = runner.invoke(app, ["sync", "--process", "--wait"])
     assert result.exit_code == 0, result.output
     return cli_env
+
+
+def test_fresh_fixture_cli_sync_builds_demo_corpus(cli_env: Settings) -> None:
+    result = runner.invoke(app, ["sync", "--no-process", "--wait"])
+    assert result.exit_code == 0, result.output
+    status_result = runner.invoke(app, ["status", "--json"])
+    assert status_result.exit_code == 0, status_result.output
+    payload = json.loads(status_result.output)
+    assert payload["collections"] > 0
+    assert payload["sources"] > 0
 
 
 def _drain(settings: Settings) -> int:

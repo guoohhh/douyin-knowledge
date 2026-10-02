@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,6 +18,7 @@ from douyin_knowledge.capture.scope import (
     CAPTURE_SCOPE_KEY,
     CaptureScope,
     get_capture_scope,
+    initialize_capture_scope,
     set_capture_scope,
 )
 from douyin_knowledge.capture.sync import CaptureSyncService
@@ -98,6 +101,69 @@ def test_bootstrap_existing_rows_once_and_round_trip(session: Session) -> None:
 def test_fresh_bootstrap_is_explicit_empty_scope(session: Session) -> None:
     assert session.get(AppSetting, CAPTURE_SCOPE_KEY) is None
     assert get_capture_scope(session) == CaptureScope()
+    assert session.get(AppSetting, CAPTURE_SCOPE_KEY).value_json == CaptureScope().model_dump()
+
+
+def test_fresh_packaged_fixture_scope_uses_actual_provider(session: Session, settings: Settings) -> None:
+    expected = [item.external_collection_id for item in FixtureCaptureProvider().list_collections()]
+    scope = initialize_capture_scope(session, settings)
+    assert scope == CaptureScope(default_favorites=False, named_collection_ids=expected)
+    assert session.get(AppSetting, CAPTURE_SCOPE_KEY).value_json == scope.model_dump()
+
+
+def test_custom_fixture_dir_bootstrap_uses_configured_provider(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture_dir = tmp_path / "custom-fixture"
+    fixture_dir.mkdir()
+    (fixture_dir / "collections.json").write_text(
+        json.dumps([{"external_collection_id": "custom-only", "name": "Custom"}]),
+        encoding="utf-8",
+    )
+    (fixture_dir / "sources.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setenv("DK_CAPTURE_FIXTURE_DIR", str(fixture_dir))
+    settings = Settings(_env_file=None)
+    assert settings.capture_fixture_dir == fixture_dir
+    assert initialize_capture_scope(session, settings).named_collection_ids == ["custom-only"]
+
+
+def test_existing_rows_win_over_fixture_provider(
+    session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session.add(Collection(platform="douyin", external_collection_id="legacy", name="Legacy"))
+    session.flush()
+    monkeypatch.setattr(
+        "douyin_knowledge.capture.registry.get_capture_provider",
+        lambda _: pytest.fail("existing rows must avoid fixture provider reads"),
+    )
+    assert initialize_capture_scope(session, settings).named_collection_ids == ["legacy"]
+
+
+def test_explicit_empty_fixture_scope_stays_empty(
+    session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_capture_scope(session, CaptureScope())
+    monkeypatch.setattr(
+        "douyin_knowledge.capture.registry.get_capture_provider",
+        lambda _: pytest.fail("explicit empty scope must avoid fixture provider reads"),
+    )
+    assert initialize_capture_scope(session, settings) == CaptureScope()
+    queue = JobQueue(session)
+    job = queue.enqueue(JobType.SYNC_CAPTURE_SCOPE, payload={}).job
+    handle_sync_capture_scope(JobContext(job, session, queue, settings))
+    assert session.query(Job).filter(Job.job_type == JobType.SYNC_NAMED_COLLECTION).count() == 0
+    assert initialize_capture_scope(session, settings) == CaptureScope()
+
+
+def test_fresh_real_douyin_scope_never_reads_provider(
+    session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings.capture_provider = "douyin"
+    monkeypatch.setattr(
+        "douyin_knowledge.capture.registry.get_capture_provider",
+        lambda _: pytest.fail("real Douyin bootstrap must not read provider"),
+    )
+    assert initialize_capture_scope(session, settings) == CaptureScope()
     assert session.get(AppSetting, CAPTURE_SCOPE_KEY).value_json == CaptureScope().model_dump()
 
 
