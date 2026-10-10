@@ -394,6 +394,9 @@ This section is an index. Each story should later become a full narrative chapte
 | Chunk is not citation | One ASR chunk may map to dozens of evidence units; selecting one arbitrary unit can cite unrelated speech | e6afd9f8d173; test_evidence_projection.py |
 | Long-media WebSocket reliability | A real 841.721 s prepared WAV completed successfully when split into three bounded Doubao sessions; all sessions succeeded with zero retries | b08efb04f975; real Stage 3D validation |
 | Segmented ASR status | Bounded provider sessions and restoration to the original media timeline are REAL VALIDATED. Midpoint-only overlap reconciliation is DISPROVEN as sufficient because adjacent sessions can segment the same underlying speech into different utterance boundaries | b08efb04f975; real Stage 3D boundary diagnostics |
+| Capture Scope vs observation vs policy | V1 target selection, last membership observation and eligibility have distinct lifecycles; clean-fixture bootstrap regression found in CI | e5ee8e9; e50e871; 065376f; PR #2 |
+| ASR success without evidence | Successful empty output must not claim L2 or create fake timestamp-less evidence; provider errors remain distinct | 423dee12; test_media_asr_closes_loop.py |
+| Logging metadata can break extraction | Reserved LogRecord extra field was changed and explicitly tested at INFO level | ddfbbb91; test_extraction.py |
 | Wiki is compiled state | Policy/current-run/grounding changes can remove support and archive pages without deleting history | Wiki builder + DEC-019 |
 
 ---
@@ -953,17 +956,112 @@ The current architecture already has provider-role separation and secret-aware c
 
 ---
 
-## 13B. Stage 3E Capture Scope (feature-branch implementation; not live validated)
+## 13B. Stage 3E Capture Scope: selection is not observation and observation is not knowledge
 
-On draft PR #2, branch `feature/stage3e-capture-scope` at `065376f164927b7e373b6effc3015794aaaf2f2f`, Stage 3E implements persisted Capture Scope and independent target sync. This is CODE IMPLEMENTED / UNIT + CI TESTED, **not** a completed real Douyin validation or merge into `integration/v1`.
+**Current evidence boundary:** branch `feature/stage3e-capture-scope` at `065376f164927b7e373b6effc3015794aaaf2f2f`, draft [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2). The feature has code, unit/integration-fixture tests, and passing GitHub CI. **It is not merged into `integration/v1`; live default-favorites capture and real-account E2E on this branch are NOT VALIDATED.** No real Douyin requests or paid AI calls were made in the PR's stated verification.
 
-The design separates **which targets to observe** from **what was observed** and from **Processing Policy**. A non-secret `capture.scope.douyin` setting records default-favorites selection and named IDs; it bootstraps once from existing named collections, never silently enables default favorites, and preserves explicit empty selections. Fresh fixture initialization required follow-up repair `e50e871`. Default favorites uses a distinct provider method and observation/completion tables, not a fabricated Collection; the same video remains one Source across targets.
+### Problem and architectural boundary
 
-The `SYNC_CAPTURE_SCOPE` job fans out durable `SYNC_DEFAULT_FAVORITES` and `SYNC_NAMED_COLLECTION` jobs with independent dedupe keys and retries. Deselected queued targets skip before provider access; a walk already in progress finishes coherently. Only a complete pagination walk may mark missing membership absent or advance completion state. Deselection preserves Sources, membership history, evidence, derived knowledge and policy. `065376f` adds read-only target discovery API/CLI: upstream discovery failure is reported explicitly while saved scope and local state remain visible, not misrepresented as an empty collection list.
+V1 has to observe (a) default `收藏 → 视频`, (b) one named folder, or (c) several named folders, without treating them as mutually exclusive or treating a user's choice of capture targets as a Processing Policy rule. A source can appear in multiple targets. A target disappearing from the selection is not proof that the source has been deleted or that past evidence has become invalid.
 
-Evidence: `capture/scope.py`, `capture/discovery.py`, `capture/sync.py`, `jobs/handlers.py`, `capture/douyin_provider.py`, migration `0006_capture_scope_observations.py`, `tests/unit/test_capture_scope.py`, `tests/unit/test_capture_discovery.py`. PR #2 reports 76 focused tests and 887 backend tests passing (4 skipped); Backend CI, Frontend CI and Integration Smoke all passed on 2026-10-04 for head `065376f`. PR explicitly reports **no real Douyin requests**; default-favorites adapter targets a separately validated DTK fork contract. Live default-favorites reconciliation, daily 03:00 scheduling, missed-run startup catch-up and user-facing provider/model selection must not be marked shipped based on this evidence.
+Three lifecycles must remain distinct:
 
-**Lesson:** selection, observation and knowledge eligibility have different lifecycles; do not let one implicitly delete or overwrite another.
+1. **Selection / Capture Scope:** which upstream lists the user currently asks us to observe.
+2. **Observation / Membership:** which sources appeared in which list at a successful observation time.
+3. **Knowledge / Processing Policy:** whether and how an observed source is processed and made eligible for answers.
+
+Only the first is directly edited by the user choosing capture targets. A deselection must not implicitly delete Source, observations, EvidenceUnits, Claims, or Processing Policy decisions. This matters to Personal External Memory: stopping future observation must not silently destroy one's past memory.
+
+### First implementation and why default favorites is not a fake Collection
+
+Commit `e5ee8e9` introduced a non-secret, versioned `app_settings` entry (`capture.scope.douyin`) with:
+
+~~~yaml
+schema_version: 1
+platform: douyin
+default_favorites: false
+named_collection_ids: []
+~~~
+
+The list is normalized, deduplicated and nonempty-ID validated. The default target is **off unless selected**. For legacy databases, initial selection is inferred once from existing local named Collection rows; an explicit saved empty selection must stay empty. Migrations create observation tables but do not infer user intent.
+
+Default favorites is **not** a named folder. It uses a separate provider operation `list_default_favorite_sources` (the Stage 3E adapter targets `GET /api/v1/douyin/user/bookmarks` through a separately validated DTK fork), and separate `SourceDefaultFavoriteObservation` / `DefaultFavoritesSyncState` tables. Named folders retain their `SourceCollectionMembership` history. The same video is one `Source` under multiple observations, rather than copies per target. Sidecar session identity/credentials remain outside this non-secret selection setting.
+
+**Do not confuse code that calls this fork route with real proof that it works on the user's configured sidecar/account.** The historical default-favorites limitation and the new fork route are separate evidence; §14.1 remains open.
+
+### Durable target jobs and the prune invariant
+
+`SYNC_CAPTURE_SCOPE` fans out `SYNC_DEFAULT_FAVORITES` and a `SYNC_NAMED_COLLECTION` for each selected named ID. Each target has its own dedupe key, attempts, failure history and completion status. The fan-out itself does not fetch provider content. A target handler reloads Capture Scope at execution time: if deselected before starting, it skips without a provider call. Once a page walk starts it is completed coherently rather than being interrupted by mid-walk selection changes.
+
+This retains the older foundational safety property:
+
+> A missing item is evidence of absence **only after a complete, authoritative walk of that target**.
+
+On partial pagination / a broken cursor, already-seen sources can be upserted but unseen memberships are not marked absent. The named target's `last_synced_at_ms` and the default target's `last_completed_at_ms` advance only on completed walks. Deselecting a target simply stops new observation.
+
+The older `SYNC_COLLECTIONS` and `SYNC_COLLECTION_SOURCES` job names remain compatibility handlers. A single-target sync also preserves `auto_process` and the API accepts the frontend's `collection_id` alias for `collection_external_id`; migration cannot quietly break already shipped clients.
+
+### CI-exposed fresh-database regression
+
+The initial `e5ee8e9` PR checks had **Backend CI failure** and **Integration Smoke failure**, while Frontend CI passed. The follow-up `e50e871` commit explicitly repaired *fresh fixture Capture Scope initialization*.
+
+Why that case matters: a fresh fixture database has no previously captured Collection rows. Bootstrapping selection **only** from local persisted collections therefore produces an empty scope; a subsequent demo sync fans out to no targets. This can look correct in a previously populated development DB while breaking a clean installation.
+
+The repair `initialize_capture_scope` distinguishes three cases:
+
+- existing captured Collection rows: use those identities first;
+- fresh **fixture** DB with no selection or captured collections: ask the configured **local fixture provider** for its named IDs, honoring `DK_CAPTURE_FIXTURE_DIR`;
+- fresh **real Douyin** DB: persist an empty selection without upstream reads or guessing which targets the user wants.
+
+Once an explicit setting exists, even if empty, it is never silently replenished. Legacy fixture IDs are not sent to a real sidecar connection. Tests cover fresh packaged fixture, configured fixture directory, existing-row precedence, explicit empty scope, fresh real Douyin without provider reads, and CLI demo sync from a clean DB.
+
+**Evidence strength:** the commit and tests identify the initialization mismatch; the CI failure-to-green sequence independently shows regression and repair at the workflow level. This is not evidence that the real-account default favorites endpoint worked.
+
+### Discovery is an optional read-only projection, not a selection rewrite
+
+Commit `065376f` added `capture/discovery.py`, `GET /api/sources/capture-scope/targets`, and scriptable `dk capture scope|discover|set-default|set-collections`.
+
+A discovery request reads upstream **named-target metadata**, not target contents, and joins it with saved scope and local last-sync observations. It preserves selected but currently undiscoverable target IDs rather than erasing them. Discovery failures return `discovery.state=error` with a safe error code **alongside the saved scope and local history**; they are not disguised as a legitimate empty upstream list. CLI discovery exits nonzero on such a failure. Editing selection does not discover, sync, or touch Processing Policy.
+
+The endpoint's `default_favorites.available` is a configured-provider capability indication, **not a successful runtime sidecar probe**. It must not be described as live availability validation.
+
+A small but important late fix hardens named-folder discovery pagination: `has_more=true` without a cursor now raises instead of returning the first page as if complete.
+
+### Evidence and validation ledger
+
+| Item | Status | Source |
+| --- | --- | --- |
+| Persisted selection, observation tables, per-target queue, deselection behavior | CODE IMPLEMENTED | e5ee8e9; scope.py; sync.py; handlers.py; migration 0006 |
+| Fresh fixture bootstrap / explicit empty / real-mode separation | CODE + TEST PROVEN | e50e871; test_capture_scope.py; test_cli.py |
+| Read-only target discovery and API/CLI projection | CODE + TEST PROVEN | 065376f; discovery.py; test_capture_discovery.py; test_api.py |
+| Latest feature-branch CI at 065376f | CI PASS (2026-10-04) | Python 3.10, Python 3.12, lint/types, frontend build, integration smoke |
+| Default-favorites route on the user's real sidecar/account | NOT REAL VALIDATED | PR #2 explicitly made no real Douyin requests |
+| Daily 03:00 scheduling, missed-run catch-up on startup | V1 DECIDED; NOT established implemented here | §13A, not this feature's implementation |
+| User-facing main AI / ASR model selection and key management | V1 DECIDED; not established shipped here | §13A |
+
+PR #2 reports 76 focused tests and 887 backend tests passing (4 skipped) at its local validation point. The five GitHub check runs for head `065376f` are independently all green; a frontend client exercised against a live **local API** in smoke CI is **not** proof of a live Douyin provider call.
+
+Owning modules: `capture/scope.py`, `capture/discovery.py`, `capture/douyin_provider.py`, `capture/pagination.py`, `capture/sync.py`, `jobs/handlers.py`, `api/routes/sources.py`, `cli/commands_capture.py`; migration `0006_capture_scope_observations.py`. Main tests: `tests/unit/test_capture_scope.py`, `tests/unit/test_capture_discovery.py`, `tests/test_api.py`, `tests/test_cli.py`.
+
+### Tradeoffs and interview story
+
+- A one-time bootstrap from **existing local observations** protects upgrade behavior, but a new database has no observations. Fresh fixture and fresh real account require intentionally different defaults.
+- A target's saved selection and the provider's live discovery may diverge; surfacing both is more truthful than letting a transient upstream failure erase a preference.
+- The system deliberately preserves stopped targets' historical observations and knowledge. It does **not** automatically interpret deselection as “forget my content.”
+- The real fork endpoint remains an integration risk until an authenticated, complete page walk and persistence are observed; CI cannot settle upstream contracts.
+
+**Interview version:** “Adding a multi-source import setting forced us to separate user intent, historical membership and knowledge eligibility. Our first version passed in populated databases but broke clean fixture installation. We fixed one-time bootstrap semantics, made target work independently retryable and guarded every absence claim on a complete provider walk.”
+
+---
+
+## 13C. Small but important Stage 3D/3D4 outcome semantics (CODE + TEST)
+
+Two later fixes on the real-sidecar line are separate from the successful b08 segmented-session experiment. They are **not** proof that boundary stitching passed new real validation.
+
+1. **Reserved logging fields can turn successful entity creation into a failure.** Commit `ddfbbb91` changed structured log `extra={"name": ...}` to `extra={"entity_name": ...}` because `name` is a reserved Python `LogRecord` attribute. The regression test enables INFO logging while creating a real `Entity`. Lesson: observability code can participate in business-path correctness, and a test with a quiet logger may miss a production logging exception.
+2. **“ASR returned successfully” does not imply “usable timestamped transcript exists.”** Commit `423dee12` records `asr_empty_result` when a successful provider response has neither usable segments nor nonblank full text; `asr_no_usable_segments` when full text exists but no usable timestamped segments can be persisted. A thrown provider exception stays `asr_failed`. The corresponding tests assert `achieved_level=1` rather than falsely claiming L2 for a successful-but-empty response, no fabricated ASR EvidenceUnits, and a persisted job event carrying the run id and notes. The overall processing run may still be `succeeded` at L1; **run execution status, requested level and achieved knowledge level are different facts**.
+
+Modules/tests: `extraction/entity_resolver.py`, `tests/test_extraction.py`; `extraction/orchestrator.py`, `tests/unit/test_media_asr_closes_loop.py`. Both are CODE + TEST observations; live reproduction circumstances, if any, need separate run artifacts.
 
 ---
 
@@ -1060,6 +1158,9 @@ These are not all bugs. They are places where the current design knowingly buys 
 - Media retention policy is coarse rather than per-collection.
 - The exact SQLAlchemy 2.1 incompatibility is not retained in repository history.
 - Stage 3D full-corpus robustness is ongoing, so corpus-wide failure rates are not yet frozen.
+- Stage 3E default favorites is wired to a fork-specific provider route but is not yet verified by real-account authenticated end-to-end capture.
+- Stage 3E Capture Scope discovery capability is not a live provider-health proof; display saved selection and provider discovery status independently.
+- V1 03:00 scheduled sync/startup catch-up and user-facing provider/model selection still need separate implementation and verification evidence.
 
 Source: docs/DECISIONS.md “Known gaps” plus current code at the baseline SHA.
 
@@ -1081,6 +1182,8 @@ The following questions are worth answering from old conversations, terminal log
 | Rejected ASR/model alternatives | Needed for a complete “why this vendor” explanation |
 | Stage 3C real prompt/answer/citation artifacts | Makes grounding stories reproducible rather than commit-message-only |
 | Full-corpus Stage 3D statistics | Needed before declaring robustness complete |
+| Stage 3E default-favorites real E2E / fork compatibility | Distinguishes newly wired adapter path from validated product use |
+| Daily 03:00 scheduler / missed-run recovery | Decision recorded; implementation and lifecycle tests not established in Stage 3E PR |
 | Any manual DB repair commands used during Phase 3 | Important for migration/recovery story and future runbook |
 | CI run URLs for milestone SHAs | Independent evidence that a state was green |
 
