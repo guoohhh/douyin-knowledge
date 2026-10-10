@@ -151,3 +151,4 @@ def test_real_douyin_discovery_uses_only_named_collection_endpoint(
     assert len(requests) == 1
     assert requests[0].url.path == "/api/v1/douyin/user/collections"
     assert requests[0].url.params["identity"] == "local-identity"
+    assert client.is_closed

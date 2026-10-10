@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from douyin_knowledge.capture.douyin_provider import DouyinCaptureProvider
 from douyin_knowledge.capture.registry import get_capture_provider
 from douyin_knowledge.capture.scope import CaptureScope, initialize_capture_scope
 from douyin_knowledge.config.settings import Settings
@@ -83,6 +84,7 @@ def discover_capture_targets(session: Session, settings: Settings) -> CaptureTar
             ),
         )
 
+    provider = None
     try:
         provider = get_capture_provider(settings)
         discovered = provider.list_collections()
@@ -107,6 +109,11 @@ def discover_capture_targets(session: Session, settings: Settings) -> CaptureTar
                 selected=scope.selects_named(item.external_collection_id),
                 last_synced_at_ms=previous.last_synced_at_ms if previous else None,
             )
+    finally:
+        # Discovery creates a short-lived sidecar HTTP client via the registry.
+        # It owns that client; target sync jobs manage their own provider lifetime.
+        if isinstance(provider, DouyinCaptureProvider):
+            provider.close()
 
     default_state = session.get(DefaultFavoritesSyncState, "douyin")
     return CaptureTargets(

@@ -16,6 +16,14 @@ const run = async () => {
   need(health.status === 'ok', 'health')
   const { collections } = await api.collections()
   need(collections.length === 3 && collections[0].name, 'collections carry names')
+  const captureScope = await api.captureScope()
+  const captureTargets = await api.captureTargets()
+  need(captureScope.schema_version === 1 && captureScope.platform === 'douyin', 'saved capture scope')
+  need(captureTargets.discovery.state === 'ok' && captureTargets.default_favorites.available,
+    'capture targets include distinct default favorites capability')
+  need(captureTargets.named_collections.length === collections.length &&
+    captureTargets.named_collections.every((target) => target.discovered && target.selected),
+    'fixture target discovery matches saved selection')
   const list = await api.sources({ limit: 3 })
   need(list.sources.length === 3 && list.total >= 8, 'sources list')
   const detail = await api.source(list.sources[0].id)

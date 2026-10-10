@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { actionLabel, dateTime, errorMessage, ruleTypeLabel } from '../lib/format'
+import { CaptureScopeSection } from './CaptureScopeSection'
 
 function Figures() {
   const stats = useQuery({ queryKey: ['stats'], queryFn: api.stats })
@@ -47,16 +48,16 @@ function Figures() {
 function Models() {
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings })
   if (!settings.data) return null
-  const { settings: values, resolved_models, demo_mode } = settings.data
+  const { resolved_models, ai_provider, openai_api_key } = settings.data
   // `openai_api_key` arrives from the API as a boolean, never the value: the settings
   // endpoint can answer "is a key configured" but has no way to answer "with what".
-  const hasKey = values['openai_api_key'] === true
+  const hasKey = openai_api_key === true
 
   return (
     <section>
       <h2>模型</h2>
       <p className="muted" style={{ fontSize: '0.85rem', maxWidth: '68ch' }}>
-        {demo_mode
+        {ai_provider === 'mock'
           ? '现在用的是模拟模型，不联网、不花钱，回答内容只是占位。要真实结果就在 .env 里填 DK_OPENAI_API_KEY，然后重启服务。'
           : '已接入真实模型。每次处理都会把实际调用的模型名记进运行记录里。'}
       </p>
@@ -236,9 +237,9 @@ function Rules() {
 
   return (
     <section>
-      <h2>处理规则</h2>
+      <h2>处理策略 · 处理规则</h2>
       <p className="muted" style={{ fontSize: '0.85rem', maxWidth: '68ch' }}>
-        不是所有收藏都值得花模型调用。规则在处理前生效，每次判断都会记下理由，
+        采集范围决定哪些收藏进入系统；处理策略决定进入后是否花费模型调用。规则在处理前生效，每次判断都会记下理由，
         所以某条为什么没被处理，永远查得到。
       </p>
 
@@ -450,10 +451,6 @@ function Decisions() {
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
-  const sync = useMutation({
-    mutationFn: () => api.sync({ auto_process: true }),
-    onSuccess: () => queryClient.invalidateQueries(),
-  })
   const reindex = useMutation({
     mutationFn: () => api.reindex(),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['stats'] }),
@@ -468,10 +465,9 @@ export function SettingsPage() {
 
       <Figures />
 
+      <CaptureScopeSection />
+
       <div className="chips">
-        <button className="btn" onClick={() => sync.mutate()} disabled={sync.isPending}>
-          同步并处理
-        </button>
         <button
           className="btn btn--quiet"
           onClick={() => reindex.mutate()}
@@ -481,9 +477,7 @@ export function SettingsPage() {
           重建索引
         </button>
       </div>
-      {sync.isSuccess || reindex.isSuccess ? (
-        <p className="notice">已交给后台，处理进度看上面的数字。</p>
-      ) : null}
+      {reindex.isSuccess ? <p className="notice">索引重建已交给后台。</p> : null}
 
       <Models />
       <Rules />
