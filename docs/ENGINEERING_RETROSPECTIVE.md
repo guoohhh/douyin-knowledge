@@ -850,17 +850,29 @@ downstream EvidenceUnit run    NOT RUN
 
 The downstream EvidenceUnit run was deliberately not continued after this validation because the transcript still contained cross-boundary duplicate speech. Persisting that output would turn a known reconciliation defect into durable evidence.
 
-### What we are doing next
+### Post-baseline engineering update: conservative boundary stitching (CODE + TEST EVIDENCE, NOT REAL VALIDATED)
 
-Do **not** promote a new deduplication algorithm into this retrospective yet.
+The b08 run remains the last real source-level validation recorded above: provider sessions and timestamps succeeded, midpoint-only reconciliation failed, and the downstream EvidenceUnit run was **NOT RUN**.
 
-The current work is a narrow diagnostic intended to identify the weakest deterministic cross-boundary rule that removes genuine duplicates without deleting legitimate repeated speech.
+Since that run, branch `fix/stage3d-boundary-stitching` adds `_stitch_boundaries` after midpoint ownership. This is a **new implementation and a regression-tested hypothesis**, not proof of an accepted real E2E outcome. No subsequent live Doubao retranscription or EvidenceUnit validation is established by the code inspected here.
 
-The important engineering lesson at this point is methodological:
+The rule is deliberately narrow. It proposes a stitch only for two utterances from **adjacent provider sessions** that intersect in time, are near the shared boundary (the current backstop is 5,000 ms), and have a sufficiently long exact normalized suffix/prefix overlap (minimum 7 characters, chosen because the real 600 s duplicate is seven characters). Punctuation and spacing are removed for comparison, with a map from normalized characters back to raw-text offsets so deduplication does not erase unrelated original characters. If an utterance participates in more than one possible match, **no stitch is made**.
 
-> Do not confuse a property of the segmentation geometry with a property of an external recognizer's semantic segmentation.
+Unlike whole-utterance earlier-wins/later-wins, an accepted stitch retains both sides' unique speech, removes only the repeated right-side prefix, and uses the union of their time intervals. Candidate pairing is decided before emission; otherwise a right-side utterance that sorts first could be output twice, both alone and as part of a merged pair. These are **design/code statements**, not provider-quality guarantees.
 
-The overlap/core arithmetic is deterministic. ASR utterance boundaries are not.
+The new `backend/tests/unit/test_doubao_boundary_stitching.py` encodes both observed real boundary pairs at ~300 s and ~600 s and checks that the repeated phrase occurs once while unique text on each side survives. It also exercises non-stitch/ambiguity properties. Real boundary **fixtures** are valuable regression evidence, but do not turn this into **REAL VALIDATED**: until a fresh provider run and downstream validation confirm quality, cross-boundary reconciliation remains **PENDING REAL VALIDATION**.
+
+The underlying invariant learned from the failure is unchanged:
+
+> audio overlap != ASR utterance-boundary overlap
+
+The overlap/core arithmetic is deterministic. ASR utterance boundaries are not. The safe tradeoff is asymmetric: a missed stitch leaves a visible duplicate; an incorrect stitch silently deletes speech and damages evidence.
+
+Evidence:
+
+- `fix/stage3d-boundary-stitching`: `backend/src/douyin_knowledge/ai/adapters/doubao_adapter.py`, `_reconcile`, `_stitch_boundaries`, `_stitch_candidates`;
+- `backend/tests/unit/test_doubao_boundary_stitching.py` — real-failure-shaped unit fixtures and guard tests;
+- b08efb04f975641b41c0a368eba0a35bf88245bd — original real-run evidence, **not** post-fix validation.
 
 ### Failure semantics that remain valid
 
