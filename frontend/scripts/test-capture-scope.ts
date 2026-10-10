@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import { api } from '../src/api/client'
 import type { CaptureScope, CaptureTargets, NamedCollectionTarget } from '../src/api/types'
-import { canSyncScope, copyScope, scopeChanged, toggleNamed, visibleNamedTargets } from '../src/lib/captureScope'
+import { canSyncScope, copyScope, scopeChanged, syncAcceptanceMessage, toggleNamed, visibleNamedTargets } from '../src/lib/captureScope'
+
+// The Collections browser must navigate to the single explicit sync control.
+const collectionsPage = readFileSync('src/pages/CollectionsPage.tsx', 'utf8')
+assert.match(collectionsPage, /to="\/settings#capture-scope-title"/)
+assert.doesNotMatch(collectionsPage, /api\.sync\(|auto_process:\s*true/)
 
 const empty: CaptureScope = {
   schema_version: 1, platform: 'douyin', default_favorites: false, named_collection_ids: [],
@@ -44,6 +50,7 @@ assert.deepEqual(visibleNamedTargets(saved, []).map((row) => row.external_collec
 
 let persisted = copyScope(empty)
 let syncCalls = 0
+let reuseSyncJob = false
 const requests: Array<{ path: string; method: string; body: unknown }> = []
 const targets: CaptureTargets = {
   scope: persisted,
@@ -65,7 +72,10 @@ globalThis.fetch = async (input, init) => {
   } else if (path === '/api/sources/capture-scope/targets') response = targets
   else if (path === '/api/sources/sync') {
     syncCalls++
-    response = { job_id: 'job_one', job_type: 'sync_capture_scope', status: 'queued', created: true }
+    response = {
+      job_id: reuseSyncJob ? 'job_old' : 'job_one', job_type: 'sync_capture_scope',
+      status: reuseSyncJob ? 'running' : 'queued', created: !reuseSyncJob,
+    }
   } else if (path === '/api/sources/src_one/process') {
     response = { job_id: 'job_two', job_type: 'process_source', status: 'queued', created: false }
   } else throw new Error(`Unexpected request ${method} ${path}`)
@@ -96,6 +106,18 @@ assert.deepEqual(accepted, {
   job_id: 'job_one', job_type: 'sync_capture_scope', status: 'queued', created: true,
 })
 assert.deepEqual(requests.find((r) => r.path === '/api/sources/sync')?.body, { auto_process: false })
+assert.match(syncAcceptanceMessage(accepted), /新同步任务已受理/)
+assert.match(syncAcceptanceMessage(accepted), /不代表同步完成/)
+
+await api.sync({ auto_process: true })
+assert.deepEqual(requests.filter((r) => r.path === '/api/sources/sync').at(-1)?.body,
+  { auto_process: true })
+reuseSyncJob = true
+const reusedSync = await api.sync({ auto_process: false })
+assert.equal(reusedSync.created, false)
+assert.equal(reusedSync.status, 'running')
+assert.match(syncAcceptanceMessage(reusedSync), /本次 AI 处理勾选不会更改该任务原有的处理选项/)
+assert.match(syncAcceptanceMessage(reusedSync), /复用不代表同步完成/)
 const reused = await api.processSource('src_one')
 assert.equal(reused.created, false)
 assert.equal(reused.status, 'queued')

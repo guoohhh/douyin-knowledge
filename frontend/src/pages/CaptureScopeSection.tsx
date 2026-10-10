@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type { CaptureScope } from '../api/types'
 import { dateTime, errorMessage, statusLabel } from '../lib/format'
-import { canSyncScope, copyScope, scopeChanged, toggleNamed, visibleNamedTargets } from '../lib/captureScope'
+import { canSyncScope, copyScope, scopeChanged, syncAcceptanceMessage, toggleNamed, visibleNamedTargets } from '../lib/captureScope'
 
 const lastSync = (value: number | null) =>
   value == null ? '从未完整同步' : `上次完整同步：${dateTime(value)}`
@@ -156,11 +156,11 @@ export function CaptureScopeSection() {
               checked={autoProcess}
               onChange={(event) => setAutoProcess(event.target.checked)}
             />
-            同步后按处理策略处理来源（可能调用付费 AI 服务）
+            为本次新建的同步任务启用处理策略（可能调用付费 AI 服务）
           </label>
           <p className="faint">
-            未勾选时只同步来源元数据；勾选后仍先经过下方的处理策略判断。
-            同步任务被接受后会在后台运行，接受不代表同步完成。
+            未勾选时，本次请求创建的任务使用仅同步元数据选项；勾选后，新建的处理任务仍先经过下方的处理策略判断。
+            已排队或运行的任务会沿用原有处理选项，可能触发 AI 处理；切换勾选不会修改或取消它们。
           </p>
 
           <div className="capture-scope__actions">
@@ -188,9 +188,9 @@ export function CaptureScopeSection() {
 
           {sync.isSuccess ? (
             <p className="notice" role="status">
-              {sync.data.created ? '同步任务已提交' : '已有相同的同步任务，继续使用该任务'}
+              {syncAcceptanceMessage(sync.data)}
               （{statusLabel(sync.data.status)}，任务 <span className="mono">{sync.data.job_id}</span>）。
-              请稍后查看来源和处理状态。
+              请稍后查看任务、来源和处理状态。
             </p>
           ) : null}
           {sync.isError ? <p className="notice notice--error">同步提交失败：{errorMessage(sync.error)}</p> : null}

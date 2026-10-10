@@ -1,4 +1,4 @@
-import type { CaptureScope, NamedCollectionTarget } from '../api/types'
+import type { CaptureScope, JobAccepted, NamedCollectionTarget } from '../api/types'
 
 export function copyScope(scope: CaptureScope): CaptureScope {
   return { ...scope, named_collection_ids: [...scope.named_collection_ids] }
@@ -48,4 +48,10 @@ export function visibleNamedTargets(
 export function canSyncScope(saved: CaptureScope, draft: CaptureScope): boolean {
   return !scopeChanged(saved, draft) &&
     (saved.default_favorites || saved.named_collection_ids.length > 0)
+}
+
+export function syncAcceptanceMessage(job: JobAccepted): string {
+  return job.created
+    ? '新同步任务已受理；接受不代表同步完成。'
+    : '复用了已有同步任务；本次 AI 处理勾选不会更改该任务原有的处理选项。复用不代表同步完成。'
 }
