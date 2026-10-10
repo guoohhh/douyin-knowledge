@@ -971,14 +971,14 @@ Evidence: `capture/scope.py`, `capture/discovery.py`, `capture/sync.py`, `jobs/h
 
 ### 14.1 Default/all-favorites API limitation
 
-Current capture code is built around:
+The original b08 capture code was built around:
 
 - /{platform}/user/collections
 - /{platform}/collection/posts with an explicit collection_id
 
 The provider comments also document that the folder-list endpoint is session-scoped and takes no author.
 
-This supports the current **named collection** capture path.
+This supported the original **named collection** capture path. The later Stage 3E feature branch adds a distinct default-favorites adapter operation targeting a separately validated sidecar fork, but its PR reports no real Douyin requests. See §13B; the original upstream contract limitation and the new fork contract are different evidence states.
 
 However, the repository at b08 does **not** contain the original probe/log that established that the deployed DTK version could not expose the user's default/all-favorites feed through the required API.
 
