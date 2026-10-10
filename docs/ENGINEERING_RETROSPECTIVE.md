@@ -1310,6 +1310,12 @@ This list is deliberately selective. It maps engineering stories, not every comm
 - 2f6be24 — provable structured qualification
 - e6afd9f — multi-evidence citation projection
 - b08efb0 — bounded segmented long-media ASR
+- 4142ae8 / 638585f — conservative boundary stitching and order independence (CODE + TEST; not real validated)
+- ddfbbb9 — reserved LogRecord field guard during entity creation
+- 423dee1 — distinguish successful empty ASR from failed and usable evidence
+- e5ee8e9 — persistent Stage 3E Capture Scope and durable per-target sync
+- e50e871 — repair fresh fixture scope bootstrap after CI regression
+- 065376f — read-only target discovery API/CLI and pagination safety
 
 ---
 
