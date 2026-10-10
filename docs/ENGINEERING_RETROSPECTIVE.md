@@ -953,6 +953,20 @@ The current architecture already has provider-role separation and secret-aware c
 
 ---
 
+## 13B. Stage 3E Capture Scope (feature-branch implementation; not live validated)
+
+On draft PR #2, branch `feature/stage3e-capture-scope` at `065376f164927b7e373b6effc3015794aaaf2f2f`, Stage 3E implements persisted Capture Scope and independent target sync. This is CODE IMPLEMENTED / UNIT + CI TESTED, **not** a completed real Douyin validation or merge into `integration/v1`.
+
+The design separates **which targets to observe** from **what was observed** and from **Processing Policy**. A non-secret `capture.scope.douyin` setting records default-favorites selection and named IDs; it bootstraps once from existing named collections, never silently enables default favorites, and preserves explicit empty selections. Fresh fixture initialization required follow-up repair `e50e871`. Default favorites uses a distinct provider method and observation/completion tables, not a fabricated Collection; the same video remains one Source across targets.
+
+The `SYNC_CAPTURE_SCOPE` job fans out durable `SYNC_DEFAULT_FAVORITES` and `SYNC_NAMED_COLLECTION` jobs with independent dedupe keys and retries. Deselected queued targets skip before provider access; a walk already in progress finishes coherently. Only a complete pagination walk may mark missing membership absent or advance completion state. Deselection preserves Sources, membership history, evidence, derived knowledge and policy. `065376f` adds read-only target discovery API/CLI: upstream discovery failure is reported explicitly while saved scope and local state remain visible, not misrepresented as an empty collection list.
+
+Evidence: `capture/scope.py`, `capture/discovery.py`, `capture/sync.py`, `jobs/handlers.py`, `capture/douyin_provider.py`, migration `0006_capture_scope_observations.py`, `tests/unit/test_capture_scope.py`, `tests/unit/test_capture_discovery.py`. PR #2 reports 76 focused tests and 887 backend tests passing (4 skipped); Backend CI, Frontend CI and Integration Smoke all passed on 2026-10-04 for head `065376f`. PR explicitly reports **no real Douyin requests**; default-favorites adapter targets a separately validated DTK fork contract. Live default-favorites reconciliation, daily 03:00 scheduling, missed-run startup catch-up and user-facing provider/model selection must not be marked shipped based on this evidence.
+
+**Lesson:** selection, observation and knowledge eligibility have different lifecycles; do not let one implicitly delete or overwrite another.
+
+---
+
 ## 14. Topics with enough code evidence but incomplete historical evidence
 
 ### 14.1 Default/all-favorites API limitation
