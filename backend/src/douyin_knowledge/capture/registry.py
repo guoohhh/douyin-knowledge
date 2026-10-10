@@ -19,7 +19,7 @@ def get_capture_provider(settings: Settings) -> CaptureProvider:
     """Build the configured capture provider."""
     kind = settings.capture_provider
     if kind == "fixture":
-        return FixtureCaptureProvider()
+        return FixtureCaptureProvider(root=settings.capture_fixture_dir)
     if kind == "douyin":
         if not settings.douyin_sidecar_url or settings.douyin_sidecar_url.strip() == "":
             raise ConfigurationError(
@@ -28,5 +28,6 @@ def get_capture_provider(settings: Settings) -> CaptureProvider:
         return DouyinCaptureProvider(
             base_url=settings.douyin_sidecar_url,
             api_key=settings.douyin_sidecar_api_key,
+            identity=settings.douyin_sidecar_identity,
         )
     raise ConfigurationError(f"unknown capture provider {kind!r}")

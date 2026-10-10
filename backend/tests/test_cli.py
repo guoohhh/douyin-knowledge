@@ -63,6 +63,63 @@ def corpus(cli_env: Settings) -> Settings:
     return cli_env
 
 
+def test_fresh_fixture_cli_sync_builds_demo_corpus(cli_env: Settings) -> None:
+    result = runner.invoke(app, ["sync", "--no-process", "--wait"])
+    assert result.exit_code == 0, result.output
+    status_result = runner.invoke(app, ["status", "--json"])
+    assert status_result.exit_code == 0, status_result.output
+    payload = json.loads(status_result.output)
+    assert payload["collections"] > 0
+    assert payload["sources"] > 0
+
+
+def test_capture_cli_inspect_discover_and_set_round_trip(cli_env: Settings) -> None:
+    initial = runner.invoke(app, ["capture", "scope", "--json"])
+    assert initial.exit_code == 0, initial.output
+    assert json.loads(initial.output)["named_collection_ids"]
+
+    clear = runner.invoke(app, ["capture", "set-collections", "--json"])
+    assert clear.exit_code == 0, clear.output
+    assert json.loads(clear.output)["named_collection_ids"] == []
+    default = runner.invoke(app, ["capture", "set-default", "true", "--json"])
+    assert default.exit_code == 0, default.output
+    assert json.loads(default.output)["default_favorites"] is True
+    chosen = runner.invoke(app, ["capture", "set-collections", "--id", "one", "--id", "one", "--id", "two", "--json"])
+    assert chosen.exit_code == 0, chosen.output
+    assert json.loads(chosen.output)["named_collection_ids"] == ["one", "two"]
+
+    discovery = runner.invoke(app, ["capture", "discover", "--json"])
+    assert discovery.exit_code == 0, discovery.output
+    body = json.loads(discovery.output)
+    assert body["discovery"]["state"] == "ok"
+    assert body["scope"]["named_collection_ids"] == ["one", "two"]
+    assert body["default_favorites"]["selected"] is True
+    missing = {item["external_collection_id"]: item for item in body["named_collections"]}
+    assert not missing["one"]["discovered"] and missing["one"]["selected"]
+    assert runner.invoke(app, ["capture", "set-default", "false"]).exit_code == 0
+    assert json.loads(runner.invoke(app, ["capture", "scope", "--json"]).output)["default_favorites"] is False
+    assert json.loads(runner.invoke(app, ["status", "--json"]).output)["sources"] == 0
+
+
+def test_capture_cli_discovery_failure_reports_local_scope(
+    cli_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from douyin_knowledge.core.errors import CaptureUnavailable
+
+    assert runner.invoke(app, ["capture", "set-collections", "--id", "saved"]).exit_code == 0
+
+    def unavailable(_: Settings) -> None:
+        raise CaptureUnavailable("private sidecar detail")
+
+    monkeypatch.setattr("douyin_knowledge.capture.discovery.get_capture_provider", unavailable)
+    result = runner.invoke(app, ["capture", "discover", "--json"])
+    assert result.exit_code == 1
+    body = json.loads(result.output)
+    assert body["discovery"]["state"] == "error"
+    assert body["scope"]["named_collection_ids"] == ["saved"]
+    assert "private sidecar detail" not in result.output
+
+
 def _drain(settings: Settings) -> int:
     return Worker(register_default_handlers(), settings=settings, name="test").drain(
         max_jobs=200
@@ -111,6 +168,22 @@ class TestDoctorAndStatus:
 
 
 class TestPipeline:
+    def test_sync_one_collection_uses_worker_payload_contract(
+        self, cli_env: Settings
+    ) -> None:
+        result = runner.invoke(
+            app,
+            ["sync", "--collection", "col_food_hk", "--no-process", "--wait", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        status_result = runner.invoke(app, ["status", "--json"])
+        assert status_result.exit_code == 0, status_result.output
+        payload = json.loads(status_result.output)
+        assert payload["jobs_failed"] == 0
+        assert payload["collections"] == 1
+        assert payload["sources"] > 0
+        assert payload["processed"] == 0
+
     def test_sync_then_process_produces_knowledge(self, corpus: Settings) -> None:
         result = runner.invoke(app, ["status", "--json"])
         import json

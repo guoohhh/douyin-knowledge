@@ -116,6 +116,29 @@ class SourceCollectionMembership(Base):
     is_present: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
+class SourceDefaultFavoriteObservation(Base):
+    """Historical observation of one source in the default video favorites list."""
+
+    __tablename__ = "source_default_favorite_observations"
+    __table_args__ = (Index("ix_source_default_favorite_observations_present", "is_present"),)
+
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True
+    )
+    first_seen_at_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=now_ms)
+    last_seen_at_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=now_ms)
+    is_present: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class DefaultFavoritesSyncState(Base):
+    """Completion marker for the distinct default-favorites target."""
+
+    __tablename__ = "default_favorites_sync_state"
+
+    platform: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_completed_at_ms: Mapped[int | None] = mapped_column(Integer)
+
+
 class SourceAsset(Base):
     __tablename__ = "source_assets"
     __table_args__ = (

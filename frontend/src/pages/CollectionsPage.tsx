@@ -1,12 +1,11 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { date, duration, errorMessage, statusLabel } from '../lib/format'
 
 export function CollectionsPage() {
-  const queryClient = useQueryClient()
   const [collectionId, setCollectionId] = useState<string>('')
 
   const collections = useQuery({ queryKey: ['collections'], queryFn: api.collections })
@@ -14,17 +13,6 @@ export function CollectionsPage() {
   const sources = useQuery({
     queryKey: ['sources', collectionId],
     queryFn: () => api.sources({ ...(collectionId ? { collection_id: collectionId } : {}), limit: 100 }),
-  })
-
-  const sync = useMutation({
-    mutationFn: () => api.sync({ auto_process: true }),
-    onSuccess: () => {
-      // The sync runs in the worker, so the counts move some seconds later. Invalidating
-      // now shows the queued state; the 5s staleTime picks up the rest without a refresh.
-      queryClient.invalidateQueries({ queryKey: ['collections'] })
-      queryClient.invalidateQueries({ queryKey: ['sources'] })
-      queryClient.invalidateQueries({ queryKey: ['stats'] })
-    },
   })
 
   const rows = sources.data?.sources ?? []
@@ -56,19 +44,10 @@ export function CollectionsPage() {
             {collection.name ?? collection.external_collection_id}（{collection.source_count}）
           </button>
         ))}
-        <button
-          className="btn btn--quiet"
-          onClick={() => sync.mutate()}
-          disabled={sync.isPending}
-        >
-          {sync.isPending ? '同步已排队' : '同步收藏夹'}
-        </button>
+        <Link className="btn btn--quiet" to="/settings#capture-scope-title">
+          前往采集范围设置与同步
+        </Link>
       </div>
-
-      {sync.isError ? <p className="notice notice--error">{errorMessage(sync.error)}</p> : null}
-      {sync.isSuccess ? (
-        <p className="notice">同步已交给后台，处理完这里的状态会自己更新。</p>
-      ) : null}
 
       {sources.isPending ? <p className="muted">读取中…</p> : null}
       {sources.isError ? (
@@ -79,7 +58,7 @@ export function CollectionsPage() {
         <div className="empty">
           <h3>这里还没有收藏</h3>
           <p className="muted">
-            点上面的「同步收藏夹」。演示模式下会拉取一份内置的示例收藏，不需要登录。
+            前往采集范围设置选择目标并手动同步。演示模式使用内置示例收藏，不需要登录。
           </p>
         </div>
       ) : null}

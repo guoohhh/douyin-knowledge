@@ -200,6 +200,7 @@ class CaptureProvider(Protocol):
     async def health(self) -> ProviderHealth: ...
     async def list_collections(self) -> list[ExternalCollection]: ...
     async def iter_collection_sources(self, collection_id: str): ...
+    async def list_default_favorite_sources(self, cursor: str | None, limit: int): ...
     async def fetch_source(self, external_id: str) -> ExternalSource: ...
     async def acquire_media(self, external_id: str) -> MediaHandle: ...
 ```
@@ -226,6 +227,41 @@ CaptureProvider
 Douyin credentials/cookies should remain inside the Douyin sidecar where possible.
 
 Douyin Knowledge stores only the sidecar connection configuration/API key required to call the local service.
+
+### Stage 3E Capture Scope
+
+The persisted, non-secret `capture.scope.douyin` setting selects the default video
+favorites target and zero or more named collection IDs. It decides which upstream
+lists are observed. Processing Policy remains a separate decision after capture;
+editing scope never writes policy rules or decisions. On a database without this
+setting, first initialization persists `default_favorites=false` and the external
+IDs of already captured named collections. If there are no captured collections
+and the configured provider is `fixture`, initialization reads that local fixture
+provider's named collections, including a configured `DK_CAPTURE_FIXTURE_DIR`.
+A fresh real Douyin database persists an empty scope without provider reads.
+An existing empty setting remains an explicit choice and is never repopulated.
+The schema migration creates only tables and never infers a scope. In fixture
+mode, legacy `platform=fixture` collection rows also qualify for bootstrap;
+real Douyin mode never imports those synthetic target IDs.
+
+Default video favorites use `CaptureProvider.list_default_favorite_sources`,
+implemented by the Douyin adapter through `GET /api/v1/douyin/user/bookmarks`.
+They are not modeled as a `Collection`. The sidecar identity/session remains in
+sidecar configuration, outside the product database.
+
+Stage 3E-4 keeps discovery, selection, and synchronization separate. The read-only
+`GET /api/sources/capture-scope/targets` response joins persisted scope and local
+sync timestamps with `CaptureProvider.list_collections()` metadata. It reports
+default favorites as a distinct capability without reading favorite contents.
+Each named target says whether it was discovered upstream, observed locally, and
+selected. Saved IDs absent from discovery remain visible, even if no local
+`Collection` row exists. Discovery failure returns HTTP 200 with
+`discovery.state=error` and a safe error code; saved scope and local observations
+remain in the response, and the missing upstream list is not presented as a
+successful empty discovery. `GET/PUT /capture-scope` retain their saved-selection
+contract. Selection updates do not discover, sync, or change Processing Policy.
+The scriptable `dk capture scope|discover|set-default|set-collections` commands
+use the same backend operations. `dk sync` continues to fan out saved targets.
 
 ---
 
@@ -534,6 +570,25 @@ V1 assumes one normal worker process.
 The worker should atomically claim one job with a short lease, process it, and update status.
 
 The design may support multiple workers later, but multi-worker scaling should not complicate V1.
+
+### Stage 3E target fan-out
+
+`sync_capture_scope` reads the saved scope and enqueues one
+`sync_default_favorites` job and one `sync_named_collection` job per selected
+target. It makes no provider request. Dedupe keys are
+`sync_default_favorites:douyin` and
+`sync_named_collection:douyin:<external_collection_id>`. Each target retains its
+own attempt count, error, events, and completion state. The older
+`sync_collections` and `sync_collection_sources` job names remain handler aliases
+for already queued work, but do not walk every collection inline.
+
+At execution, each target reloads Capture Scope before provider access. A
+deselected target emits a `skipped` job event and finishes with the existing
+`succeeded` status; no new queue status is needed. If deselection occurs after
+the walk begins, that walk finishes. Only a complete walk may mark unseen
+memberships absent. The default target's `last_completed_at_ms` and a named
+collection's `last_synced_at_ms` advance only after complete walks. Deselection
+does not delete sources, observations, evidence, or derived knowledge.
 
 ---
 
