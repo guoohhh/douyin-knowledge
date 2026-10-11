@@ -56,6 +56,7 @@ def build(handler) -> DouyinCaptureProvider:
     return DouyinCaptureProvider(
         "http://sidecar.invalid",
         api_key="dtk_test",
+        identity="pinned-id",
         # No real sleeping: the polling state machine is what is under test.
         poll_interval_s=0.0,
         poll_timeout_s=5.0,
@@ -182,7 +183,9 @@ def test_wait_is_clamped_to_the_documented_ceiling() -> None:
         return httpx.Response(200, json=envelope({"items": [], "has_more": False}))
 
     client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://sidecar.invalid")
-    provider = DouyinCaptureProvider("http://sidecar.invalid", wait_s=600.0, client=client)
+    provider = DouyinCaptureProvider(
+        "http://sidecar.invalid", identity="pinned-id", wait_s=600.0, client=client
+    )
     provider.list_collection_sources("col-1")
 
     assert float(seen["wait"]) <= 30.0

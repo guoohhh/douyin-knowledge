@@ -37,6 +37,7 @@ from douyin_knowledge.db.models.policy import PolicyDecision, ProcessingRule, So
 from douyin_knowledge.db.models.processing import EvidenceUnit
 from douyin_knowledge.jobs.handlers import (
     handle_sync_capture_scope,
+    handle_sync_default_favorites,
     handle_sync_named_collection,
     register_default_handlers,
 )
@@ -358,6 +359,39 @@ def test_scope_job_fans_out_with_independent_dedupe_keys(
     }
     handle_sync_capture_scope(JobContext(root.job, session, queue, settings))
     assert session.query(Job).count() == 4
+
+
+def test_invalid_real_identity_prevents_target_capture_and_processing(
+    session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings.capture_provider = "douyin"
+    settings.douyin_sidecar_url = "http://sidecar.invalid"
+    settings.douyin_sidecar_identity = " \t "
+    set_capture_scope(
+        session, CaptureScope(default_favorites=True, named_collection_ids=["selected"])
+    )
+
+    def unexpected_request(*args: object, **kwargs: object) -> None:
+        pytest.fail("an unpinned target job must not contact DTK")
+
+    monkeypatch.setattr(httpx.Client, "get", unexpected_request)
+    queue = JobQueue(session)
+    named = queue.enqueue(
+        JobType.SYNC_NAMED_COLLECTION,
+        payload={"external_collection_id": "selected", "auto_process": True},
+    ).job
+    default = queue.enqueue(
+        JobType.SYNC_DEFAULT_FAVORITES, payload={"auto_process": True}
+    ).job
+
+    with pytest.raises(AuthenticationRequired):
+        handle_sync_named_collection(JobContext(named, session, queue, settings))
+    with pytest.raises(AuthenticationRequired):
+        handle_sync_default_favorites(JobContext(default, session, queue, settings))
+
+    assert session.query(Source).count() == 0
+    assert session.query(Collection).count() == 0
+    assert session.query(Job).filter(Job.job_type == JobType.PROCESS_SOURCE).count() == 0
 
 
 def test_legacy_fixture_collection_is_reused_after_bootstrap(

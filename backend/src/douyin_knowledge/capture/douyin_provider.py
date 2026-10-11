@@ -221,10 +221,16 @@ class DouyinCaptureProvider(CaptureProvider):
         Handles the 202 path: we ask the sidecar to wait, and if the task is still
         running when the wait expires we poll rather than treating it as a failure.
         """
+        # Every DTK content route can otherwise select a different identity from
+        # its pool. Keep /readyz usable without a session, but never submit a
+        # Douyin account read unless this application explicitly pinned one.
+        if self.identity is None or not self.identity.strip():
+            raise AuthenticationRequired(
+                "Douyin capture requires DK_DOUYIN_SIDECAR_IDENTITY"
+            )
         query = {k: v for k, v in params.items() if v is not None}
         query.setdefault("wait", self.wait_s)
-        if self.identity:
-            query.setdefault("identity", self.identity)
+        query["identity"] = self.identity
         try:
             response = self._client.get(f"{API_PREFIX}{path}", params=query)
         except httpx.RequestError as exc:
@@ -630,8 +636,6 @@ class DouyinCaptureProvider(CaptureProvider):
         self, *, cursor: str | None = None, limit: int = 50
     ) -> SourcePage:
         """GET /douyin/user/bookmarks on the pinned, imported sidecar identity."""
-        if not self.identity:
-            raise AuthenticationRequired("default favorites require a pinned sidecar identity")
         data, meta = self._get(
             f"/{self.platform}/user/bookmarks",
             {"cursor": cursor, "count": max(1, min(limit, MAX_PAGE_SIZE))},

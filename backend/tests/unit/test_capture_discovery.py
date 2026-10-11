@@ -120,6 +120,41 @@ def test_configured_fixture_discovery_uses_local_directory(
     assert result.named_collections[0].discovered
 
 
+def test_missing_real_identity_reports_error_without_losing_saved_or_local_targets(
+    session: Session, tmp_path: Path
+) -> None:
+    settings = Settings(
+        capture_provider="douyin",
+        douyin_sidecar_url="http://sidecar.invalid",
+        douyin_sidecar_identity=None,
+        data_dir=tmp_path / "data",
+    )
+    set_capture_scope(
+        session, CaptureScope(default_favorites=True, named_collection_ids=["selected"])
+    )
+    session.add(Collection(
+        platform="douyin", external_collection_id="historic", name="Historic",
+        last_synced_at_ms=321,
+    ))
+    session.flush()
+
+    result = discover_capture_targets(session, settings)
+
+    assert result.discovery.state == "error"
+    assert result.discovery.error_code == "authentication_required"
+    assert result.scope == CaptureScope(
+        default_favorites=True, named_collection_ids=["selected"]
+    )
+    assert {item.external_collection_id for item in result.named_collections} == {
+        "historic", "selected"
+    }
+    assert all(not item.discovered for item in result.named_collections)
+    assert next(
+        item for item in result.named_collections if item.external_collection_id == "historic"
+    ).last_synced_at_ms == 321
+    assert session.get(AppSetting, CAPTURE_SCOPE_KEY).value_json == result.scope.model_dump()
+
+
 def test_real_douyin_discovery_uses_only_named_collection_endpoint(
     session: Session, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

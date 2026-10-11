@@ -100,6 +100,28 @@ class TestHealth:
 
 
 class TestSyncAndProcess:
+    def test_real_scope_read_write_stay_local_without_identity(
+        self, client: TestClient, settings: Settings
+    ) -> None:
+        settings.capture_provider = "douyin"
+        settings.douyin_sidecar_url = "http://sidecar.invalid"
+        settings.douyin_sidecar_identity = None
+        selected = {
+            "schema_version": 1, "platform": "douyin", "default_favorites": True,
+            "named_collection_ids": ["saved-id"],
+        }
+
+        assert client.put("/api/sources/capture-scope", json=selected).json() == selected
+        assert client.get("/api/sources/capture-scope").json() == selected
+        response = client.get("/api/sources/capture-scope/targets")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["scope"] == selected
+        assert body["discovery"]["state"] == "error"
+        assert body["discovery"]["error_code"] == "authentication_required"
+        assert body["named_collections"][0]["external_collection_id"] == "saved-id"
+        assert body["named_collections"][0]["discovered"] is False
+
     def test_capture_target_discovery_failure_keeps_saved_scope(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:

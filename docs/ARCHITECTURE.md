@@ -227,6 +227,11 @@ CaptureProvider
 Douyin credentials/cookies should remain inside the Douyin sidecar where possible.
 
 Douyin Knowledge stores only the sidecar connection configuration/API key required to call the local service.
+Every account-scoped Douyin provider read requires a non-empty
+`DK_DOUYIN_SIDECAR_IDENTITY`. The provider rejects missing pins locally before
+contacting the sidecar, and sends the configured pin on every content request;
+DTK must never choose another identity from its pool on the application's behalf.
+Sidecar readiness remains independently inspectable without a pin.
 
 ### Stage 3E Capture Scope
 

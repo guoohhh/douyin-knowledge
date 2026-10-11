@@ -38,7 +38,7 @@ def test_douyin_provider_with_url() -> None:
     assert provider.identity == "identity-123"
 
 
-def test_douyin_provider_identity_is_optional() -> None:
+def test_douyin_provider_can_be_constructed_without_identity_for_health_only() -> None:
     settings = Settings(
         capture_provider="douyin",
         douyin_sidecar_url="http://localhost:8000",
