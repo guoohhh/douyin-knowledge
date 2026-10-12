@@ -937,7 +937,7 @@ missed run: catch up on next application startup
 manual sync: always available
 ~~~
 
-This is a product scheduling contract, not yet an implementation-history claim in this retrospective.
+This subsection records the original product decision. Stage 3F subsequently implements the scheduling workflow on a feature branch; see §13D for the implementation, CI evidence and remaining operational limitations. It is not automatically shipped to `integration/v1` merely because Stage 3E merged.
 
 ### Provider configuration
 
@@ -958,7 +958,7 @@ The current architecture already has provider-role separation and secret-aware c
 
 ## 13B. Stage 3E Capture Scope: selection is not observation and observation is not knowledge
 
-**Current evidence boundary:** branch `feature/stage3e-capture-scope` at `88739d8248b5f328dc85e9b52f22e197e21c9a1a`, draft [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) (22 commits, 70 changed files as of 2026-10-12). The feature has code, mock/fixture tests, and passing GitHub CI. **It is not merged into `integration/v1`; live default-favorites capture, UI behavior in a real browser and multi-identity real-account E2E on this branch are NOT VALIDATED.** PR #2 reports no real Douyin requests or paid AI calls in its verification. A separately reported operational probe must not be silently imported as a validation of this branch.
+**Updated integration status (2026-10-13):** [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) **MERGED on 2026-10-12** into `integration/v1` at merge SHA `1c494b7ade015de031acb898ff8bb2fdf2f447bf`, with Stage 3E feature head `80870062859af90eb360a9f12b14f4887b6a5067`. This supersedes the earlier “Draft / not merged” account for `88739d8`. Stage 3E is CODE INTEGRATED and CI TESTED; the PR's stated verification used fixtures and paid no AI calls. Its merge does **not** establish complete real-account default-favorites E2E or multi-identity isolation. The later `8087006` commit records a narrower real upstream probe, separately qualified below.
 
 ### Problem and architectural boundary
 
@@ -1093,6 +1093,59 @@ Modules/tests: `extraction/entity_resolver.py`, `tests/test_extraction.py`; `ext
 
 ---
 
+## 13D. Stage 3E pagination and Stage 3F daily sync — real-contract observation, then durable local scheduling
+
+### What changed, and what the evidence does not yet show
+
+- `80870062859af90eb360a9f12b14f4887b6a5067` closes a specific default-favorites page-size failure, as reported in commit evidence from real upstream probing.
+- `ba8371304ef181bc36d75e5a5c2928ace6121557` is the isolated Stage 3F implementation commit on `feature/stage3f-daily-sync`; [PR #3](https://github.com/guoohhh/douyin-knowledge/pull/3) remains **DRAFT / NOT MERGED** as of this review. Its PR description predates the Stage 3E merge, so the obsolete “PR #2 has not yet merged” dependency wording must not be repeated as current state.
+- All five Stage 3F head check runs completed successfully: Python 3.10, Python 3.12, lint/type checking, frontend build and local-API integration smoke. Neither passing CI nor a live local API proves the daily scheduler operated against a real Douyin account. The PR explicitly states Stage 3F tests used local fixtures, without paid AI or real Douyin calls.
+
+### Default favorites page size: REST acceptance != business acceptance
+
+**Observed problem (reported, not independently archived):** the sidecar's REST schema allowed up to `count=50`, but a real upstream default-favorites request with `count=50` returned a business error; the probe using `count=20` returned a page successfully. Named-collection listing retained the 50-item route limit. The original raw request/response logs are not preserved in this retrospective, so classify the 50/20 contrast as **REAL OBSERVATION REPORTED**, not independently reproduced E2E.
+
+**Fix / invariant:** `DouyinCaptureProvider.list_default_favorite_sources` now clamps to its own `MAX_DEFAULT_FAVORITES_PAGE_SIZE=20`, not the general 50. `backend/tests/unit/test_douyin_provider_transport.py` asserts a request for 50 sends 20 and a smaller request remains smaller. A cursor belongs to the paging query that generated it: changing count mid-walk would undermine the complete-walk/pruning guarantee.
+
+**Engineering lesson:** an HTTP/OpenAPI maximum is a transport/interface constraint, not necessarily the real upstream business limit. A successful first page also says nothing about safely completing a multi-page walk and reconciling observed absences.
+
+### Daily scheduler is durable intent, not a second ingestion pipeline
+
+**Product problem:** V1's requirement is scheduled local 03:00 capture, startup catch-up, and manual sync, without silently starting paid AI processing. A naïve fixed 24-hour timer ignores calendar days and DST; an in-memory timer misses sessions while the machine sleeps; spawning another capture pipeline duplicates logic and retry semantics.
+
+**Implemented design at `ba83713`:**
+
+1. `capture/daily_sync.py` stores enabled state, HH:MM, IANA timezone, effective-after moment, last due slot, last attempt, root/target job ids and last known outcome in one `AppSetting` (`capture.daily_sync`). Defaults are **disabled / 03:00 local time**. The continually running worker checks roughly every 30 seconds *between jobs*; on restart it can enqueue the latest overdue slot once. It cannot run while the worker/machine is off.
+2. Time uses calendar days in the configured zone, not UTC+24 hours. Spring-forward nonexistent times are mapped onto a valid post-transition instant; fall-back ambiguity uses a single occurrence. Changing/enabling a schedule starts with the next future slot; it does not replay all earlier missed days.
+3. `tick` schedules the existing `SYNC_CAPTURE_SCOPE` with `auto_process=false`; if another capture job is queued/running, it defers rather than reuse that job's possibly paid `auto_process=true` payload. Empty Capture Scope records `skipped_empty_scope` without contacting Douyin.
+4. Checkpointing uses the existing SQLite transaction plus `BEGIN IMMEDIATE` to serialize competing schedule checks. Once attempted, a due slot is consumed **even if its job fails**; the user can choose manual retry rather than the scheduler hammering a failing account every tick.
+5. A root job succeeding means it **fanned out** target jobs, not that remote content was synchronized. `record_targets` and `refresh_outcome` track per-target terminal states, distinguishing queued/running, success, failed, no_targets and completed_with_skips. This preserves the Stage 3E truthfulness contract at the new scheduler layer.
+6. `GET/PUT /api/admin/daily-sync` and `frontend/src/pages/DailySyncSection.tsx` expose explicit enable/save/timezone/outcome controls. The UI states that worker shutdown/sleep suspends execution and that automatic capture cannot trigger paid processing.
+
+**Test evidence:** `backend/tests/unit/test_daily_sync.py` covers disabled defaults, catch-up/deduplication, active manual-job deferral, empty-scope no-request, terminal outcomes, scope changes, calendar-day/DST behavior, SQLite dual-tick races, restart persistence, fixture sync without processing, missing identity, and bounded target failure. Frontend settings and client contracts have corresponding changes and CI checks. This is **CODE IMPLEMENTED + UNIT/CI TESTED**, not a report of live scheduled account sync.
+
+### Why SourceSnapshot fingerprinting was revised
+
+Repeated captures can differ only in volatile signed URLs, observed fetch timestamps, or engagement counts, while the underlying content/meaning has not changed. If every raw JSON variation generates a durable `SourceSnapshot`, daily sync turns ephemeral transport churn into fake historical content revisions.
+
+Stage 3F changes `CaptureSyncService._payload_hash` to fingerprint selected meaningful metadata and normalized URL identity (scheme/host/path without query or fragment). The full raw provider payload is preserved when a *meaningful* new snapshot is emitted; current signed URLs are refreshed on Source/Asset even when no new snapshot is added. A targeted test varies signatures, fetch time and counts (expect no new snapshot) and then varies caption (expect a new snapshot).
+
+**Tradeoff/P2:** CDN host/path changes can still create noise; the effect on real corpora is unmeasured. Conversely, deliberately excluding transient engagement counts means those metrics do not create immutable revision points. This distinction belongs in the product's versioning contract, not only in a hash implementation.
+
+### Invariants, status and interview use
+
+- Capture scheduling cannot silently opt into paid processing.
+- A due slot is durable, claimed at most once in normal operation, and never inferred complete from root fan-out alone.
+- Restarts catch up the **latest** overdue day; neither unlimited backlog replay nor execution with the worker shut down is promised.
+- A successful provider page is not proof of a complete authoritative target walk; only complete walks may reconcile absence.
+- Snapshot versions represent meaningful source changes, not every signed URL or observation timestamp.
+
+**Evidence ledger:** Stage 3E `8087006` = real upstream page-size observation **REPORTED** + fix CODE/TESTED; Stage 3E [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) = **MERGED** into `integration/v1` at `1c494b7`; Stage 3F `ba83713` = **CODE/UNIT/CI TESTED**, [PR #3](https://github.com/guoohhh/douyin-knowledge/pull/3) **DRAFT, NOT MERGED**, no real scheduled E2E. See `docs/DECISIONS.md` DEC-022, `backend/src/douyin_knowledge/capture/daily_sync.py`, `backend/src/douyin_knowledge/jobs/worker.py`, `backend/tests/unit/test_daily_sync.py`, and `backend/tests/unit/test_capture_snapshot_fingerprint.py`.
+
+**Interview story:** “An automation feature is not a timer. We had to define what a daily slot means across time zones/restarts, prevent a background operation from inheriting a paid-processing request, and make success mean completed target work rather than queued fan-out. Once capture became daily, we also had to stop signed URL churn from fabricating immutable knowledge history.”
+
+---
+
 ## 14. Topics with enough code evidence but incomplete historical evidence
 
 ### 14.1 Default/all-favorites API limitation
@@ -1190,7 +1243,7 @@ These are not all bugs. They are places where the current design knowingly buys 
 - Stage 3E browser UX and real multi-identity sidecar behavior remain unverified; mock/fixture CI cannot prove account provenance in production.
 - Reused queued/running sync jobs keep their original AI processing option; UI warns but does not cancel or reconfigure the existing job.
 - Stage 3E Capture Scope discovery capability is not a live provider-health proof; display saved selection and provider discovery status independently.
-- V1 03:00 scheduled sync/startup catch-up and user-facing provider/model selection still need separate implementation and verification evidence.
+- Stage 3F 03:00 local scheduled sync and restart catch-up now have CODE/UNIT/CI evidence on a draft branch, but lack real-account operation validation; user-facing provider/model configuration remains separate V1 work.
 
 Source: docs/DECISIONS.md “Known gaps” plus current code at the baseline SHA.
 
@@ -1215,7 +1268,7 @@ The following questions are worth answering from old conversations, terminal log
 | Stage 3E default-favorites real E2E / fork compatibility | Distinguishes newly wired adapter path from validated product use |
 | Stage 3E real multi-identity sidecar proof | Confirms pinning against actual DTK identity-pool behavior and prevents wrong-account ingestion |
 | Capture Scope browser UX / reused-job operational validation | Verifies selection persistence, discovery errors, cost opt-in and non-cancellation in real UI |
-| Daily 03:00 scheduler / missed-run recovery | Decision recorded; implementation and lifecycle tests not established in Stage 3E PR |
+| Stage 3F daily scheduler real operation | Unit/CI-backed feature at ba83713; requires worker-running, restart and real-account/target outcome observations before REAL VALIDATED |
 | Any manual DB repair commands used during Phase 3 | Important for migration/recovery story and future runbook |
 | CI run URLs for milestone SHAs | Independent evidence that a state was green |
 
@@ -1351,6 +1404,9 @@ This list is deliberately selective. It maps engineering stories, not every comm
 - f80ed33 — Capture Scope settings UI, explicit save/sync, mock frontend contract coverage
 - 33c10b0 — remove implicit paid-processing sync path; clarify reused job semantics
 - 88739d8 — fail-closed identity pinning for all Douyin account-content reads
+- 8087006 — default-favorites page-size cap from reported real upstream 50/20 probe
+- 1c494b7 — merge Stage 3E PR #2 into integration/v1 (2026-10-12)
+- ba83713 — Stage 3F daily scheduler, durable due/checkpoint/outcomes, meaningful source fingerprint
 
 ---
 
