@@ -958,7 +958,7 @@ The current architecture already has provider-role separation and secret-aware c
 
 ## 13B. Stage 3E Capture Scope: selection is not observation and observation is not knowledge
 
-**Current evidence boundary:** branch `feature/stage3e-capture-scope` at `065376f164927b7e373b6effc3015794aaaf2f2f`, draft [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2). The feature has code, unit/integration-fixture tests, and passing GitHub CI. **It is not merged into `integration/v1`; live default-favorites capture and real-account E2E on this branch are NOT VALIDATED.** No real Douyin requests or paid AI calls were made in the PR's stated verification.
+**Current evidence boundary:** branch `feature/stage3e-capture-scope` at `88739d8248b5f328dc85e9b52f22e197e21c9a1a`, draft [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) (22 commits, 70 changed files as of 2026-10-12). The feature has code, mock/fixture tests, and passing GitHub CI. **It is not merged into `integration/v1`; live default-favorites capture, UI behavior in a real browser and multi-identity real-account E2E on this branch are NOT VALIDATED.** PR #2 reports no real Douyin requests or paid AI calls in its verification. A separately reported operational probe must not be silently imported as a validation of this branch.
 
 ### Problem and architectural boundary
 
@@ -1027,6 +1027,30 @@ The endpoint's `default_favorites.available` is a configured-provider capability
 
 A small but important late fix hardens named-folder discovery pagination: `has_more=true` without a cursor now raises instead of returning the first page as if complete.
 
+### Frontend operational semantics: saving a preference is not running a job (f80ed33, 33c10b0)
+
+**Problem.** The backend had separate discovery, selection, sync and policy concepts, but the original Collections page still exposed a direct `api.sync({auto_process: true})` action. That bypassed the new user-facing scope workflow and silently opted into potentially paid processing. Also, a successful enqueue HTTP response could be mistaken for completed sync, and the queue's dedupe behavior means a second request with different `auto_process` does **not** necessarily change an already queued/running job.
+
+**Implemented.** `f80ed33` introduced a Settings-page Capture Scope editor backed by typed `GET/PUT /api/sources/capture-scope`, read-only `GET /capture-scope/targets` and `POST /api/sources/sync`. It keeps a separate saved state and editable draft, blocks Sync when there are unsaved edits or no selected target, preserves saved IDs missing from discovery, and displays upstream discovery errors without treating them as empty collections. `PUT` saves selection only; a distinct manual button requests sync. Default `autoProcess=false` is deliberate: an explicit opt-in is needed before *new* sync jobs can trigger Processing Policy and potentially paid AI. `CaptureScopeSection` sequences saved-scope GET before target discovery to avoid racing first-read fixture bootstrap on the same unique settings key.
+
+**Follow-up correction.** `33c10b0` removed the old Collections-page direct sync button and routed users to `/settings#capture-scope-title`. It also changed the displayed acceptance semantics: `JobAccepted.created=true` means a new job was accepted, not completed; `created=false` means an existing job was reused, and the newly submitted `auto_process` flag does not mutate the old job's options. An existing job may still perform paid processing even if the user's *new* request has the checkbox off. This is a **queue contract**, not just copywriting.
+
+**Tests and limits.** `frontend/scripts/test-capture-scope.ts` checks saved/draft helpers, missing discovered IDs, mock HTTP contract, default `auto_process=false`, new-vs-reused acceptance messages and a source-text assertion that the Collections page no longer calls sync. Frontend CI runs this Node/esbuild script, typecheck and build; integration smoke probes a live **local fixture API**. These do **not** establish browser-level interaction quality, authenticated Douyin sync or paid-provider cost behavior. The remaining risk is the user interpreting a new checkbox as cancellation of an already-running job; the UI warns but does not implement cancellation/reconfiguration.
+
+**Invariant:** Persisting intent, submitting a task, reusing a task and completing work are four distinct state transitions. UI wording must not collapse them.
+
+### Identity pinning: prevent cross-account provenance corruption (88739d8)
+
+**Problem.** A sidecar can hold more than one identity. Before `88739d8`, `DouyinCaptureProvider._get` only attached `identity` when configured; without one, DTK could choose a different identity from its pool. This was especially dangerous once Stage 3E added several account-scoped read paths (named collection discovery, collection items, default favorites, single-video fetch). Correct-looking imported data from the *wrong account* would violate provenance, not merely confidentiality.
+
+**Repair.** The shared `_get` path now raises `AuthenticationRequired` for absent/whitespace `DK_DOUYIN_SIDECAR_IDENTITY` **before any account-content HTTP request**, and forces the configured identity into the outgoing query even if a caller supplies a conflicting `identity` parameter. A bad pinned identity is not retried unpinned. `/readyz` remains available for sidecar health checks without an identity. Missing identity does **not** make local `GET/PUT` saved Capture Scope inaccessible: target discovery returns an explicit `authentication_required` error and retains saved/local targets. Target sync jobs fail before writing Sources, Collections or processing jobs.
+
+**Why centralizing matters.** The previous default-favorites-specific check protected only that method. Moving the guard to the transport entry point makes it cover all account-scoped reads, including future ones that reuse `_get`. This is a defense-in-depth contract for *account-scoped content*, not a blanket rule that health probes require authentication.
+
+**Evidence.** `backend/src/douyin_knowledge/capture/douyin_provider.py`; `backend/tests/unit/test_douyin_identity_safety.py` parametrizes all four read operations for missing/blank pins and checks zero HTTP requests, forced pin on every request, non-overridable identity, health-only unpinned readiness, and no fallback on invalid pins. `tests/unit/test_capture_scope.py`, `test_capture_discovery.py` and `test_api.py` check job-level fail-closed behavior and preservation of local settings/history. This is **CODE IMPLEMENTED + UNIT/CI TESTED**; it is **not REAL VALIDATED** against a live multi-identity sidecar, nor proof that the configured identity itself belongs to the intended human account.
+
+**Invariant:** Every imported Douyin fact must be attributable to the explicitly configured identity. If account provenance cannot be established, content capture must fail closed while local selection/history remain inspectable.
+
 ### Evidence and validation ledger
 
 | Item | Status | Source |
@@ -1034,14 +1058,16 @@ A small but important late fix hardens named-folder discovery pagination: `has_m
 | Persisted selection, observation tables, per-target queue, deselection behavior | CODE IMPLEMENTED | e5ee8e9; scope.py; sync.py; handlers.py; migration 0006 |
 | Fresh fixture bootstrap / explicit empty / real-mode separation | CODE + TEST PROVEN | e50e871; test_capture_scope.py; test_cli.py |
 | Read-only target discovery and API/CLI projection | CODE + TEST PROVEN | 065376f; discovery.py; test_capture_discovery.py; test_api.py |
-| Latest feature-branch CI at 065376f | CI PASS (2026-10-04) | Python 3.10, Python 3.12, lint/types, frontend build, integration smoke |
+| Explicit frontend selection/save/sync, safe default, job-reuse wording | CODE + MOCK/CI TESTED; not browser E2E | f80ed33, 33c10b0; CaptureScopeSection.tsx, captureScope.ts, test-capture-scope.ts |
+| Required pinned identity on all account-content reads | CODE + MOCK/CI TESTED; not live multi-identity E2E | 88739d8; douyin_provider.py; test_douyin_identity_safety.py |
+| Latest feature-branch CI at 88739d8 | CI PASS (2026-10-12 01:52 China time; GitHub completion 2026-10-11 17:52 UTC) | Python 3.10, Python 3.12, lint/types, frontend build, local-API integration smoke |
 | Default-favorites route on the user's real sidecar/account | NOT REAL VALIDATED | PR #2 explicitly made no real Douyin requests |
 | Daily 03:00 scheduling, missed-run catch-up on startup | V1 DECIDED; NOT established implemented here | §13A, not this feature's implementation |
 | User-facing main AI / ASR model selection and key management | V1 DECIDED; not established shipped here | §13A |
 
-PR #2 reports 76 focused tests and 887 backend tests passing (4 skipped) at its local validation point. The five GitHub check runs for head `065376f` are independently all green; a frontend client exercised against a live **local API** in smoke CI is **not** proof of a live Douyin provider call.
+PR #2 reports 76 focused tests and 887 backend tests passing (4 skipped) at an earlier local validation point; these figures are historical, **not** the current head's total. The five GitHub check runs for head `88739d8` are independently all green. A frontend client exercised against a live **local fixture API** in smoke CI is **not** proof of a live Douyin provider call or real browser E2E.
 
-Owning modules: `capture/scope.py`, `capture/discovery.py`, `capture/douyin_provider.py`, `capture/pagination.py`, `capture/sync.py`, `jobs/handlers.py`, `api/routes/sources.py`, `cli/commands_capture.py`; migration `0006_capture_scope_observations.py`. Main tests: `tests/unit/test_capture_scope.py`, `tests/unit/test_capture_discovery.py`, `tests/test_api.py`, `tests/test_cli.py`.
+Owning modules: `capture/scope.py`, `capture/discovery.py`, `capture/douyin_provider.py`, `capture/pagination.py`, `capture/sync.py`, `jobs/handlers.py`, `api/routes/sources.py`, `cli/commands_capture.py`; migration `0006_capture_scope_observations.py`; frontend `src/pages/CaptureScopeSection.tsx`, `src/pages/CollectionsPage.tsx`, `src/lib/captureScope.ts`, `src/api/client.ts`. Main tests: `tests/unit/test_capture_scope.py`, `tests/unit/test_capture_discovery.py`, `tests/unit/test_douyin_identity_safety.py`, `tests/test_api.py`, `tests/test_cli.py`, frontend `scripts/test-capture-scope.ts`.
 
 ### Tradeoffs and interview story
 
@@ -1049,8 +1075,10 @@ Owning modules: `capture/scope.py`, `capture/discovery.py`, `capture/douyin_prov
 - A target's saved selection and the provider's live discovery may diverge; surfacing both is more truthful than letting a transient upstream failure erase a preference.
 - The system deliberately preserves stopped targets' historical observations and knowledge. It does **not** automatically interpret deselection as “forget my content.”
 - The real fork endpoint remains an integration risk until an authenticated, complete page walk and persistence are observed; CI cannot settle upstream contracts.
+- UI safety includes cost intent: a default-off checkbox cannot change an already deduplicated job. Distinguish submitted, reused and completed work, and consider explicit cancellation/status polling later.
+- Identity pinning is part of provenance correctness. Local mock tests establish fail-closed transport behavior; real multi-identity sidecar validation remains outstanding.
 
-**Interview version:** “Adding a multi-source import setting forced us to separate user intent, historical membership and knowledge eligibility. Our first version passed in populated databases but broke clean fixture installation. We fixed one-time bootstrap semantics, made target work independently retryable and guarded every absence claim on a complete provider walk.”
+**Interview version:** “Adding a multi-source import setting forced us to separate user intent, historical membership and knowledge eligibility. Our first version passed in populated databases but broke clean fixture installation. We fixed one-time bootstrap semantics, made target work independently retryable and guarded every absence claim on a complete provider walk. The UI then exposed another class of correctness bugs: saving a selection, accepting/reusing a job and completing a sync were different facts, while account-scoped reads had to be pinned to one identity to prevent plausible but wrong-account data.”
 
 ---
 
@@ -1159,6 +1187,8 @@ These are not all bugs. They are places where the current design knowingly buys 
 - The exact SQLAlchemy 2.1 incompatibility is not retained in repository history.
 - Stage 3D full-corpus robustness is ongoing, so corpus-wide failure rates are not yet frozen.
 - Stage 3E default favorites is wired to a fork-specific provider route but is not yet verified by real-account authenticated end-to-end capture.
+- Stage 3E browser UX and real multi-identity sidecar behavior remain unverified; mock/fixture CI cannot prove account provenance in production.
+- Reused queued/running sync jobs keep their original AI processing option; UI warns but does not cancel or reconfigure the existing job.
 - Stage 3E Capture Scope discovery capability is not a live provider-health proof; display saved selection and provider discovery status independently.
 - V1 03:00 scheduled sync/startup catch-up and user-facing provider/model selection still need separate implementation and verification evidence.
 
@@ -1183,6 +1213,8 @@ The following questions are worth answering from old conversations, terminal log
 | Stage 3C real prompt/answer/citation artifacts | Makes grounding stories reproducible rather than commit-message-only |
 | Full-corpus Stage 3D statistics | Needed before declaring robustness complete |
 | Stage 3E default-favorites real E2E / fork compatibility | Distinguishes newly wired adapter path from validated product use |
+| Stage 3E real multi-identity sidecar proof | Confirms pinning against actual DTK identity-pool behavior and prevents wrong-account ingestion |
+| Capture Scope browser UX / reused-job operational validation | Verifies selection persistence, discovery errors, cost opt-in and non-cancellation in real UI |
 | Daily 03:00 scheduler / missed-run recovery | Decision recorded; implementation and lifecycle tests not established in Stage 3E PR |
 | Any manual DB repair commands used during Phase 3 | Important for migration/recovery story and future runbook |
 | CI run URLs for milestone SHAs | Independent evidence that a state was green |
@@ -1316,6 +1348,9 @@ This list is deliberately selective. It maps engineering stories, not every comm
 - e5ee8e9 — persistent Stage 3E Capture Scope and durable per-target sync
 - e50e871 — repair fresh fixture scope bootstrap after CI regression
 - 065376f — read-only target discovery API/CLI and pagination safety
+- f80ed33 — Capture Scope settings UI, explicit save/sync, mock frontend contract coverage
+- 33c10b0 — remove implicit paid-processing sync path; clarify reused job semantics
+- 88739d8 — fail-closed identity pinning for all Douyin account-content reads
 
 ---
 
