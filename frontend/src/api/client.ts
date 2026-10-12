@@ -13,6 +13,7 @@
 
 import type {
   CaptureScope,
+  DailySyncSettings,
   CaptureTargets,
   Collection,
   EntityDetail,
@@ -103,6 +104,14 @@ export const api = {
     request<CaptureScope>('/api/sources/capture-scope', {
       method: 'PUT',
       body: JSON.stringify(scope),
+    }),
+
+  dailySync: () => request<DailySyncSettings>('/api/admin/daily-sync'),
+
+  saveDailySync: (settings: Pick<DailySyncSettings, 'enabled' | 'local_time' | 'timezone'>) =>
+    request<DailySyncSettings>('/api/admin/daily-sync', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
     }),
 
   sources: (params: { collection_id?: string; status?: string; limit?: number; offset?: number } = {}) =>

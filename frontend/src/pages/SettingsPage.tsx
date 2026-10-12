@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { actionLabel, dateTime, errorMessage, ruleTypeLabel } from '../lib/format'
 import { CaptureScopeSection } from './CaptureScopeSection'
+import { DailySyncSection } from './DailySyncSection'
 
 function Figures() {
   const stats = useQuery({ queryKey: ['stats'], queryFn: api.stats })
@@ -466,6 +467,7 @@ export function SettingsPage() {
       <Figures />
 
       <CaptureScopeSection />
+      <DailySyncSection />
 
       <div className="chips">
         <button

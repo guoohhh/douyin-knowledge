@@ -2,13 +2,16 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import { api } from '../src/api/client'
-import type { CaptureScope, CaptureTargets, NamedCollectionTarget } from '../src/api/types'
+import type { CaptureScope, CaptureTargets, DailySyncSettings, NamedCollectionTarget } from '../src/api/types'
 import { canSyncScope, copyScope, scopeChanged, syncAcceptanceMessage, toggleNamed, visibleNamedTargets } from '../src/lib/captureScope'
 
 // The Collections browser must navigate to the single explicit sync control.
 const collectionsPage = readFileSync('src/pages/CollectionsPage.tsx', 'utf8')
 assert.match(collectionsPage, /to="\/settings#capture-scope-title"/)
 assert.doesNotMatch(collectionsPage, /api\.sync\(|auto_process:\s*true/)
+const dailySection = readFileSync('src/pages/DailySyncSection.tsx', 'utf8')
+assert.match(dailySection, /每日自动同步/)
+assert.doesNotMatch(dailySection, /api\.sync\(|auto_process:\s*true/)
 
 const empty: CaptureScope = {
   schema_version: 1, platform: 'douyin', default_favorites: false, named_collection_ids: [],
@@ -49,6 +52,12 @@ assert.equal(rows.find((row) => row.external_collection_id === 'B')?.selected, f
 assert.deepEqual(visibleNamedTargets(saved, []).map((row) => row.external_collection_id), ['A', 'missing'])
 
 let persisted = copyScope(empty)
+let daily: DailySyncSettings = {
+  enabled: false, local_time: '03:00:00', timezone: 'Asia/Shanghai',
+  effective_after_ms: null, last_due_at_ms: null, last_attempt_at_ms: null,
+  last_job_id: null, last_target_job_ids: [], last_outcome: null, next_run_at_ms: null,
+  root_fanout_completed: false,
+}
 let syncCalls = 0
 let reuseSyncJob = false
 const requests: Array<{ path: string; method: string; body: unknown }> = []
@@ -70,6 +79,11 @@ globalThis.fetch = async (input, init) => {
     persisted = body as CaptureScope
     response = persisted
   } else if (path === '/api/sources/capture-scope/targets') response = targets
+  else if (path === '/api/admin/daily-sync' && method === 'GET') response = daily
+  else if (path === '/api/admin/daily-sync' && method === 'PUT') {
+    daily = { ...daily, ...(body as Pick<DailySyncSettings, 'enabled' | 'local_time' | 'timezone'>) }
+    response = daily
+  }
   else if (path === '/api/sources/sync') {
     syncCalls++
     response = {
@@ -86,6 +100,10 @@ globalThis.fetch = async (input, init) => {
 }
 
 assert.deepEqual(await api.captureScope(), empty)
+assert.equal((await api.dailySync()).enabled, false)
+assert.equal((await api.saveDailySync({ enabled: true, local_time: '03:00', timezone: 'Asia/Shanghai' })).enabled, true)
+assert.equal((await api.dailySync()).timezone, 'Asia/Shanghai')
+assert.equal(syncCalls, 0, 'saving a daily schedule must not start a manual sync')
 const discovered = await api.captureTargets()
 assert.equal(discovered.discovery.state, 'error', 'HTTP 200 can carry discovery failure')
 assert.equal(discovered.default_favorites.available, true)
@@ -96,7 +114,7 @@ const selected = { ...empty, default_favorites: true, named_collection_ids: ['A'
 assert.deepEqual(await api.saveCaptureScope(selected), selected)
 assert.deepEqual(await api.captureScope(), selected)
 assert.equal(syncCalls, 0, 'Save must not auto-sync')
-assert.deepEqual(requests.filter((r) => r.method === 'PUT').map((r) => r.path), [
+assert.deepEqual(requests.filter((r) => r.method === 'PUT' && r.path.startsWith('/api/sources/')).map((r) => r.path), [
   '/api/sources/capture-scope',
 ])
 

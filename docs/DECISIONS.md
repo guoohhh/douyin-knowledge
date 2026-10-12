@@ -316,7 +316,33 @@ Two smaller corrections fell out. `RetrievalResult.is_empty()` ignored `structur
 
 ---
 
+### DEC-022: Daily capture checkpoints a due slot, while target jobs determine the outcome
+
+**Decision**: Stage 3F stores the disabled-by-default daily schedule and latest
+due-slot checkpoint in `app_settings`. The continuously running worker submits
+the latest overdue slot through `SYNC_CAPTURE_SCOPE` with `auto_process=false`.
+An active manual or automatic capture job defers submission, so a queued manual
+payload cannot silently turn an automatic run into paid processing. The root's
+success is only fan-out; the recorded target job IDs determine the displayed
+outcome. A failed slot is not silently retried every 30 seconds. Manual Sync now
+is the explicit retry path.
+
+**Rationale**: The application already has a durable queue and scoped target
+handlers. A second scheduler queue or fixed 24-hour timer would duplicate those
+contracts and mishandle sleep and daylight-saving transitions. SQLite's
+`BEGIN IMMEDIATE` serializes concurrent scheduler checks with the checkpoint.
+
+**Snapshot decision**: Hash stable, normalized source fields. DTK fetch times,
+signed URL queries, the raw transport payload, and engagement counters are not
+content revisions. Full raw responses remain on genuine SourceSnapshots; current
+asset URLs still refresh during every capture. The first sync after this hash
+change may create one transition snapshot per existing source. Tests exercise
+repeated signed URL changes, content edits, and asset URL refresh.
+
+---
+
 ## Known gaps
+
 
 These are true limitations, not deferred decisions. Each is either invisible in normal use or visible and harmless; none is load-bearing for V1 acceptance.
 

@@ -595,6 +595,29 @@ memberships absent. The default target's `last_completed_at_ms` and a named
 collection's `last_synced_at_ms` advance only after complete walks. Deselection
 does not delete sources, observations, evidence, or derived knowledge.
 
+### Stage 3F daily capture
+
+The continuously running `dk worker` checks the persisted `capture.daily_sync`
+setting at startup and at least every 30 seconds between jobs. A long-running
+job can delay submission until its transaction finishes; the overdue slot is
+then submitted once. It defaults to disabled and
+03:00 in the machine's IANA timezone (UTC if unavailable). The Settings UI can
+save an enabled flag, local time, and IANA timezone. A new or changed schedule
+starts with its next future slot. After sleep or restart, the latest missed slot
+is attempted once; earlier missed days are not replayed. Calendar days are
+calculated in the configured timezone, including daylight-saving transitions.
+
+The same SQLite setting holds the last due slot, attempt time, job id, target job
+ids, and latest known outcome. `BEGIN IMMEDIATE` serializes concurrent ticks.
+Active capture jobs defer a due slot so the scheduler cannot inherit a manual
+job's `auto_process=true` payload. A submitted slot remains checkpointed even
+if it fails; manual Sync now is the deliberate retry path. The scheduler submits
+the existing `SYNC_CAPTURE_SCOPE` job with `auto_process=false`. Root success
+means fan-out completed; target job states determine overall sync success.
+Targets still recheck the saved scope and pinned identity. An empty scope records
+a skipped slot without provider access. The scheduler requires a running worker
+and cannot execute while the machine is powered off.
+
 ---
 
 ## 14. Processing State Machine
