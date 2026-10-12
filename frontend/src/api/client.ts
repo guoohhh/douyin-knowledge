@@ -12,6 +12,8 @@
  */
 
 import type {
+  AIConfiguration,
+  AIConfigurationUpdate,
   CaptureScope,
   DailySyncSettings,
   CaptureTargets,
@@ -20,6 +22,7 @@ import type {
   EntitySummary,
   EntityUserState,
   JobAccepted,
+  JobDetail,
   PolicyDecisionRow,
   ResurfaceCard,
   PolicyRule,
@@ -71,10 +74,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const error = (body as { error?: { code?: string; message?: string } } | null)?.error
+    const detail = (body as { detail?: unknown } | null)?.detail
+    const validation = Array.isArray(detail)
+      ? detail.map((item: { message?: string; msg?: string }) => item.message ?? item.msg).filter(Boolean).join('；')
+      : null
     throw new ApiError(
       response.status,
       error?.code ?? 'http_error',
-      error?.message ?? `请求失败（${response.status}）`,
+      error?.message ?? (typeof detail === 'string' ? detail : validation || `请求失败（${response.status}）`),
       body,
     )
   }
@@ -132,6 +139,8 @@ export const api = {
       `/api/sources/${encodeURIComponent(id)}/process`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
+
+  job: (id: string) => request<JobDetail>(`/api/admin/jobs/${encodeURIComponent(id)}`),
 
   deleteSource: (id: string) =>
     request<unknown>(`/api/sources/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -197,6 +206,12 @@ export const api = {
   // ---------------------------------------------------------------- admin
   stats: () => request<Stats>('/api/admin/stats'),
   settings: () => request<SettingsView>('/api/admin/settings'),
+  aiConfiguration: () => request<AIConfiguration>('/api/admin/ai-configuration'),
+  saveAIConfiguration: (body: AIConfigurationUpdate) =>
+    request<AIConfiguration>('/api/admin/ai-configuration', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
   reindex: () => request<{ job_id: string }>('/api/admin/reindex', { method: 'POST' }),
 
   rules: () => request<{ rules: PolicyRule[] }>('/api/admin/policy/rules'),

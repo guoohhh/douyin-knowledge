@@ -39,7 +39,7 @@ def build_triage(session: Session, settings: Settings | None = None) -> TriageSe
     ):
         from douyin_knowledge.ai.registry import get_structured_model
 
-        model = get_structured_model(settings)
+        model = get_structured_model(settings, role="triage")
         model_name = settings.model_for_role("triage")
 
     return TriageService(session, CheapTriage(model=model, model_name=model_name))

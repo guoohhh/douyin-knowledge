@@ -6,7 +6,12 @@ import pytest
 
 from douyin_knowledge.ai.adapters.doubao_adapter import DoubaoASRProvider
 from douyin_knowledge.ai.adapters.mock_adapter import MockASRProvider
-from douyin_knowledge.ai.registry import get_asr_provider, get_chat_model, get_structured_model
+from douyin_knowledge.ai.registry import (
+    get_asr_provider,
+    get_chat_model,
+    get_embedding_model,
+    get_structured_model,
+)
 from douyin_knowledge.capture.douyin_provider import DouyinCaptureProvider
 from douyin_knowledge.capture.fixture_provider import FixtureCaptureProvider
 from douyin_knowledge.capture.registry import get_capture_provider
@@ -93,6 +98,29 @@ def test_doubao_asr_requires_provider_specific_key() -> None:
 
 def test_mock_asr_registry_is_unchanged() -> None:
     assert isinstance(get_asr_provider(Settings(ai_provider="mock")), MockASRProvider)
+
+
+def test_role_specific_models_reach_real_adapter_without_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import douyin_knowledge.ai.adapters.openai_adapter as adapter
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(adapter, "OpenAI", FakeOpenAI)
+    settings = Settings(
+        ai_provider="openai", asr_provider="openai", embedding_provider="openai",
+        openai_api_key="test-only", answer_model="gpt-4o",
+        extraction_model="gpt-4o-mini", triage_model="gpt-4o",
+        asr_model="whisper-1", embedding_model="text-embedding-3-small",
+    )
+    assert get_chat_model(settings).model == "gpt-4o"  # type: ignore[attr-defined]
+    assert get_structured_model(settings).model == "gpt-4o-mini"  # type: ignore[attr-defined]
+    assert get_structured_model(settings, role="triage").model == "gpt-4o"  # type: ignore[attr-defined]
+    assert get_asr_provider(settings).model == "whisper-1"  # type: ignore[attr-defined]
+    assert get_embedding_model(settings).model == "text-embedding-3-small"  # type: ignore[attr-defined]
 
 
 def test_deepseek_settings_are_read_and_redacted(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import { api } from '../src/api/client'
-import type { CaptureScope, CaptureTargets, DailySyncSettings, NamedCollectionTarget } from '../src/api/types'
+import type { AIConfiguration, CaptureScope, CaptureTargets, DailySyncSettings, NamedCollectionTarget } from '../src/api/types'
 import { canSyncScope, copyScope, scopeChanged, syncAcceptanceMessage, toggleNamed, visibleNamedTargets } from '../src/lib/captureScope'
 
 // The Collections browser must navigate to the single explicit sync control.
@@ -60,6 +60,17 @@ let daily: DailySyncSettings = {
 }
 let syncCalls = 0
 let reuseSyncJob = false
+let aiConfiguration: AIConfiguration = {
+  effective: { ai_provider: 'mock', asr_provider: 'mock', embedding_provider: 'mock',
+    models: { triage: 'mock-triage', extraction: 'mock-extraction', answer: 'mock-answer', asr: 'mock-asr', embedding: 'mock-embedding' } },
+  saved: { ai_provider: 'mock', asr_provider: 'mock', embedding_provider: 'mock',
+    models: { triage: 'mock-triage', extraction: 'mock-extraction', answer: 'mock-answer', asr: 'mock-asr', embedding: 'mock-embedding' } },
+  credentials_configured: { openai: false, deepseek: false, doubao: false },
+  sdk_available: { openai: true, deepseek: true, doubao: true },
+  restart_required: false,
+  model_options: { triage: { mock: ['mock-triage'] }, extraction: { mock: ['mock-extraction'] },
+    answer: { mock: ['mock-answer'] }, asr: { mock: ['mock-asr'] }, embedding: { mock: ['mock-embedding'] } },
+}
 const requests: Array<{ path: string; method: string; body: unknown }> = []
 const targets: CaptureTargets = {
   scope: persisted,
@@ -83,6 +94,17 @@ globalThis.fetch = async (input, init) => {
   else if (path === '/api/admin/daily-sync' && method === 'PUT') {
     daily = { ...daily, ...(body as Pick<DailySyncSettings, 'enabled' | 'local_time' | 'timezone'>) }
     response = daily
+  } else if (path === '/api/admin/ai-configuration' && method === 'GET') response = aiConfiguration
+  else if (path === '/api/admin/ai-configuration' && method === 'PUT') {
+    const update = body as AIConfiguration['saved'] & { credentials: Record<string, string> }
+    const { credentials: _secretInput, ...saved } = update
+    void _secretInput
+    aiConfiguration = { ...aiConfiguration,
+      saved,
+      credentials_configured: { ...aiConfiguration.credentials_configured, deepseek: Boolean(update.credentials.deepseek) },
+      restart_required: true,
+    }
+    response = aiConfiguration
   }
   else if (path === '/api/sources/sync') {
     syncCalls++
@@ -92,6 +114,8 @@ globalThis.fetch = async (input, init) => {
     }
   } else if (path === '/api/sources/src_one/process') {
     response = { job_id: 'job_two', job_type: 'process_source', status: 'queued', created: false }
+  } else if (path === '/api/admin/jobs/job_two') {
+    response = { id: 'job_two', job_type: 'process_source', status: 'succeeded', attempt: 1, error: null, events: [] }
   } else throw new Error(`Unexpected request ${method} ${path}`)
   return new Response(JSON.stringify(response), {
     status: path === '/api/sources/sync' || path.endsWith('/process') ? 202 : 200,
@@ -139,5 +163,16 @@ assert.match(syncAcceptanceMessage(reusedSync), /复用不代表同步完成/)
 const reused = await api.processSource('src_one')
 assert.equal(reused.created, false)
 assert.equal(reused.status, 'queued')
+assert.equal((await api.job(reused.job_id)).status, 'succeeded')
+
+const ai = await api.aiConfiguration()
+assert.equal(ai.effective.ai_provider, 'mock')
+assert.equal(ai.credentials_configured.deepseek, false)
+const updatedAI = await api.saveAIConfiguration({ ...ai.saved, ai_provider: 'deepseek',
+  credentials: { deepseek: 'fake-secret' } })
+assert.equal(updatedAI.saved.ai_provider, 'deepseek')
+assert.equal(updatedAI.effective.ai_provider, 'mock', 'save does not silently change running jobs')
+assert.equal(updatedAI.restart_required, true)
+assert.equal(JSON.stringify(updatedAI).includes('fake-secret'), false, 'settings response must not echo credentials')
 
 console.log('Capture Scope state and API contract: passed')

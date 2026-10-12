@@ -41,6 +41,8 @@ export const PROCESSING_LABELS: Record<string, string> = {
   pending: '待处理',
   queued: '排队中',
   running: '处理中',
+  succeeded: '已完成',
+  cancelled: '已取消',
   processed: '已处理',
   partial: '部分处理',
   failed: '处理失败',

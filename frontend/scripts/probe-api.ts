@@ -48,6 +48,11 @@ const run = async () => {
   need(stats.corpus && stats.demo_mode === true, 'stats')
   const settings = await api.settings()
   need(typeof settings.openai_api_key === 'boolean', 'settings never leak the key value')
+  const aiConfiguration = await api.aiConfiguration()
+  need(aiConfiguration.effective.ai_provider === 'mock' && aiConfiguration.restart_required === false,
+    'AI choices match the running fixture provider')
+  need(Object.values(aiConfiguration.credentials_configured).every((value) => typeof value === 'boolean'),
+    'AI credential status is redacted')
   const { rules } = await api.rules()
   need(Array.isArray(rules), 'policy rules')
   const { decisions } = await api.decisions({ limit: 5 })

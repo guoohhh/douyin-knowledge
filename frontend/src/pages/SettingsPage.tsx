@@ -6,6 +6,7 @@ import { api } from '../api/client'
 import { actionLabel, dateTime, errorMessage, ruleTypeLabel } from '../lib/format'
 import { CaptureScopeSection } from './CaptureScopeSection'
 import { DailySyncSection } from './DailySyncSection'
+import { AISettingsSection } from './AISettingsSection'
 
 function Figures() {
   const stats = useQuery({ queryKey: ['stats'], queryFn: api.stats })
@@ -43,45 +44,6 @@ function Figures() {
         <div className="figure__label">失败的处理</div>
       </div>
     </div>
-  )
-}
-
-function Models() {
-  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings })
-  if (!settings.data) return null
-  const { resolved_models, ai_provider, openai_api_key } = settings.data
-  // `openai_api_key` arrives from the API as a boolean, never the value: the settings
-  // endpoint can answer "is a key configured" but has no way to answer "with what".
-  const hasKey = openai_api_key === true
-
-  return (
-    <section>
-      <h2>模型</h2>
-      <p className="muted" style={{ fontSize: '0.85rem', maxWidth: '68ch' }}>
-        {ai_provider === 'mock'
-          ? '现在用的是模拟模型，不联网、不花钱，回答内容只是占位。要真实结果就在 .env 里填 DK_OPENAI_API_KEY，然后重启服务。'
-          : '已接入真实模型。每次处理都会把实际调用的模型名记进运行记录里。'}
-      </p>
-      <table>
-        <thead>
-          <tr>
-            <th>用途</th>
-            <th>模型</th>
-          </tr>
-        </thead>
-        <tbody>
-          {Object.entries(resolved_models).map(([role, model]) => (
-            <tr key={role}>
-              <td>{role}</td>
-              <td className="mono">{model}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="faint" style={{ fontSize: '0.82rem', marginTop: '0.75rem' }}>
-        API key {hasKey ? '已配置' : '未配置'}。密钥只存在 .env 里，界面和接口都不会显示它。
-      </p>
-    </section>
   )
 }
 
@@ -461,7 +423,7 @@ export function SettingsPage() {
     <div className="stack">
       <div>
         <h1>设置</h1>
-        <p className="lede">全部数据都在这台机器上的一个 SQLite 文件里，没有账号，也不上传。</p>
+        <p className="lede">知识库存于本机；启用云端 AI 提供商并手动处理时，所需内容会发送给所选服务。</p>
       </div>
 
       <Figures />
@@ -481,7 +443,7 @@ export function SettingsPage() {
       </div>
       {reindex.isSuccess ? <p className="notice">索引重建已交给后台。</p> : null}
 
-      <Models />
+      <AISettingsSection />
       <Rules />
       <Decisions />
     </div>

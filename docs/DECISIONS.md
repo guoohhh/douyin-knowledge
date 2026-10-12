@@ -339,6 +339,30 @@ asset URLs still refresh during every capture. The first sync after this hash
 change may create one transition snapshot per existing source. Tests exercise
 repeated signed URL changes, content edits, and asset URL refresh.
 
+### DEC-023: UI-managed AI credentials are separate local files and restart-bound
+
+**Decision**: Stage 3G keeps `Settings` and the existing AI registry as the only
+runtime configuration path. The Settings UI writes non-secret provider/model
+choices to `DK_DATA_DIR/ai-settings.json` and API credentials to a separate
+owner-readable-only `DK_DATA_DIR/ai-secrets.json`. Neither enters `app_settings`
+or the normal settings API. `DK_*` environment values, including `.env`, take
+precedence over corresponding local values. The API and worker read the files at
+startup; saving requires both processes to restart. Running jobs therefore keep
+their original settings; queued jobs resolve settings when claimed.
+
+**Rationale**: Environment-only credentials made the product Settings screen
+read-only. A small local file under the existing ignored data directory provides
+single-user persistence without adding a secrets service or putting plaintext
+keys in SQLite. Atomic owner-only writes avoid partial credentials and common
+permission leaks. Read APIs return only configured booleans. Provider/role and
+model choices are validated before save; manual processing checks essential
+provider compatibility and credentials before enqueue.
+
+**Limit**: These files are local plaintext protected by filesystem permissions,
+not encrypted at rest. Users requiring stronger protection should use environment
+variables or OS-managed storage. Real OCR/visual processing is not represented
+as an available UI role because the orchestrator does not call it.
+
 ---
 
 ## Known gaps

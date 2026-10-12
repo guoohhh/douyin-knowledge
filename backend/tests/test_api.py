@@ -100,6 +100,32 @@ class TestHealth:
 
 
 class TestSyncAndProcess:
+    def test_manual_processing_rejects_missing_real_credentials_before_enqueue(
+        self, populated: TestClient, settings: Settings
+    ) -> None:
+        source_id = populated.get("/api/sources", params={"limit": 1}).json()["sources"][0]["id"]
+        settings.ai_provider = "deepseek"
+        settings.asr_provider = "mock"
+        settings.embedding_provider = "mock"
+        before = len(populated.get("/api/admin/jobs", params={"source_id": source_id}).json()["jobs"])
+        response = populated.post(f"/api/sources/{source_id}/process", json={"force": True})
+        assert response.status_code == 422
+        assert "DK_DEEPSEEK_API_KEY" in response.json()["detail"]
+        after = len(populated.get("/api/admin/jobs", params={"source_id": source_id}).json()["jobs"])
+        assert after == before
+
+    def test_manual_processing_rejects_embedding_model_switch_before_enqueue(
+        self, populated: TestClient, settings: Settings
+    ) -> None:
+        source_id = populated.get("/api/sources", params={"limit": 1}).json()["sources"][0]["id"]
+        settings.embedding_model = "different-model"
+        before = len(populated.get("/api/admin/jobs", params={"source_id": source_id}).json()["jobs"])
+        response = populated.post(f"/api/sources/{source_id}/process", json={"force": True})
+        assert response.status_code == 422
+        assert "embedding model differs" in response.json()["detail"]
+        after = len(populated.get("/api/admin/jobs", params={"source_id": source_id}).json()["jobs"])
+        assert after == before
+
     def test_real_scope_read_write_stay_local_without_identity(
         self, client: TestClient, settings: Settings
     ) -> None:
