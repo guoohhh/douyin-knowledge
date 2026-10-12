@@ -1294,7 +1294,7 @@ These are not all bugs. They are places where the current design knowingly buys 
 - Snapshot evidence spans unlike samples: pre-Stage 3F reported real state **16 Sources / 128 Snapshots**, versus simulated new-fingerprint **8 Sources / 8 Snapshots** remaining eight after repeated simulation sync. The new fingerprint has **not** been measured against the same real 16-source corpus.
 - Stage 3F 03:00 local scheduled sync and restart catch-up are merged into `integration/v1` with CODE/UNIT/CI evidence, but lack real-account operation validation; user-facing provider/model configuration remains separate V1 work.
 
-Source: docs/DECISIONS.md “Known gaps” plus current code at the baseline SHA.
+Evidence cutoff for this P2 inventory: `integration/v1@e1af20e5f839ec069d4a06adb42aa790bc876dd9` (2026-10-13 review), `docs/DECISIONS.md`, current implementation/tests and accepted-but-not-independently-archived Stage 3E-6 report. Historical b08 facts above remain tied to their original SHA.
 
 ---
 
