@@ -12,6 +12,25 @@ First retrospective pass: 2026-09-29
 
 ---
 
+## Current Engineering State / Handoff Snapshot
+
+**Review cutoff (2026-10-13):** `integration/v1` = `e1af20e5f839ec069d4a06adb42aa790bc876dd9` (PR #2 → PR #3); `main` remains at `ee98fc7bd57363daec5069a2ad56bc90c4943be2`. The **original historical retrospective baseline** is `b08efb04f975641b41c0a368eba0a35bf88245bd`, not today's code HEAD.
+
+**Coverage:** architecture/invariants (§2), GPT-vs-Claude provenance and integration (§3, §6), sidecar/media/asset/grounding/retrieval/citation failures (§7–12), long-audio ASR (§13), Capture Scope (§13B), outcome semantics (§13C), scheduler and snapshot history (§13D); source/test map (§18), milestone SHA map (§19). This is an evidence-based retrospective, **not** an assertion of exhaustive independent code audit.
+
+**Current milestone states:**
+- **Stage 3D:** bounded-session ASR + timestamp restoration were REAL VALIDATED at the historical `b08efb0` source; conservative boundary-stitching code/tests (`4142ae8`, `638585f`) are now **CODE INTEGRATED** in `integration/v1`, but post-fix **REAL ASR / downstream EvidenceUnit validation remains pending**.
+- **Stage 3E:** PR #2 **MERGED** (`1c494b7`). Stage 3E-6 full real-account + isolated DTK + browser workflow is **REAL E2E REPORTED BY CODEX / ACCEPTED BY PROJECT COORDINATOR / ORIGINAL LOCAL ARTIFACTS NOT INDEPENDENTLY ARCHIVED**; 16 default + 16 named observations overlap on 16 unique Sources (§13B). Do not confuse this accepted report with repository-archived raw test logs, or extrapolate it to second-page, multi-folder or multi-identity trials.
+- **Stage 3F:** PR #3 **MERGED** (`e1af20e`); **CODE IMPLEMENTED / UNIT TESTED / CI VALIDATED**. Local report: 933 passed, 4 skipped; integration Backend/Frontend/Integration CI all SUCCESS. **REAL SCHEDULED E2E NOT TESTED**, including cross-day real-account runs (§13D).
+
+**Load-bearing invariants:** capture selection ≠ observation ≠ Processing Policy; only completed authoritative page walks may reconcile absence; a Source remains one entity across targets; unpinned identity fails closed; transport/session reliability ≠ transcript semantic reconciliation; Evidence/Claim/citation must remain grounded; root job fan-out ≠ completed target work; automatic sync must not silently trigger paid AI; snapshots track content changes rather than signed-URL churn.
+
+**Evidence boundaries:** Stage 3E real-run counts below are an *accepted coordinator-provided Codex report*, not independently archived original artifacts. Stage 3F's 8-source/8-snapshot repeat-sync result is *simulation* and is not a post-fix measurement of the actual 16-source corpus. Passing mock/fixture CI is not live provider proof.
+
+**Priority open problems:** Stage 3D post-stitch live ASR + EvidenceUnits; Stage 3E real second page, multiple selected named folders, independent multi-identity provenance, long-running stability; Stage 3F live cross-day restart/scheduler operation and real-corpus snapshot measurement; incomplete Stage 3B/C run artifacts (§14–16). New maintainers should read **§0 → §2 → §13 → §13B → §13D → §15–16** before changing claims.
+
+---
+
 ## 0. How to read and maintain this document
 
 ### 0.1 Evidence policy
@@ -251,7 +270,7 @@ The current working stages are:
 - Stage 3C — real retrieval → Answer → Citation
 - Stage 3D — full-corpus robustness, currently ongoing at this baseline
 
-Historical transition: [PR #1](https://github.com/guoohhh/douyin-knowledge/pull/1), “Phase 3: validate real Douyin sidecar integration,” **MERGED** on 2026-10-12 (`423dee12bf68a21fe3e022a4925db12233550394`). This merge status is not a claim that all Stage 3D real corpus or post-fix ASR/EvidenceUnit checks passed.
+Historical transition: [PR #1](https://github.com/guoohhh/douyin-knowledge/pull/1), “Phase 3: validate real Douyin sidecar integration,” was marked **merged** by GitHub on 2026-10-12, but the recorded `merge_commit_sha` is **its head commit `423dee12bf68a21fe3e022a4925db12233550394`**, not a separate merge commit. The Phase 3 commits are present as ancestors of the Stage 3E PR #2 head (`8087006`), which entered `integration/v1` through actual merge commit `1c494b7`. The PR #1 merged flag must **not** be narrated as an independent integration merge. This ancestry says nothing about post-stitch live ASR validation.
 
 ---
 
@@ -857,7 +876,7 @@ The downstream EvidenceUnit run was deliberately not continued after this valida
 
 The b08 run remains the last real source-level validation recorded above: provider sessions and timestamps succeeded, midpoint-only reconciliation failed, and the downstream EvidenceUnit run was **NOT RUN**.
 
-Since that run, branch `fix/stage3d-boundary-stitching` adds `_stitch_boundaries` after midpoint ownership. This is a **new implementation and a regression-tested hypothesis**, not proof of an accepted real E2E outcome. No subsequent live Doubao retranscription or EvidenceUnit validation is established by the code inspected here.
+Since that run, commits `4142ae8` and `638585f` added `_stitch_boundaries` after midpoint ownership, and **both commits are now ancestors of `integration/v1` HEAD `e1af20e`**. Thus boundary stitching is **CODE INTEGRATED + UNIT/CI TESTED**, but remains a regression-tested hypothesis about provider output quality, **not** proof of a post-fix real E2E result. No subsequent live Doubao retranscription or downstream EvidenceUnit validation is established in the reviewed repository evidence.
 
 The rule is deliberately narrow. It proposes a stitch only for two utterances from **adjacent provider sessions** that intersect in time, are near the shared boundary (the current backstop is 5,000 ms), and have a sufficiently long exact normalized suffix/prefix overlap (minimum 7 characters, chosen because the real 600 s duplicate is seven characters). Punctuation and spacing are removed for comparison, with a map from normalized characters back to raw-text offsets so deduplication does not erase unrelated original characters. If an utterance participates in more than one possible match, **no stitch is made**.
 
@@ -873,7 +892,7 @@ The overlap/core arithmetic is deterministic. ASR utterance boundaries are not. 
 
 Evidence:
 
-- `fix/stage3d-boundary-stitching`: `backend/src/douyin_knowledge/ai/adapters/doubao_adapter.py`, `_reconcile`, `_stitch_boundaries`, `_stitch_candidates`;
+- `fix/stage3d-boundary-stitching` origin, now integrated via `638585f` ancestry into `integration/v1@e1af20e`: `backend/src/douyin_knowledge/ai/adapters/doubao_adapter.py`, `_reconcile`, `_stitch_boundaries`, `_stitch_candidates`;
 - `backend/tests/unit/test_doubao_boundary_stitching.py` — real-failure-shaped unit fixtures and guard tests;
 - b08efb04f975641b41c0a368eba0a35bf88245bd — original real-run evidence, **not** post-fix validation.
 
@@ -958,7 +977,7 @@ The current architecture already has provider-role separation and secret-aware c
 
 ## 13B. Stage 3E Capture Scope: selection is not observation and observation is not knowledge
 
-**Updated integration status (2026-10-13):** [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) **MERGED on 2026-10-12** into `integration/v1` at merge SHA `1c494b7ade015de031acb898ff8bb2fdf2f447bf`, with Stage 3E feature head `80870062859af90eb360a9f12b14f4887b6a5067`. This supersedes the earlier “Draft / not merged” account for `88739d8`. Stage 3E is CODE INTEGRATED and CI TESTED; the PR's stated verification used fixtures and paid no AI calls. Its merge does **not** establish complete real-account default-favorites E2E or multi-identity isolation. The later `8087006` commit records a narrower real upstream probe, separately qualified below.
+**Updated integration status (2026-10-13):** [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) **MERGED on 2026-10-12** into `integration/v1` at merge SHA `1c494b7ade015de031acb898ff8bb2fdf2f447bf`, with Stage 3E feature head `80870062859af90eb360a9f12b14f4887b6a5067`. This supersedes the earlier “Draft / not merged” account for `88739d8`. Stage 3E is CODE INTEGRATED and CI TESTED; the PR's stated verification used fixtures and paid no AI calls. Its merge alone does **not** establish real E2E or multi-identity isolation. Separately, the coordinator **accepted the Codex Stage 3E-6 full real E2E report** after an isolated test-account/browser run; see the explicitly qualified evidence ledger below. The remaining unverified areas are second-page pagination, multiple named folders, full multi-identity cross-checks, and long-term operation.
 
 ### Problem and architectural boundary
 
@@ -987,7 +1006,7 @@ The list is normalized, deduplicated and nonempty-ID validated. The default targ
 
 Default favorites is **not** a named folder. It uses a separate provider operation `list_default_favorite_sources` (the Stage 3E adapter targets `GET /api/v1/douyin/user/bookmarks` through a separately validated DTK fork), and separate `SourceDefaultFavoriteObservation` / `DefaultFavoritesSyncState` tables. Named folders retain their `SourceCollectionMembership` history. The same video is one `Source` under multiple observations, rather than copies per target. Sidecar session identity/credentials remain outside this non-secret selection setting.
 
-**Do not confuse code that calls this fork route with real proof that it works on the user's configured sidecar/account.** The historical default-favorites limitation and the new fork route are separate evidence; §14.1 remains open.
+**Historical distinction:** merely wiring this fork route was not proof of live compatibility at the original PR review point. A later Stage 3E-6 isolated account test was **reported and accepted** (§13B evidence below), while its original local artifacts remain unarchived. This newer evidence does not erase the original DTK limitation in §14.1.
 
 ### Durable target jobs and the prune invariant
 
@@ -1035,7 +1054,7 @@ A small but important late fix hardens named-folder discovery pagination: `has_m
 
 **Follow-up correction.** `33c10b0` removed the old Collections-page direct sync button and routed users to `/settings#capture-scope-title`. It also changed the displayed acceptance semantics: `JobAccepted.created=true` means a new job was accepted, not completed; `created=false` means an existing job was reused, and the newly submitted `auto_process` flag does not mutate the old job's options. An existing job may still perform paid processing even if the user's *new* request has the checkbox off. This is a **queue contract**, not just copywriting.
 
-**Tests and limits.** `frontend/scripts/test-capture-scope.ts` checks saved/draft helpers, missing discovered IDs, mock HTTP contract, default `auto_process=false`, new-vs-reused acceptance messages and a source-text assertion that the Collections page no longer calls sync. Frontend CI runs this Node/esbuild script, typecheck and build; integration smoke probes a live **local fixture API**. These do **not** establish browser-level interaction quality, authenticated Douyin sync or paid-provider cost behavior. The remaining risk is the user interpreting a new checkbox as cancellation of an already-running job; the UI warns but does not implement cancellation/reconfiguration.
+**Tests and limits.** `frontend/scripts/test-capture-scope.ts` checks saved/draft helpers, missing discovered IDs, mock HTTP contract, default `auto_process=false`, new-vs-reused acceptance messages and a source-text assertion that the Collections page no longer calls sync. Frontend CI runs this Node/esbuild script, typecheck and build; integration smoke probes a live **local fixture API**. Those **mock/CI checks alone** did not establish browser-level interaction quality, authenticated Douyin sync or paid-provider cost behavior. Later, the accepted Codex Stage 3E-6 report describes actual browser and test-account workflows (separate evidence level below). The remaining risk is the user interpreting a new checkbox as cancellation of an already-running job; the UI warns but does not implement cancellation/reconfiguration.
 
 **Invariant:** Persisting intent, submitting a task, reusing a task and completing work are four distinct state transitions. UI wording must not collapse them.
 
@@ -1051,6 +1070,32 @@ A small but important late fix hardens named-folder discovery pagination: `has_m
 
 **Invariant:** Every imported Douyin fact must be attributable to the explicitly configured identity. If account provenance cannot be established, content capture must fail closed while local selection/history remain inspectable.
 
+### Stage 3E-6: accepted full real-account and browser E2E report (not independently archived)
+
+**Evidence provenance and limit:** **REAL E2E REPORTED BY CODEX · ACCEPTED BY PROJECT COORDINATOR · ORIGINAL LOCAL ARTIFACTS NOT INDEPENDENTLY ARCHIVED.** The coordinator supplied the accepted Stage 3E-6 Full Real E2E Report after Codex ran against an **isolated DTK instance**, a **real test Douyin account**, an **application database**, and a **real browser**. This maintainer did **not** reproduce the run or inspect its original local logs, browser recordings or database. The counts below are *report evidence*, not direct GitHub-archived measurements.
+
+~~~text
+real account listing:         default favorites 16; one named collection 16
+overlap:                      16 (same items observed from both targets)
+final Sources:                16
+default-favorite observations:16
+named memberships:           16
+duplicate Sources:            0
+duplicate memberships:        0
+duplicate observation keys:   0
+Collections:                  1
+Processing Jobs:              0
+final application Jobs:       3 succeeded
+SQLite integrity_check:      ok
+foreign-key violations:       0
+~~~
+
+The browser report covers discovery, default/named selection, save/reload, manual sync, deselection/reselection, repeat sync, offline discovery retaining saved settings, blocking sync with unsaved edits, AI default-off, and correct new-job versus reused-job messaging. The 0 Processing Jobs count is consistent with the no-paid-AI intent; it does **not** validate downstream processing quality. The tests did **not** modify Douyin account content, shared DTK, or the Stage 3D corpus, and performed no paid AI calls.
+
+**Upstream contract observation:** default favorites `count=50` produced `business_error`; `count=20` returned 16 items with `has_more=false`. Named collection `count=50` returned 16 with `has_more=false`. This drove `80870062859af90eb360a9f12b14f4887b6a5067` and its regression test. The report supports a **real one-page full-walk + persistence/overlap + browser workflow** for this account, **not** default favorites' real second page or broad-corpus behavior. Original HTTP/SQL/browser artifacts still need durable archiving for independent reproduction.
+
+**Still UNKNOWN / NOT REAL VALIDATED:** multiple distinct named collections selected and synchronized together; actual second-page default-favorites cursor behavior; cross-account identity selection tested against multiple live identities; multi-day/long-running reliability. These are targeted next tests, not reasons to relabel the completed Stage 3E-6 run as “not tested”.
+
 ### Evidence and validation ledger
 
 | Item | Status | Source |
@@ -1061,11 +1106,12 @@ A small but important late fix hardens named-folder discovery pagination: `has_m
 | Explicit frontend selection/save/sync, safe default, job-reuse wording | CODE + MOCK/CI TESTED; not browser E2E | f80ed33, 33c10b0; CaptureScopeSection.tsx, captureScope.ts, test-capture-scope.ts |
 | Required pinned identity on all account-content reads | CODE + MOCK/CI TESTED; not live multi-identity E2E | 88739d8; douyin_provider.py; test_douyin_identity_safety.py |
 | Latest feature-branch CI at 88739d8 | CI PASS (2026-10-12 01:52 China time; GitHub completion 2026-10-11 17:52 UTC) | Python 3.10, Python 3.12, lint/types, frontend build, local-API integration smoke |
-| Default-favorites route on the user's real sidecar/account | NOT REAL VALIDATED | PR #2 explicitly made no real Douyin requests |
+| Default favorites + named overlap, one-page full sync, real browser workflow | **REAL E2E REPORTED BY CODEX; ACCEPTED BY PROJECT COORDINATOR; ORIGINAL LOCAL ARTIFACTS NOT INDEPENDENTLY ARCHIVED** | Stage 3E-6 accepted report: 16/16 overlap → 16 Sources, 3 jobs succeeded, DB checks clean; not a self-run |
+| Second page / multiple named folders / live multi-identity / long-term reliability | **NOT REAL VALIDATED** | Explicit Stage 3E-6 coverage limits |
 | Daily 03:00 scheduling, missed-run catch-up on startup | V1 DECIDED; NOT established implemented here | §13A, not this feature's implementation |
 | User-facing main AI / ASR model selection and key management | V1 DECIDED; not established shipped here | §13A |
 
-PR #2 reports 76 focused tests and 887 backend tests passing (4 skipped) at an earlier local validation point; these figures are historical, **not** the current head's total. The five GitHub check runs for head `88739d8` are independently all green. A frontend client exercised against a live **local fixture API** in smoke CI is **not** proof of a live Douyin provider call or real browser E2E.
+PR #2 reports 76 focused tests and 887 backend tests passing (4 skipped) at an earlier local validation point; these figures are historical, **not** the current head's total. The five GitHub check runs for historical head `88739d8` are independently all green. A frontend client exercised against a live **local fixture API** in smoke CI is **not**, by itself, proof of a live Douyin provider call or real browser E2E; the later **separately reported** Stage 3E-6 real-run results above have a different, explicitly labeled provenance.
 
 Owning modules: `capture/scope.py`, `capture/discovery.py`, `capture/douyin_provider.py`, `capture/pagination.py`, `capture/sync.py`, `jobs/handlers.py`, `api/routes/sources.py`, `cli/commands_capture.py`; migration `0006_capture_scope_observations.py`; frontend `src/pages/CaptureScopeSection.tsx`, `src/pages/CollectionsPage.tsx`, `src/lib/captureScope.ts`, `src/api/client.ts`. Main tests: `tests/unit/test_capture_scope.py`, `tests/unit/test_capture_discovery.py`, `tests/unit/test_douyin_identity_safety.py`, `tests/test_api.py`, `tests/test_cli.py`, frontend `scripts/test-capture-scope.ts`.
 
@@ -1074,7 +1120,7 @@ Owning modules: `capture/scope.py`, `capture/discovery.py`, `capture/douyin_prov
 - A one-time bootstrap from **existing local observations** protects upgrade behavior, but a new database has no observations. Fresh fixture and fresh real account require intentionally different defaults.
 - A target's saved selection and the provider's live discovery may diverge; surfacing both is more truthful than letting a transient upstream failure erase a preference.
 - The system deliberately preserves stopped targets' historical observations and knowledge. It does **not** automatically interpret deselection as “forget my content.”
-- The real fork endpoint remains an integration risk until an authenticated, complete page walk and persistence are observed; CI cannot settle upstream contracts.
+- An authenticated **one-page complete walk and persistence for the 16-item test account** are now reported in accepted Stage 3E-6 E2E. Independent artifact preservation, real second-page pagination, additional named folders and long-term stability remain risks; CI alone could not have established the account behavior.
 - UI safety includes cost intent: a default-off checkbox cannot change an already deduplicated job. Distinguish submitted, reused and completed work, and consider explicit cancellation/status polling later.
 - Identity pinning is part of provenance correctness. Local mock tests establish fail-closed transport behavior; real multi-identity sidecar validation remains outstanding.
 
@@ -1103,7 +1149,7 @@ Modules/tests: `extraction/entity_resolver.py`, `tests/test_extraction.py`; `ext
 
 ### Default favorites page size: REST acceptance != business acceptance
 
-**Observed problem (reported, not independently archived):** the sidecar's REST schema allowed up to `count=50`, but a real upstream default-favorites request with `count=50` returned a business error; the probe using `count=20` returned a page successfully. Named-collection listing retained the 50-item route limit. The original raw request/response logs are not preserved in this retrospective, so classify the 50/20 contrast as **REAL OBSERVATION REPORTED**, not independently reproduced E2E.
+**Observed problem (accepted Codex Stage 3E-6 report, original artifacts not independently archived):** the sidecar's REST schema allowed up to `count=50`, but the real upstream default-favorites request at 50 returned `business_error`. At `count=20`, the default-favorites page returned **16 items / `has_more=false`**. The named collection at `count=50` returned **16 items / `has_more=false`**. The accepted E2E report also records overlap/persistence (16 unique Sources), three succeeded application jobs and a real browser exercise (§13B). Thus this is **REAL E2E REPORTED BY CODEX / ACCEPTED BY PROJECT COORDINATOR**, **not** a maintainer-reproduced run or independently archived raw request/response. The single-page data do not validate a real second-page walk.
 
 **Fix / invariant:** `DouyinCaptureProvider.list_default_favorite_sources` now clamps to its own `MAX_DEFAULT_FAVORITES_PAGE_SIZE=20`, not the general 50. `backend/tests/unit/test_douyin_provider_transport.py` asserts a request for 50 sends 20 and a smaller request remains smaller. A cursor belongs to the paging query that generated it: changing count mid-walk would undermine the complete-walk/pruning guarantee.
 
@@ -1122,7 +1168,7 @@ Modules/tests: `extraction/entity_resolver.py`, `tests/test_extraction.py`; `ext
 5. A root job succeeding means it **fanned out** target jobs, not that remote content was synchronized. `record_targets` and `refresh_outcome` track per-target terminal states, distinguishing queued/running, success, failed, no_targets and completed_with_skips. This preserves the Stage 3E truthfulness contract at the new scheduler layer.
 6. `GET/PUT /api/admin/daily-sync` and `frontend/src/pages/DailySyncSection.tsx` expose explicit enable/save/timezone/outcome controls. The UI states that worker shutdown/sleep suspends execution and that automatic capture cannot trigger paid processing.
 
-**Test evidence:** `backend/tests/unit/test_daily_sync.py` covers disabled defaults, catch-up/deduplication, active manual-job deferral, empty-scope no-request, terminal outcomes, scope changes, calendar-day/DST behavior, SQLite dual-tick races, restart persistence, fixture sync without processing, missing identity, and bounded target failure. Frontend settings and client contracts have corresponding changes and CI checks. This is **CODE IMPLEMENTED + UNIT/CI TESTED**, not a report of live scheduled account sync.
+**Test evidence:** `backend/tests/unit/test_daily_sync.py` covers disabled defaults, catch-up/deduplication, active manual-job deferral, empty-scope no-request, terminal outcomes, scope changes, calendar-day/DST behavior, SQLite dual-tick races, restart persistence, fixture sync without processing, missing identity, and bounded target failure. Frontend settings and client contracts have corresponding tests. The local implementation report states **933 passed, 4 skipped** (reported; not an independently rerun count). The post-merge `integration/v1@e1af20e` GitHub workflows were independently checked as **SUCCESS**: [Backend](https://github.com/guoohhh/douyin-knowledge/actions/runs/38280275793), [Frontend](https://github.com/guoohhh/douyin-knowledge/actions/runs/38280275887), [Integration](https://github.com/guoohhh/douyin-knowledge/actions/runs/38280276038). This establishes **CODE IMPLEMENTED / UNIT TESTED / CI VALIDATED**; **REAL SCHEDULED E2E NOT TESTED**, particularly real-account cross-day runs.
 
 ### Why SourceSnapshot fingerprinting was revised
 
@@ -1130,7 +1176,9 @@ Repeated captures can differ only in volatile signed URLs, observed fetch timest
 
 Stage 3F changes `CaptureSyncService._payload_hash` to fingerprint selected meaningful metadata and normalized URL identity (scheme/host/path without query or fragment). The full raw provider payload is preserved when a *meaningful* new snapshot is emitted; current signed URLs are refreshed on Source/Asset even when no new snapshot is added. A targeted test varies signatures, fetch time and counts (expect no new snapshot) and then varies caption (expect a new snapshot).
 
-**Tradeoff/P2:** CDN host/path changes can still create noise; the effect on real corpora is unmeasured. Conversely, deliberately excluding transient engagement counts means those metrics do not create immutable revision points. This distinction belongs in the product's versioning contract, not only in a hash implementation.
+**Comparison evidence (different datasets; do not calculate an improvement rate):** an earlier Stage 3E real-account state was reported as **16 Sources / 128 SourceSnapshots** under the old behavior. The new Stage 3F fingerprint was checked in a **simulation with 8 Sources / 8 Snapshots**, and a repeated simulated sync still had **8 Snapshots**. These are **REPORTED PRIOR REAL-ACCOUNT STATE** vs **SIMULATED POST-FIX BEHAVIOR**, **not** a before/after measurement of the same 16-source real corpus. The repo unit test independently pins the signed-URL/fetch-time invariants but does not prove the eight-source simulation was a real Douyin run.
+
+**Tradeoff/P2:** CDN host/path changes can still create noise; post-fix fingerprint behavior on the real 16-source corpus remains **NOT MEASURED**. Conversely, deliberately excluding transient engagement counts means those metrics do not create immutable revision points. This distinction belongs in the product's versioning contract, not only in a hash implementation.
 
 ### Invariants, status and interview use
 
@@ -1140,7 +1188,7 @@ Stage 3F changes `CaptureSyncService._payload_hash` to fingerprint selected mean
 - A successful provider page is not proof of a complete authoritative target walk; only complete walks may reconcile absence.
 - Snapshot versions represent meaningful source changes, not every signed URL or observation timestamp.
 
-**Evidence ledger:** Stage 3E `8087006` = real upstream page-size observation **REPORTED** + fix CODE/TESTED; Stage 3E [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) = **MERGED** into `integration/v1` at `1c494b7`; Stage 3F `ba83713` = **CODE INTEGRATED + UNIT/CI TESTED**, [PR #3](https://github.com/guoohhh/douyin-knowledge/pull/3) **MERGED** into `integration/v1` at `e1af20e5`; no real scheduled E2E established. See `docs/DECISIONS.md` DEC-022, `backend/src/douyin_knowledge/capture/daily_sync.py`, `backend/src/douyin_knowledge/jobs/worker.py`, `backend/tests/unit/test_daily_sync.py`, and `backend/tests/unit/test_capture_snapshot_fingerprint.py`.
+**Evidence ledger:** Stage 3E `8087006` = real upstream one-page 50/20 failure/correction **REPORTED BY CODEX + ACCEPTED** (not independently archived) + fix CODE/TESTED; Stage 3E [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) = **MERGED** into `integration/v1` at `1c494b7`; Stage 3F `ba83713` = **CODE IMPLEMENTED + UNIT TESTED + CI VALIDATED**, [PR #3](https://github.com/guoohhh/douyin-knowledge/pull/3) **MERGED** into `integration/v1` at `e1af20e5`, **REAL SCHEDULED E2E NOT TESTED**. See `docs/DECISIONS.md` DEC-022, `backend/src/douyin_knowledge/capture/daily_sync.py`, `backend/src/douyin_knowledge/jobs/worker.py`, `backend/tests/unit/test_daily_sync.py`, and `backend/tests/unit/test_capture_snapshot_fingerprint.py`.
 
 **Interview story:** “An automation feature is not a timer. We had to define what a daily slot means across time zones/restarts, prevent a background operation from inheriting a paid-processing request, and make success mean completed target work rather than queued fan-out. Once capture became daily, we also had to stop signed URL churn from fabricating immutable knowledge history.”
 
@@ -1157,13 +1205,13 @@ The original b08 capture code was built around:
 
 The provider comments also document that the folder-list endpoint is session-scoped and takes no author.
 
-This supported the original **named collection** capture path. The later Stage 3E feature branch adds a distinct default-favorites adapter operation targeting a separately validated sidecar fork, but its PR reports no real Douyin requests. See §13B; the original upstream contract limitation and the new fork contract are different evidence states.
+This supported the original **named collection** capture path. Stage 3E later added a separate default-favorites operation targeting a DTK fork. PR #2's implementation tests used fixtures, **but the subsequently accepted Codex Stage 3E-6 report describes real default-favorites + named one-page capture/persistence on the isolated test account** (§13B). The original upstream limitation and later fork capability are **different historical periods and evidence states**; preserve both rather than presenting the original limitation as the current tested-account capability.
 
 However, the repository at b08 does **not** contain the original probe/log that established that the deployed DTK version could not expose the user's default/all-favorites feed through the required API.
 
 Therefore the retrospective should currently state:
 
-> Operationally known limitation: the validated Stage 3 path uses named collections. The historical experiment proving the default/all-favorites API gap needs a retained artifact before we describe its exact upstream behavior.
+> **Historical limitation at the original b08-era DTK integration:** the validated path used named collections, with the exact upstream absence probe not archived. **Later Stage 3E-6 on the isolated DTK fork:** default favorites + named one-page synchronization is REAL E2E REPORTED BY CODEX, accepted by the coordinator, without independently archived original artifacts; see §13B.
 
 Backfill needed:
 
@@ -1239,10 +1287,11 @@ These are not all bugs. They are places where the current design knowingly buys 
 - Media retention policy is coarse rather than per-collection.
 - The exact SQLAlchemy 2.1 incompatibility is not retained in repository history.
 - Stage 3D full-corpus robustness is ongoing, so corpus-wide failure rates are not yet frozen.
-- Stage 3E default favorites is wired to a fork-specific provider route but is not yet verified by real-account authenticated end-to-end capture.
-- Stage 3E browser UX and real multi-identity sidecar behavior remain unverified; mock/fixture CI cannot prove account provenance in production.
+- Stage 3E default-favorites + one named collection **were** exercised in the accepted Codex Stage 3E-6 real-account E2E report (16/16 overlap; 16 Sources); original artifacts are not independently archived. A second default-favorites page, multiple named folders and broader corpus behavior remain unverified.
+- Stage 3E browser selection/save/sync/reuse/error workflows were **reported real-E2E tested** by Codex and accepted, but the original browser artifacts are not archived; real **multiple-identity cross-account provenance** remains unverified, and mock CI cannot establish it.
 - Reused queued/running sync jobs keep their original AI processing option; UI warns but does not cancel or reconfigure the existing job.
 - Stage 3E Capture Scope discovery capability is not a live provider-health proof; display saved selection and provider discovery status independently.
+- Snapshot evidence spans unlike samples: pre-Stage 3F reported real state **16 Sources / 128 Snapshots**, versus simulated new-fingerprint **8 Sources / 8 Snapshots** remaining eight after repeated simulation sync. The new fingerprint has **not** been measured against the same real 16-source corpus.
 - Stage 3F 03:00 local scheduled sync and restart catch-up are merged into `integration/v1` with CODE/UNIT/CI evidence, but lack real-account operation validation; user-facing provider/model configuration remains separate V1 work.
 
 Source: docs/DECISIONS.md “Known gaps” plus current code at the baseline SHA.
@@ -1265,10 +1314,12 @@ The following questions are worth answering from old conversations, terminal log
 | Rejected ASR/model alternatives | Needed for a complete “why this vendor” explanation |
 | Stage 3C real prompt/answer/citation artifacts | Makes grounding stories reproducible rather than commit-message-only |
 | Full-corpus Stage 3D statistics | Needed before declaring robustness complete |
-| Stage 3E default-favorites real E2E / fork compatibility | Distinguishes newly wired adapter path from validated product use |
+| Archived original Stage 3E-6 real E2E artifacts (HTTP/SQL/browser/identity) | Codex report of 16 default + 16 named / 16 Sources is accepted, but raw local evidence is not independently archived; essential for reproducibility |
+| Stage 3E real default-favorites second page + multiple named folders | Accepted account E2E covered only 16 items on one page and one named folder; assess safe cursor walking and overlap across >1 named ID |
+| Post-Stage 3F real-corpus SourceSnapshot measurement | Earlier real 16/128 and simulated new 8/8 are not a same-corpus before/after comparison |
 | Stage 3E real multi-identity sidecar proof | Confirms pinning against actual DTK identity-pool behavior and prevents wrong-account ingestion |
-| Capture Scope browser UX / reused-job operational validation | Verifies selection persistence, discovery errors, cost opt-in and non-cancellation in real UI |
-| Stage 3F daily scheduler real operation | Unit/CI-backed feature at ba83713; requires worker-running, restart and real-account/target outcome observations before REAL VALIDATED |
+| Stage 3E-6 browser recordings and extended behavior cases | Selection/save/reload/reuse/offline/AI-off flows are accepted Codex real E2E **report evidence**; archive browser artifacts and separately test actual multi-identity and multiple named folders |
+| Stage 3F daily scheduler real operation | Merged `e1af20e`; unit and integrated CI pass, but cross-day real-account/worker-restart target outcomes remain REAL SCHEDULED E2E NOT TESTED |
 | Any manual DB repair commands used during Phase 3 | Important for migration/recovery story and future runbook |
 | CI run URLs for milestone SHAs | Independent evidence that a state was green |
 
