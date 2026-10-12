@@ -242,7 +242,7 @@ This is important for the retrospective because several later invariants were no
 
 ### Phase 3 — real Douyin account and provider validation
 
-The Phase 3 branch diverged from integration/v1 at 62b4f25656ed4e33452d534804d0c7c5afacbf7b and currently reaches b08efb04f975641b41c0a368eba0a35bf88245bd.
+The Phase 3 branch diverged from `integration/v1` at `62b4f25656ed4e33452d534804d0c7c5afacbf7b`; `b08efb04f975641b41c0a368eba0a35bf88245bd` is the historical Stage 3D segmentation validation baseline, not the latest integration SHA. The accepted Phase 3 sidecar branch later reached `423dee1` and [PR #1](https://github.com/guoohhh/douyin-knowledge/pull/1) was merged on 2026-10-12.
 
 The current working stages are:
 
@@ -251,7 +251,7 @@ The current working stages are:
 - Stage 3C — real retrieval → Answer → Citation
 - Stage 3D — full-corpus robustness, currently ongoing at this baseline
 
-The Draft PR is #1, “Phase 3: validate real Douyin sidecar integration”.
+Historical transition: [PR #1](https://github.com/guoohhh/douyin-knowledge/pull/1), “Phase 3: validate real Douyin sidecar integration,” **MERGED** on 2026-10-12 (`423dee12bf68a21fe3e022a4925db12233550394`). This merge status is not a claim that all Stage 3D real corpus or post-fix ASR/EvidenceUnit checks passed.
 
 ---
 
@@ -937,7 +937,7 @@ missed run: catch up on next application startup
 manual sync: always available
 ~~~
 
-This subsection records the original product decision. Stage 3F subsequently implements the scheduling workflow on a feature branch; see §13D for the implementation, CI evidence and remaining operational limitations. It is not automatically shipped to `integration/v1` merely because Stage 3E merged.
+This subsection records the original product decision. Stage 3F subsequently implemented the scheduling workflow, and [PR #3](https://github.com/guoohhh/douyin-knowledge/pull/3) **merged into `integration/v1` on 2026-10-12**. See §13D for implementation, CI evidence and remaining real-operation limits. Merging into integration is not equivalent to shipping on `main`, nor to real Douyin scheduling E2E.
 
 ### Provider configuration
 
@@ -1098,7 +1098,7 @@ Modules/tests: `extraction/entity_resolver.py`, `tests/test_extraction.py`; `ext
 ### What changed, and what the evidence does not yet show
 
 - `80870062859af90eb360a9f12b14f4887b6a5067` closes a specific default-favorites page-size failure, as reported in commit evidence from real upstream probing.
-- `ba8371304ef181bc36d75e5a5c2928ace6121557` is the isolated Stage 3F implementation commit on `feature/stage3f-daily-sync`; [PR #3](https://github.com/guoohhh/douyin-knowledge/pull/3) remains **DRAFT / NOT MERGED** as of this review. Its PR description predates the Stage 3E merge, so the obsolete “PR #2 has not yet merged” dependency wording must not be repeated as current state.
+- `ba8371304ef181bc36d75e5a5c2928ace6121557` is the isolated Stage 3F implementation commit on `feature/stage3f-daily-sync`. [PR #3](https://github.com/guoohhh/douyin-knowledge/pull/3) **MERGED on 2026-10-12** into `integration/v1`, merge SHA `e1af20e5f839ec069d4a06adb42aa790bc876dd9`. Its original PR description still refers to PR #2 being unmerged, but that text is now historical; the actual merge order was PR #2 followed by PR #3. The new integration HEAD does not change the feature's live-validation evidence level.
 - All five Stage 3F head check runs completed successfully: Python 3.10, Python 3.12, lint/type checking, frontend build and local-API integration smoke. Neither passing CI nor a live local API proves the daily scheduler operated against a real Douyin account. The PR explicitly states Stage 3F tests used local fixtures, without paid AI or real Douyin calls.
 
 ### Default favorites page size: REST acceptance != business acceptance
@@ -1140,7 +1140,7 @@ Stage 3F changes `CaptureSyncService._payload_hash` to fingerprint selected mean
 - A successful provider page is not proof of a complete authoritative target walk; only complete walks may reconcile absence.
 - Snapshot versions represent meaningful source changes, not every signed URL or observation timestamp.
 
-**Evidence ledger:** Stage 3E `8087006` = real upstream page-size observation **REPORTED** + fix CODE/TESTED; Stage 3E [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) = **MERGED** into `integration/v1` at `1c494b7`; Stage 3F `ba83713` = **CODE/UNIT/CI TESTED**, [PR #3](https://github.com/guoohhh/douyin-knowledge/pull/3) **DRAFT, NOT MERGED**, no real scheduled E2E. See `docs/DECISIONS.md` DEC-022, `backend/src/douyin_knowledge/capture/daily_sync.py`, `backend/src/douyin_knowledge/jobs/worker.py`, `backend/tests/unit/test_daily_sync.py`, and `backend/tests/unit/test_capture_snapshot_fingerprint.py`.
+**Evidence ledger:** Stage 3E `8087006` = real upstream page-size observation **REPORTED** + fix CODE/TESTED; Stage 3E [PR #2](https://github.com/guoohhh/douyin-knowledge/pull/2) = **MERGED** into `integration/v1` at `1c494b7`; Stage 3F `ba83713` = **CODE INTEGRATED + UNIT/CI TESTED**, [PR #3](https://github.com/guoohhh/douyin-knowledge/pull/3) **MERGED** into `integration/v1` at `e1af20e5`; no real scheduled E2E established. See `docs/DECISIONS.md` DEC-022, `backend/src/douyin_knowledge/capture/daily_sync.py`, `backend/src/douyin_knowledge/jobs/worker.py`, `backend/tests/unit/test_daily_sync.py`, and `backend/tests/unit/test_capture_snapshot_fingerprint.py`.
 
 **Interview story:** “An automation feature is not a timer. We had to define what a daily slot means across time zones/restarts, prevent a background operation from inheriting a paid-processing request, and make success mean completed target work rather than queued fan-out. Once capture became daily, we also had to stop signed URL churn from fabricating immutable knowledge history.”
 
@@ -1243,7 +1243,7 @@ These are not all bugs. They are places where the current design knowingly buys 
 - Stage 3E browser UX and real multi-identity sidecar behavior remain unverified; mock/fixture CI cannot prove account provenance in production.
 - Reused queued/running sync jobs keep their original AI processing option; UI warns but does not cancel or reconfigure the existing job.
 - Stage 3E Capture Scope discovery capability is not a live provider-health proof; display saved selection and provider discovery status independently.
-- Stage 3F 03:00 local scheduled sync and restart catch-up now have CODE/UNIT/CI evidence on a draft branch, but lack real-account operation validation; user-facing provider/model configuration remains separate V1 work.
+- Stage 3F 03:00 local scheduled sync and restart catch-up are merged into `integration/v1` with CODE/UNIT/CI evidence, but lack real-account operation validation; user-facing provider/model configuration remains separate V1 work.
 
 Source: docs/DECISIONS.md “Known gaps” plus current code at the baseline SHA.
 
@@ -1407,6 +1407,7 @@ This list is deliberately selective. It maps engineering stories, not every comm
 - 8087006 — default-favorites page-size cap from reported real upstream 50/20 probe
 - 1c494b7 — merge Stage 3E PR #2 into integration/v1 (2026-10-12)
 - ba83713 — Stage 3F daily scheduler, durable due/checkpoint/outcomes, meaningful source fingerprint
+- e1af20e — Stage 3F PR #3 merged into integration/v1 (2026-10-12); not live scheduled E2E
 
 ---
 
