@@ -37,8 +37,10 @@ rather than inferred from our own fixtures (DEC-013):
 * The cursor is an **opaque string** (<=512 chars). Douyin stringifies a millisecond
   ``max_cursor``, TikTok an offset. We pass it back verbatim and never parse,
   increment, or construct one.
-* ``count`` is capped at 50 by the schema, and a cursor is only valid for the query
-  that produced it, so ``count`` must not change mid-walk.
+* ``count`` is capped at 50 by the schema. The default-favorites upstream read
+  rejected 50 in real validation while 20 completed, so that target uses 20.
+  A cursor is only valid for the query that produced it, so ``count`` must not
+  change mid-walk.
 * ``wait`` is a float with a documented maximum of 30.0; above it the sidecar returns
   ``400 INVALID_PARAM`` rather than clamping, so we clamp locally instead.
 * Task states are ``queued|running|done|failed``. There is no ``succeeded`` and no
@@ -93,6 +95,10 @@ MAX_WAIT_S = 30.0
 
 #: Schema maximum for ``count``. Asking for more is a validation error.
 MAX_PAGE_SIZE = 50
+
+# The sidecar accepts 50 at its REST boundary, but the upstream default-favorites
+# endpoint returned a business error for 50 and a complete page for 20.
+MAX_DEFAULT_FAVORITES_PAGE_SIZE = 20
 
 #: Schema maximum for an opaque cursor. A longer one cannot have come from this API.
 MAX_CURSOR_LEN = 512
@@ -638,7 +644,7 @@ class DouyinCaptureProvider(CaptureProvider):
         """GET /douyin/user/bookmarks on the pinned, imported sidecar identity."""
         data, meta = self._get(
             f"/{self.platform}/user/bookmarks",
-            {"cursor": cursor, "count": max(1, min(limit, MAX_PAGE_SIZE))},
+            {"cursor": cursor, "count": max(1, min(limit, MAX_DEFAULT_FAVORITES_PAGE_SIZE))},
         )
         if not isinstance(data, dict) or "items" not in data or "has_more" not in data:
             raise ValidationError("sidecar default-favorites page lacks required fields")
