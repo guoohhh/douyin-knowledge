@@ -56,6 +56,7 @@ def build(handler) -> DouyinCaptureProvider:
     return DouyinCaptureProvider(
         "http://sidecar.invalid",
         api_key="dtk_test",
+        identity="pinned-id",
         # No real sleeping: the polling state machine is what is under test.
         poll_interval_s=0.0,
         poll_timeout_s=5.0,
@@ -172,6 +173,21 @@ def test_page_size_is_clamped_to_the_schema_maximum() -> None:
     assert seen["count"] == "50"
 
 
+@pytest.mark.parametrize("requested,expected", [(50, "20"), (2, "2")])
+def test_default_favorites_uses_upstream_supported_page_size(
+    requested: int, expected: str
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, json=envelope({"items": [], "has_more": False}))
+
+    build(handler).list_default_favorite_sources(limit=requested)
+
+    assert seen["count"] == expected
+
+
 def test_wait_is_clamped_to_the_documented_ceiling() -> None:
     """Over-ceiling `wait` is rejected with 400 INVALID_PARAM rather than clamped
     server-side, so an unclamped default would fail every single call."""
@@ -182,7 +198,9 @@ def test_wait_is_clamped_to_the_documented_ceiling() -> None:
         return httpx.Response(200, json=envelope({"items": [], "has_more": False}))
 
     client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://sidecar.invalid")
-    provider = DouyinCaptureProvider("http://sidecar.invalid", wait_s=600.0, client=client)
+    provider = DouyinCaptureProvider(
+        "http://sidecar.invalid", identity="pinned-id", wait_s=600.0, client=client
+    )
     provider.list_collection_sources("col-1")
 
     assert float(seen["wait"]) <= 30.0
@@ -254,6 +272,17 @@ def test_list_collections_rejects_a_repeated_cursor() -> None:
         )
 
     with pytest.raises(ValidationError, match="repeated a folder-list cursor"):
+        build(handler).list_collections()
+
+
+def test_list_collections_rejects_incomplete_page_without_cursor() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=envelope({"items": [], "cursor": None, "has_more": True}),
+        )
+
+    with pytest.raises(ValidationError, match="no next cursor"):
         build(handler).list_collections()
 
 

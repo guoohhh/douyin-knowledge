@@ -12,10 +12,13 @@
  */
 
 import type {
+  CaptureScope,
+  CaptureTargets,
   Collection,
   EntityDetail,
   EntitySummary,
   EntityUserState,
+  JobAccepted,
   PolicyDecisionRow,
   ResurfaceCard,
   PolicyRule,
@@ -92,6 +95,16 @@ export const api = {
   // ---------------------------------------------------------------- sources
   collections: () => request<{ collections: Collection[] }>('/api/sources/collections'),
 
+  captureScope: () => request<CaptureScope>('/api/sources/capture-scope'),
+
+  captureTargets: () => request<CaptureTargets>('/api/sources/capture-scope/targets'),
+
+  saveCaptureScope: (scope: CaptureScope) =>
+    request<CaptureScope>('/api/sources/capture-scope', {
+      method: 'PUT',
+      body: JSON.stringify(scope),
+    }),
+
   sources: (params: { collection_id?: string; status?: string; limit?: number; offset?: number } = {}) =>
     request<{ total: number; limit: number; offset: number; sources: SourceSummary[] }>(
       `/api/sources${qs(params)}`,
@@ -99,14 +112,14 @@ export const api = {
 
   source: (id: string) => request<SourceDetail>(`/api/sources/${encodeURIComponent(id)}`),
 
-  sync: (body: { collection_id?: string; auto_process?: boolean } = {}) =>
-    request<{ job_id: string; queued: boolean }>('/api/sources/sync', {
+  sync: (body: { collection_external_id?: string; collection_id?: string; auto_process?: boolean } = {}) =>
+    request<JobAccepted>('/api/sources/sync', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
 
   processSource: (id: string, body: { target_level?: number; force?: boolean } = {}) =>
-    request<{ job_id: string; queued: boolean }>(
+    request<JobAccepted>(
       `/api/sources/${encodeURIComponent(id)}/process`,
       { method: 'POST', body: JSON.stringify(body) },
     ),

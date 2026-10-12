@@ -15,6 +15,7 @@ fetches them, and a second processing pass reaches level 2 through ASR.
 from __future__ import annotations
 
 import hashlib
+from typing import NoReturn
 
 import httpx
 import pytest
@@ -22,18 +23,55 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from douyin_knowledge.ai.adapters.mock_adapter import MockASRProvider, MockStructuredModel
+from douyin_knowledge.ai.providers import ASRResponse, TranscriptSegment
 from douyin_knowledge.capture.models import CapturedCollection, CapturedMedia, CapturedSource
 from douyin_knowledge.capture.sync import CaptureSyncService
 from douyin_knowledge.config import Settings
 from douyin_knowledge.db.models.capture import Source, SourceAsset
-from douyin_knowledge.db.models.processing import EvidenceUnit
+from douyin_knowledge.db.models.ops import JobEvent
+from douyin_knowledge.db.models.processing import EvidenceUnit, ProcessingRun
 from douyin_knowledge.extraction.orchestrator import ProcessingOrchestrator
+from douyin_knowledge.jobs import handlers as handlers_module
+from douyin_knowledge.jobs.queue import JobQueue
+from douyin_knowledge.jobs.registry import JobContext
+from douyin_knowledge.jobs.types import JobType
 from douyin_knowledge.media.downloader import MediaDownloader
 from douyin_knowledge.media.service import MediaAcquisitionService
 from douyin_knowledge.media.store import MediaStore
 
 VIDEO = "https://v26.douyinvod.com/hashA/video.mp4?sign=first"
 PAYLOAD = b"\x00\x01fake-mp4-bytes" * 64
+
+
+class CannedASRProvider:
+    """Return one exact provider response so outcome semantics are testable."""
+
+    def __init__(self, response: ASRResponse) -> None:
+        self.response = response
+        self.calls: list[str] = []
+
+    def transcribe(
+        self,
+        audio_path: str,
+        *,
+        language: str | None = None,
+        timestamp_granularity: str = "segment",
+    ) -> ASRResponse:
+        self.calls.append(audio_path)
+        return self.response
+
+
+class FailingASRProvider:
+    """Raise as a provider/transport failure rather than return an empty result."""
+
+    def transcribe(
+        self,
+        audio_path: str,
+        *,
+        language: str | None = None,
+        timestamp_granularity: str = "segment",
+    ) -> NoReturn:
+        raise RuntimeError("provider unavailable")
 
 
 @pytest.fixture
@@ -163,3 +201,124 @@ def test_reprocessing_does_not_download_again(
     asr = MockASRProvider()
     outcome = make_orchestrator(settings, asr).process_source(session, source.id, target_level=2)
     assert outcome.achieved_level >= 2
+
+
+def test_successful_empty_asr_is_observable_without_claiming_level_two(
+    session: Session, settings: Settings, source: Source
+) -> None:
+    acquire(session, settings, source.id)
+    asr = CannedASRProvider(
+        ASRResponse(segments=[], full_text=" \n\t ", language="zh", model="test-empty")
+    )
+
+    outcome = make_orchestrator(settings, asr).process_source(session, source.id, target_level=2)
+
+    assert outcome.status == "succeeded"
+    assert outcome.target_level == 2
+    assert outcome.achieved_level == 1
+    assert "asr_empty_result" in outcome.notes
+    assert "asr_failed" not in outcome.notes
+    assert session.scalars(
+        select(EvidenceUnit).where(
+            EvidenceUnit.source_id == source.id,
+            EvidenceUnit.kind == "asr",
+        )
+    ).all() == []
+
+
+def test_successful_asr_with_segments_still_reaches_level_two(
+    session: Session, settings: Settings, source: Source
+) -> None:
+    acquire(session, settings, source.id)
+    asr = CannedASRProvider(
+        ASRResponse(
+            segments=[TranscriptSegment(text="有效转写", start_ms=100, end_ms=900)],
+            full_text="有效转写",
+            language="zh",
+            model="test-success",
+        )
+    )
+
+    outcome = make_orchestrator(settings, asr).process_source(session, source.id, target_level=2)
+
+    assert outcome.achieved_level == 2
+    assert "asr_empty_result" not in outcome.notes
+    assert session.scalars(
+        select(EvidenceUnit).where(
+            EvidenceUnit.source_id == source.id,
+            EvidenceUnit.kind == "asr",
+        )
+    ).one()
+
+
+def test_asr_exception_remains_failed_not_empty(
+    session: Session, settings: Settings, source: Source
+) -> None:
+    acquire(session, settings, source.id)
+    orchestrator = ProcessingOrchestrator(
+        settings,
+        structured_model=MockStructuredModel(),
+        asr_provider=FailingASRProvider(),
+    )
+
+    outcome = orchestrator.process_source(session, source.id, target_level=2)
+
+    assert outcome.status == "succeeded"
+    assert outcome.achieved_level == 1
+    assert "asr_failed" in outcome.notes
+    assert "asr_empty_result" not in outcome.notes
+
+
+def test_nonempty_full_text_without_usable_segments_is_not_empty_result(
+    session: Session, settings: Settings, source: Source
+) -> None:
+    acquire(session, settings, source.id)
+    asr = CannedASRProvider(
+        ASRResponse(
+            segments=[TranscriptSegment(text=" \n", start_ms=0, end_ms=500)],
+            full_text="provider returned text without timestamps",
+            language="zh",
+            model="test-no-segments",
+        )
+    )
+
+    outcome = make_orchestrator(settings, asr).process_source(session, source.id, target_level=2)
+
+    assert outcome.achieved_level == 1
+    assert "asr_empty_result" not in outcome.notes
+    assert "asr_no_usable_segments" in outcome.notes
+
+
+def test_processed_job_event_persists_empty_asr_notes_and_run_id(
+    session: Session,
+    settings: Settings,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acquire(session, settings, source.id)
+    asr = CannedASRProvider(
+        ASRResponse(segments=[], full_text="", language="zh", model="test-empty")
+    )
+    orchestrator = make_orchestrator(settings, asr)
+    monkeypatch.setattr(handlers_module, "_orchestrator", lambda _settings: orchestrator)
+
+    queue = JobQueue(session)
+    job = queue.enqueue(
+        JobType.PROCESS_SOURCE,
+        source_id=source.id,
+        payload={"source_id": source.id, "target_level": 2},
+    ).job
+    ctx = JobContext(job=job, session=session, queue=queue, settings=settings)
+
+    handlers_module.handle_process_source(ctx)
+
+    run = session.scalars(select(ProcessingRun).where(ProcessingRun.source_id == source.id)).one()
+    event = session.scalars(
+        select(JobEvent).where(
+            JobEvent.job_id == job.id,
+            JobEvent.event_type == "processed",
+        )
+    ).one()
+    assert event.data_json is not None
+    assert event.data_json["run_id"] == run.id
+    assert "asr_empty_result" in event.data_json["notes"]

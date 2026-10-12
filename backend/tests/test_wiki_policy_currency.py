@@ -30,6 +30,7 @@ from douyin_knowledge.db.models.wiki import WikiPage, WikiSupport
 from douyin_knowledge.jobs.handlers import register_default_handlers
 from douyin_knowledge.jobs.worker import Worker
 from douyin_knowledge.wiki.builder import WikiBuilder
+from tests.support_capture_scope import select_fixture_collections
 
 
 @pytest.fixture
@@ -61,6 +62,7 @@ def populated(engine: Engine, settings: Settings) -> Iterator[TestClient]:
     app.dependency_overrides[get_settings] = lambda: settings
     with TestClient(app) as client:
         worker = Worker(register_default_handlers(), settings=settings, name="wiki-policy-test")
+        select_fixture_collections(client)
         assert client.post("/api/sources/sync", json={"auto_process": True}).status_code == 202
         assert worker.drain(max_jobs=500) > 0
         yield client

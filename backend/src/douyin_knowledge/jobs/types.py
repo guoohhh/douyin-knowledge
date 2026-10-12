@@ -27,6 +27,9 @@ else:
 
 
 class JobType(StrEnum):
+    SYNC_CAPTURE_SCOPE = "sync_capture_scope"
+    SYNC_DEFAULT_FAVORITES = "sync_default_favorites"
+    SYNC_NAMED_COLLECTION = "sync_named_collection"
     SYNC_COLLECTIONS = "sync_collections"
     SYNC_COLLECTION_SOURCES = "sync_collection_sources"
     ACQUIRE_MEDIA = "acquire_media"

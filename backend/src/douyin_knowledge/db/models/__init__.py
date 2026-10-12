@@ -4,9 +4,11 @@ from douyin_knowledge.db.base import Base
 from douyin_knowledge.db.models.capture import (
     Collection,
     Creator,
+    DefaultFavoritesSyncState,
     Source,
     SourceAsset,
     SourceCollectionMembership,
+    SourceDefaultFavoriteObservation,
     SourceSnapshot,
 )
 from douyin_knowledge.db.models.conversation import (
@@ -71,6 +73,7 @@ __all__ = [
     "Conversation",
     "ConversationState",
     "Creator",
+    "DefaultFavoritesSyncState",
     "Entity",
     "EntityAlias",
     "EntityExternalId",
@@ -99,6 +102,7 @@ __all__ = [
     "Source",
     "SourceAsset",
     "SourceCollectionMembership",
+    "SourceDefaultFavoriteObservation",
     "SourceProcessingState",
     "SourceTriage",
     "SourceSnapshot",

@@ -39,6 +39,12 @@ class CaptureProvider(Protocol):
     ) -> SourcePage:
         ...
 
+    def list_default_favorite_sources(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> SourcePage:
+        """One page of the account's default saved videos, separate from folders."""
+        ...
+
     def fetch_source(self, external_id: str) -> CapturedSource:
         """Re-fetch one item. Raises SourceUnavailable when it is gone upstream."""
         ...

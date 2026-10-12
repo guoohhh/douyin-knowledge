@@ -260,7 +260,7 @@ class EntityResolver:
         session.flush()
         logger.info(
             "entity_created",
-            extra={"entity_id": entity.id, "name": entity.canonical_name},
+            extra={"entity_id": entity.id, "entity_name": entity.canonical_name},
         )
         return entity
 

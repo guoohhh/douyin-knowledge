@@ -180,8 +180,9 @@ def doctor(as_json: JsonOpt = False) -> None:
         provider = settings.provider_for_role(role)
         checks[f"{role}_model"] = f"{settings.model_for_role(role)} via {provider}"
 
-    if settings.uses_real_providers() and not settings.openai_api_key:
-        checks["credentials"] = "missing: a real provider is selected but no key is configured"
+    missing_credentials = settings.missing_provider_credentials()
+    if missing_credentials:
+        checks["credentials"] = f"missing: {', '.join(missing_credentials)}"
     else:
         checks["credentials"] = "ok"
 
@@ -215,9 +216,9 @@ app.add_typer(policy_app, name="policy")
 # Pipeline, query and worker commands live in sibling modules to keep this file readable;
 # importing them here is what registers them on `app`. The import has to be at the bottom:
 # those modules import `app` from this one, so hoisting it to the top is a circular import.
-from douyin_knowledge.cli import commands_pipeline, commands_query  # noqa: E402
+from douyin_knowledge.cli import commands_capture, commands_pipeline, commands_query  # noqa: E402
 
-__all__ = ["app", "main", "commands_pipeline", "commands_query"]
+__all__ = ["app", "main", "commands_capture", "commands_pipeline", "commands_query"]
 
 
 def main() -> None:

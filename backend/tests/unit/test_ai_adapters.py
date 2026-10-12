@@ -192,3 +192,151 @@ class TestStructuredExtractionFailsLoudly:
         model = self._model(self._response(arguments='{"entities": ["a"]}'))
         result = model.extract("prompt", {"type": "object"})  # type: ignore[attr-defined]
         assert result.data == {"entities": ["a"]}
+
+
+class TestDeepSeekAdapters:
+    """DeepSeek must use its current tool-call contract and reject bad structure."""
+
+    @staticmethod
+    def _usage() -> object:
+        details = type("Details", (), {"reasoning_tokens": 0})()
+        return type(
+            "Usage",
+            (),
+            {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+                "prompt_cache_hit_tokens": 3,
+                "prompt_cache_miss_tokens": 8,
+                "completion_tokens_details": details,
+            },
+        )()
+
+    @staticmethod
+    def _response(
+        *,
+        arguments: str | None = '{"items": ["one"]}',
+        finish_reason: str = "tool_calls",
+    ) -> object:
+        calls = []
+        if arguments is not None:
+            function = type(
+                "Function", (), {"name": "extract_data", "arguments": arguments}
+            )()
+            calls = [type("ToolCall", (), {"function": function})()]
+        message = type("Message", (), {"tool_calls": calls, "content": None})()
+        choice = type(
+            "Choice", (), {"message": message, "finish_reason": finish_reason}
+        )()
+        return type(
+            "Response",
+            (),
+            {
+                "choices": [choice],
+                "model": "deepseek-flash",
+                "usage": TestDeepSeekAdapters._usage(),
+            },
+        )()
+
+    @staticmethod
+    def _structured(response: object) -> tuple[object, dict[str, object]]:
+        from douyin_knowledge.ai.adapters.deepseek_adapter import DeepSeekStructuredModel
+
+        seen: dict[str, object] = {}
+
+        class FakeCompletions:
+            def create(self, **kwargs: object) -> object:
+                seen.update(kwargs)
+                return response
+
+        class FakeClient:
+            chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+        model = object.__new__(DeepSeekStructuredModel)
+        model.model = "deepseek-flash"  # type: ignore[attr-defined]
+        model._client = FakeClient()  # type: ignore[attr-defined]
+        return model, seen
+
+    @staticmethod
+    def _schema() -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["items"],
+        }
+
+    def test_structured_uses_tools_and_preserves_usage(self) -> None:
+        model, seen = self._structured(self._response())
+        result = model.extract("return data", self._schema())  # type: ignore[attr-defined]
+
+        assert result.data == {"items": ["one"]}
+        assert result.model == "deepseek-flash"
+        assert result.usage == {
+            "prompt_tokens": 11,
+            "completion_tokens": 7,
+            "total_tokens": 18,
+            "prompt_cache_hit_tokens": 3,
+            "prompt_cache_miss_tokens": 8,
+            "reasoning_tokens": 0,
+        }
+        assert "tools" in seen
+        assert "tool_choice" in seen
+        assert "functions" not in seen
+        assert "function_call" not in seen
+        assert seen["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_structured_rejects_schema_violation(self) -> None:
+        import pytest
+
+        from douyin_knowledge.core.errors import StructuredOutputInvalid
+
+        model, _ = self._structured(self._response(arguments='{"wrong": true}'))
+        with pytest.raises(StructuredOutputInvalid, match="requested schema"):
+            model.extract("return data", self._schema())  # type: ignore[attr-defined]
+
+    def test_structured_rejects_malformed_missing_and_truncated_output(self) -> None:
+        import pytest
+
+        from douyin_knowledge.core.errors import StructuredOutputInvalid
+
+        for response in (
+            self._response(arguments="{bad json"),
+            self._response(arguments=None),
+            self._response(finish_reason="length"),
+        ):
+            model, _ = self._structured(response)
+            with pytest.raises(StructuredOutputInvalid):
+                model.extract("return data", self._schema())  # type: ignore[attr-defined]
+
+    def test_chat_disables_thinking_and_preserves_actual_model(self) -> None:
+        from douyin_knowledge.ai.adapters.deepseek_adapter import DeepSeekChatModel
+
+        seen: dict[str, object] = {}
+        message = type("Message", (), {"content": "answer"})()
+        choice = type("Choice", (), {"message": message, "finish_reason": "stop"})()
+        response = type(
+            "Response",
+            (),
+            {"choices": [choice], "model": "deepseek-flash", "usage": self._usage()},
+        )()
+
+        class FakeCompletions:
+            def create(self, **kwargs: object) -> object:
+                seen.update(kwargs)
+                return response
+
+        class FakeClient:
+            chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+        model = object.__new__(DeepSeekChatModel)
+        model.model = "deepseek-flash"  # type: ignore[attr-defined]
+        model._client = FakeClient()  # type: ignore[attr-defined]
+        result = model.generate([ChatMessage(role="user", content="question")])
+
+        assert result.content == "answer"
+        assert result.model == "deepseek-flash"
+        assert result.usage and result.usage["total_tokens"] == 18
+        assert seen["extra_body"] == {"thinking": {"type": "disabled"}}

@@ -19,6 +19,12 @@ Core principle:
 
 > Capture broadly, process selectively, and keep every decision reversible.
 
+Capture Scope is a separate upstream selection layer. Removing a default or
+named collection target stops future observation of that list; it does not
+create a policy exclusion, revise existing policy decisions, or delete sources
+and knowledge already captured. Processing Policy still runs when a captured
+source reaches a `process_source` job.
+
 ---
 
 ## 2. Default Meaning of “Skip”

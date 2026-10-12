@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from douyin_knowledge.api.deps import AppSettings, DbSession, JobQueueDep
+from douyin_knowledge.capture.discovery import CaptureTargets, discover_capture_targets
+from douyin_knowledge.capture.scope import CaptureScope, initialize_capture_scope, set_capture_scope
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.db.models.capture import (
     Collection,
@@ -41,7 +43,11 @@ router = APIRouter()
 class SyncRequest(BaseModel):
     collection_external_id: str | None = Field(
         default=None,
-        description="Sync one collection; omit to walk every collection the provider exposes",
+        description="Sync one selected named collection; omit to fan out the saved Capture Scope",
+    )
+    collection_id: str | None = Field(
+        default=None,
+        description="Alias used by the current frontend for collection_external_id",
     )
     auto_process: bool = Field(
         default=True, description="Enqueue processing for each synced source"
@@ -75,6 +81,21 @@ def _job_response(result: Any) -> JobAccepted:
 # ------------------------------------------------------------------------ sync
 
 
+@router.get("/capture-scope", response_model=CaptureScope)
+def read_capture_scope(db: DbSession, settings: AppSettings) -> CaptureScope:
+    return initialize_capture_scope(db, settings)
+
+
+@router.get("/capture-scope/targets", response_model=CaptureTargets)
+def read_capture_targets(db: DbSession, settings: AppSettings) -> CaptureTargets:
+    return discover_capture_targets(db, settings)
+
+
+@router.put("/capture-scope", response_model=CaptureScope)
+def write_capture_scope(scope: CaptureScope, db: DbSession) -> CaptureScope:
+    return set_capture_scope(db, scope)
+
+
 @router.post("/sync", response_model=JobAccepted, status_code=202)
 def sync_sources(
     request: SyncRequest, queue: JobQueueDep, settings: AppSettings
@@ -84,21 +105,28 @@ def sync_sources(
     The dedupe key is the *scope* of the sync, so hammering the refresh button
     returns the same job instead of queueing ten redundant provider walks.
     """
-    if request.collection_external_id:
+    if (
+        request.collection_external_id
+        and request.collection_id
+        and request.collection_external_id != request.collection_id
+    ):
+        raise HTTPException(status_code=422, detail="collection id fields disagree")
+    external_id = request.collection_external_id or request.collection_id
+    if external_id:
         result = queue.enqueue(
-            JobType.SYNC_COLLECTION_SOURCES,
+            JobType.SYNC_NAMED_COLLECTION,
             payload={
-                "external_collection_id": request.collection_external_id,
+                "external_collection_id": external_id,
                 "auto_process": request.auto_process,
             },
-            dedupe_key=f"sync_collection:{request.collection_external_id}",
+            dedupe_key=f"sync_named_collection:douyin:{external_id}",
             priority=Priority.INTERACTIVE,
         )
     else:
         result = queue.enqueue(
-            JobType.SYNC_COLLECTIONS,
+            JobType.SYNC_CAPTURE_SCOPE,
             payload={"auto_process": request.auto_process},
-            dedupe_key="sync_collections:all",
+            dedupe_key="sync_capture_scope:douyin",
             priority=Priority.INTERACTIVE,
         )
     return _job_response(result)

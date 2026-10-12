@@ -39,6 +39,16 @@ def get_chat_model(settings: Settings) -> ChatModel:
             model=settings.openai_chat_model or "gpt-4o-mini",
             api_key=settings.openai_api_key,
         )
+    if provider == "deepseek":
+        from douyin_knowledge.ai.adapters.deepseek_adapter import DeepSeekChatModel
+        if not settings.deepseek_api_key:
+            raise ConfigurationError("ai_provider=deepseek requires DK_DEEPSEEK_API_KEY")
+        return DeepSeekChatModel(
+            model=settings.deepseek_chat_model,
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            timeout_s=settings.deepseek_timeout_s,
+        )
     raise ConfigurationError(f"unknown ai_provider {provider!r}")
 
 
@@ -74,6 +84,16 @@ def get_structured_model(settings: Settings) -> StructuredModel:
             model=settings.openai_chat_model or "gpt-4o-mini",
             api_key=settings.openai_api_key,
         )
+    if provider == "deepseek":
+        from douyin_knowledge.ai.adapters.deepseek_adapter import DeepSeekStructuredModel
+        if not settings.deepseek_api_key:
+            raise ConfigurationError("ai_provider=deepseek requires DK_DEEPSEEK_API_KEY")
+        return DeepSeekStructuredModel(
+            model=settings.deepseek_chat_model,
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            timeout_s=settings.deepseek_timeout_s,
+        )
     raise ConfigurationError(f"unknown ai_provider {provider!r}")
 
 
@@ -101,6 +121,20 @@ def get_asr_provider(settings: Settings) -> ASRProvider:
     if provider == "openai":
         from douyin_knowledge.ai.adapters.openai_adapter import OpenAIASRProvider
         return OpenAIASRProvider(api_key=settings.openai_api_key)
+    if provider == "doubao":
+        from douyin_knowledge.ai.adapters.doubao_adapter import DoubaoASRProvider
+        if not settings.doubao_asr_api_key:
+            raise ConfigurationError("asr_provider=doubao requires DK_DOUBAO_ASR_API_KEY")
+        return DoubaoASRProvider(
+            api_key=settings.doubao_asr_api_key,
+            resource_id=settings.doubao_asr_resource_id,
+            endpoint=settings.doubao_asr_endpoint,
+            timeout_s=settings.doubao_asr_timeout_s,
+            segment_s=settings.doubao_asr_segment_s,
+            overlap_s=settings.doubao_asr_overlap_s,
+            max_attempts=settings.doubao_asr_max_attempts,
+            retry_backoff_s=settings.doubao_asr_retry_backoff_s,
+        )
     raise ConfigurationError(f"unknown asr_provider {provider!r}")
 
 

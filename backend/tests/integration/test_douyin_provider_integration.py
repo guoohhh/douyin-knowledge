@@ -21,23 +21,33 @@ import pytest
 
 from douyin_knowledge.capture.douyin_provider import DouyinCaptureProvider
 
+SIDECAR_URL = os.getenv("DK_DOUYIN_SIDECAR_URL")
+SIDECAR_API_KEY = os.getenv("DK_DOUYIN_SIDECAR_API_KEY")
+SIDECAR_IDENTITY = os.getenv("DK_DOUYIN_SIDECAR_IDENTITY")
+
 
 @pytest.fixture
 def sidecar_url() -> str:
-    url = os.getenv("DK_DOUYIN_SIDECAR_URL")
-    if not url:
+    if not SIDECAR_URL:
         pytest.skip("DK_DOUYIN_SIDECAR_URL not set")
-    return url
+    return SIDECAR_URL
 
 
 @pytest.fixture
 def api_key() -> str | None:
-    return os.getenv("DK_DOUYIN_SIDECAR_API_KEY")
+    return SIDECAR_API_KEY
 
 
 @pytest.fixture
-def provider(sidecar_url: str, api_key: str | None) -> DouyinCaptureProvider:
-    return DouyinCaptureProvider(sidecar_url, api_key=api_key)
+def identity() -> str | None:
+    return SIDECAR_IDENTITY
+
+
+@pytest.fixture
+def provider(
+    sidecar_url: str, api_key: str | None, identity: str | None
+) -> DouyinCaptureProvider:
+    return DouyinCaptureProvider(sidecar_url, api_key=api_key, identity=identity)
 
 
 def test_health(provider: DouyinCaptureProvider) -> None:

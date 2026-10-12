@@ -115,6 +115,51 @@ export interface Collection {
   last_synced_at_ms: number | null
 }
 
+export interface CaptureScope {
+  schema_version: 1
+  platform: 'douyin'
+  default_favorites: boolean
+  named_collection_ids: string[]
+}
+
+export interface DiscoveryStatus {
+  state: 'ok' | 'error'
+  error_code: string | null
+  message: string | null
+}
+
+export interface DefaultFavoritesTarget {
+  /** Provider capability, not live authentication or account readiness. */
+  available: boolean
+  selected: boolean
+  last_completed_at_ms: number | null
+}
+
+export interface NamedCollectionTarget {
+  external_collection_id: string
+  name: string | null
+  item_count: number | null
+  discovered: boolean
+  locally_observed: boolean
+  selected: boolean
+  last_synced_at_ms: number | null
+}
+
+export interface CaptureTargets {
+  scope: CaptureScope
+  discovery: DiscoveryStatus
+  default_favorites: DefaultFavoritesTarget
+  named_collections: NamedCollectionTarget[]
+}
+
+export interface JobAccepted {
+  job_id: string
+  job_type: string
+  status: string
+  /** False when an identical queued job was reused. */
+  created: boolean
+}
+
 export interface Citation {
   ordinal: number
   marker: string
@@ -339,7 +384,8 @@ export interface PolicyDecisionRow {
 }
 
 export interface SettingsView {
-  demo_mode: boolean
-  settings: Record<string, unknown>
+  ai_provider: string
+  openai_api_key: boolean
   resolved_models: Record<string, string>
+  [key: string]: unknown
 }

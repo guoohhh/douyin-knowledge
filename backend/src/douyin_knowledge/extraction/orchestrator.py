@@ -458,6 +458,15 @@ class ProcessingOrchestrator:
             )
             session.add(unit)
             units.append(unit)
+
+        if not units:
+            if normalize_ws(response.full_text or ""):
+                # Provider text without trustworthy timestamps is not usable ASR
+                # evidence. Keep it distinct from a genuinely empty successful
+                # response rather than fabricating timestamp-less evidence.
+                outcome.notes.append("asr_no_usable_segments")
+            else:
+                outcome.notes.append("asr_empty_result")
         session.flush()
         return units
 

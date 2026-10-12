@@ -61,6 +61,25 @@ logger = get_logger(__name__)
 RRF_K = 60
 """Standard RRF damping constant. Larger values flatten the rank curve."""
 
+#: Chunk types that restate the source's own packaging rather than its content.
+#:
+#: Title and caption are written by the creator *about* the video; ASR and subtitles are
+#: what the video actually says. Both are legitimately searchable -- a question about what
+#: a video is called is answered from the title and nothing else -- but they differ in one
+#: way that matters for a result budget: a source has exactly one title and one caption,
+#: and they usually paraphrase each other, so a query matching one tends to match both at
+#: adjacent ranks. Two slots spent to learn one fact.
+METADATA_CHUNK_TYPES = frozenset({"title", "caption", "description"})
+
+#: How many metadata chunks one source may contribute before the rest are deferred behind
+#: every other source's and every content chunk's first pick.
+#:
+#: One, because the second metadata chunk from the same source is where the redundancy
+#: starts: it is the same creator describing the same video in the same words. A source's
+#: *first* metadata chunk is never deferred, so metadata can still win a slot outright and
+#: a metadata-only query is unaffected.
+MAX_METADATA_CHUNKS_PER_SOURCE = 1
+
 MIN_VECTOR_SCORE = 0.25
 """Cosine floor for vector candidates.
 
@@ -315,7 +334,33 @@ class HybridRetriever:
     def _hydrate(
         self, fused: list[tuple[str, float, list[str]]], *, limit: int
     ) -> list[RetrievedChunk]:
-        """Load chunk rows and attach the evidence ids that make them citable."""
+        """Load chunk rows, attach evidence ids, and spend the budget on distinct evidence.
+
+        Selection is two passes over the fused order rather than a prefix of it. With
+        ``--limit 4`` on the real 手抓饼 corpus, the title chunk and the caption chunk of one
+        source ranked above its ASR chunk, filled the budget between them, and the ASR
+        segment containing 八元 -- the only evidence that answered the question -- never
+        reached the answer generator. It was indexed, current, policy-eligible and
+        retrievable; it lost its slot to two near-duplicate restatements of its own source's
+        packaging.
+
+        The first pass admits every content chunk and each source's first metadata chunk, in
+        fused order. The second pass fills whatever budget is left with the deferred
+        metadata, also in fused order. So:
+
+        * relevance still decides, within each pass, and no chunk is reordered relative to a
+          peer it competes with;
+        * metadata is never excluded -- ``search_sources`` is untouched, and a metadata-only
+          query still returns metadata, because a source's first metadata chunk is admitted
+          in pass one exactly as before;
+        * ``limit`` is unchanged, and so is every currency, policy and provenance filter:
+          this runs over ``fused``, which is already the filtered candidate set, and it can
+          only reorder within it. Nothing that was excluded upstream can enter here.
+
+        Deferring rather than dropping is the whole point. A budget that discarded the
+        second metadata chunk would answer "这个视频叫什么" worse than before; a budget that
+        merely postpones it answers both questions.
+        """
         chunk_ids = [oid for oid, _, _ in fused]
         if not chunk_ids:
             return []
@@ -327,15 +372,26 @@ class HybridRetriever:
         ).all()
         by_id = {chunk.id: (chunk, title) for chunk, title in rows}
 
+        # Ordered by time, then by id. A chunk may link many evidence units -- the real
+        # 手抓饼 ASR chunk links 56 across 2m22s -- and everything downstream that picks
+        # *which* of them to cite reads this list. Unordered, that pick was whatever order
+        # SQLite happened to return rows in for an ``IN (...)``, which is not a documented
+        # guarantee and in practice varied with insertion order: the same corpus projected
+        # a different evidence unit depending on the order rows were written. The id
+        # tiebreak covers units with no timestamp and units sharing one.
         evidence_map: dict[str, list[str]] = {}
         for chunk_id, evidence_id in self.session.execute(
-            select(RetrievalChunkEvidence.retrieval_chunk_id, RetrievalChunkEvidence.evidence_id).where(
-                RetrievalChunkEvidence.retrieval_chunk_id.in_(chunk_ids)
-            )
+            select(RetrievalChunkEvidence.retrieval_chunk_id, RetrievalChunkEvidence.evidence_id)
+            .join(EvidenceUnit, EvidenceUnit.id == RetrievalChunkEvidence.evidence_id)
+            .where(RetrievalChunkEvidence.retrieval_chunk_id.in_(chunk_ids))
+            .order_by(EvidenceUnit.start_ms, EvidenceUnit.end_ms, EvidenceUnit.id)
         ):
             evidence_map.setdefault(chunk_id, []).append(evidence_id)
 
-        results: list[RetrievedChunk] = []
+        admitted: list[RetrievedChunk] = []
+        deferred: list[RetrievedChunk] = []
+        metadata_seen: dict[str, int] = {}
+
         for object_id, score, strategies in fused:
             entry = by_id.get(object_id)
             if entry is None:
@@ -348,23 +404,42 @@ class HybridRetriever:
                 # chunk itself (KM-001).
                 logger.debug("chunk_without_evidence", extra={"chunk_id": chunk.id})
                 continue
-            results.append(
-                RetrievedChunk(
-                    chunk_id=chunk.id,
-                    source_id=chunk.source_id,
-                    text=chunk.text,
-                    score=score,
-                    chunk_type=chunk.chunk_type,
-                    start_ms=chunk.start_ms,
-                    end_ms=chunk.end_ms,
-                    source_title=title,
-                    evidence_ids=evidence_ids,
-                    retrieved_by=sorted(set(strategies)),
-                )
+            retrieved = RetrievedChunk(
+                chunk_id=chunk.id,
+                source_id=chunk.source_id,
+                text=chunk.text,
+                score=score,
+                chunk_type=chunk.chunk_type,
+                start_ms=chunk.start_ms,
+                end_ms=chunk.end_ms,
+                source_title=title,
+                evidence_ids=evidence_ids,
+                retrieved_by=sorted(set(strategies)),
             )
-            if len(results) >= limit:
+
+            if chunk.chunk_type in METADATA_CHUNK_TYPES:
+                count = metadata_seen.get(chunk.source_id, 0)
+                metadata_seen[chunk.source_id] = count + 1
+                if count >= MAX_METADATA_CHUNKS_PER_SOURCE:
+                    deferred.append(retrieved)
+                    continue
+
+            admitted.append(retrieved)
+            if len(admitted) >= limit and not deferred:
+                # Only safe to stop early with nothing deferred. Otherwise the deferred
+                # chunks still need their shot at any remaining budget, and a `break` here
+                # would reintroduce the bug one level down: the ASR chunk admitted at
+                # position 4 would end the loop while a caption that outranked it waits.
                 break
-        return results
+
+        if len(admitted) >= limit:
+            return admitted[:limit]
+
+        for retrieved in deferred:
+            if len(admitted) >= limit:
+                break
+            admitted.append(retrieved)
+        return admitted
 
     def _claims_for_chunks(self, chunks: list[RetrievedChunk]) -> list[Claim]:
         """Claims sharing evidence with the retrieved chunks, via shared eligibility.

@@ -30,6 +30,9 @@ jobs:
       - name: Run TypeScript type checking
         run: npm run typecheck
 
+      - name: Test Capture Scope contract
+        run: npm run test:capture-scope
+
       - name: Build production bundle
         run: npm run build
 

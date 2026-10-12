@@ -634,16 +634,10 @@ class StructuredExecutor:
                     claim.predicate, []
                 ).append(claim)
 
-        constraints = list(plan.claim_constraints)
-        if plan.location is not None:
-            constraints.append(
-                ClaimConstraint(
-                    field="district",
-                    operator="=",
-                    value_text=plan.location.district,
-                    required=True,
-                )
-            )
+        # Includes the district constraint synthesized from `plan.location`. That synthesis
+        # moved onto the plan so the answer layer can ask which constraints require claim
+        # backing and get an answer that matches what was enforced here.
+        constraints = list(plan.effective_claim_constraints)
 
         user_states: dict[str, str] = {}
         if plan.user_state is not None:

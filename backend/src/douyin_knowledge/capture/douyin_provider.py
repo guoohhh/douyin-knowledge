@@ -37,8 +37,10 @@ rather than inferred from our own fixtures (DEC-013):
 * The cursor is an **opaque string** (<=512 chars). Douyin stringifies a millisecond
   ``max_cursor``, TikTok an offset. We pass it back verbatim and never parse,
   increment, or construct one.
-* ``count`` is capped at 50 by the schema, and a cursor is only valid for the query
-  that produced it, so ``count`` must not change mid-walk.
+* ``count`` is capped at 50 by the schema. The default-favorites upstream read
+  rejected 50 in real validation while 20 completed, so that target uses 20.
+  A cursor is only valid for the query that produced it, so ``count`` must not
+  change mid-walk.
 * ``wait`` is a float with a documented maximum of 30.0; above it the sidecar returns
   ``400 INVALID_PARAM`` rather than clamping, so we clamp locally instead.
 * Task states are ``queued|running|done|failed``. There is no ``succeeded`` and no
@@ -93,6 +95,10 @@ MAX_WAIT_S = 30.0
 
 #: Schema maximum for ``count``. Asking for more is a validation error.
 MAX_PAGE_SIZE = 50
+
+# The sidecar accepts 50 at its REST boundary, but the upstream default-favorites
+# endpoint returned a business error for 50 and a complete page for 20.
+MAX_DEFAULT_FAVORITES_PAGE_SIZE = 20
 
 #: Schema maximum for an opaque cursor. A longer one cannot have come from this API.
 MAX_CURSOR_LEN = 512
@@ -221,10 +227,16 @@ class DouyinCaptureProvider(CaptureProvider):
         Handles the 202 path: we ask the sidecar to wait, and if the task is still
         running when the wait expires we poll rather than treating it as a failure.
         """
+        # Every DTK content route can otherwise select a different identity from
+        # its pool. Keep /readyz usable without a session, but never submit a
+        # Douyin account read unless this application explicitly pinned one.
+        if self.identity is None or not self.identity.strip():
+            raise AuthenticationRequired(
+                "Douyin capture requires DK_DOUYIN_SIDECAR_IDENTITY"
+            )
         query = {k: v for k, v in params.items() if v is not None}
         query.setdefault("wait", self.wait_s)
-        if self.identity:
-            query.setdefault("identity", self.identity)
+        query["identity"] = self.identity
         try:
             response = self._client.get(f"{API_PREFIX}{path}", params=query)
         except httpx.RequestError as exc:
@@ -390,7 +402,11 @@ class DouyinCaptureProvider(CaptureProvider):
             source_url=raw["web_url"],
             cover_url=self._first_image_url((raw.get("media") or {}).get("covers")),
             published_at_ms=self._to_timestamp_ms(raw.get("created_at")),
-            saved_at_ms=int(time.time() * 1000),
+            # DTK's normalized Content has no saved/collected timestamp. The response's
+            # `fetched_at` is transport metadata, not when the user saved the item.
+            # Inventing "now" here makes an unchanged item hash differently on every
+            # sync and manufactures a new snapshot each time.
+            saved_at_ms=None,
             duration_ms=raw.get("duration_ms"),
             availability="available",
             creator=self._map_author(raw["author"]),
@@ -580,8 +596,10 @@ class DouyinCaptureProvider(CaptureProvider):
             )
             items, next_cursor, has_more = self._read_pagination(data, meta)
             collections.extend(self._map_collection(raw) for raw in items)
-            if not has_more or next_cursor is None:
+            if not has_more:
                 return collections
+            if next_cursor is None:
+                raise ValidationError("sidecar folder list has more pages but no next cursor")
             if next_cursor in seen:
                 raise ValidationError(
                     "sidecar repeated a folder-list cursor; the walk cannot advance",
@@ -620,6 +638,31 @@ class DouyinCaptureProvider(CaptureProvider):
             has_more=has_more,
         )
 
+    def list_default_favorite_sources(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> SourcePage:
+        """GET /douyin/user/bookmarks on the pinned, imported sidecar identity."""
+        data, meta = self._get(
+            f"/{self.platform}/user/bookmarks",
+            {"cursor": cursor, "count": max(1, min(limit, MAX_DEFAULT_FAVORITES_PAGE_SIZE))},
+        )
+        if not isinstance(data, dict) or "items" not in data or "has_more" not in data:
+            raise ValidationError("sidecar default-favorites page lacks required fields")
+        if not isinstance(data["items"], list) or any(
+            not isinstance(item, dict) for item in data["items"]
+        ):
+            raise ValidationError("sidecar default-favorites items are malformed")
+        if not isinstance(data["has_more"], bool):
+            raise ValidationError("sidecar default-favorites has_more is malformed")
+        items, next_cursor, has_more = self._read_pagination(data, meta)
+        if has_more and (not next_cursor or next_cursor == (cursor or "0")):
+            raise ValidationError("sidecar default-favorites cursor did not advance")
+        return SourcePage(
+            sources=[self._map_source(raw) for raw in items],
+            next_cursor=next_cursor if has_more else None,
+            has_more=has_more,
+        )
+
     def fetch_source(self, external_id: str) -> CapturedSource:
         """GET /{platform}/video?aweme_id=..."""
         data, _meta = self._get(f"/{self.platform}/video", {"aweme_id": external_id})
@@ -647,4 +690,3 @@ class DouyinCaptureProvider(CaptureProvider):
         except httpx.RequestError as exc:
             raise MediaDownloadFailed(f"download failed: {exc}", url=media.url) from exc
         return destination
-

@@ -30,6 +30,7 @@ from douyin_knowledge.db import session_scope
 from douyin_knowledge.db.models.entities import Claim
 from douyin_knowledge.jobs.handlers import register_default_handlers
 from douyin_knowledge.jobs.worker import Worker
+from tests.support_capture_scope import select_fixture_collections
 
 ENTITIES = "/api/knowledge/entities"
 RESURFACE = "/api/knowledge/resurface"
@@ -69,6 +70,7 @@ def client(engine: Engine, settings: Settings) -> Iterator[TestClient]:
 @pytest.fixture
 def populated(client: TestClient, settings: Settings) -> TestClient:
     worker = Worker(register_default_handlers(), settings=settings, name="resurface-test")
+    select_fixture_collections(client)
     assert client.post("/api/sources/sync", json={"auto_process": True}).status_code == 202
     assert worker.drain(max_jobs=500) > 0
     return client

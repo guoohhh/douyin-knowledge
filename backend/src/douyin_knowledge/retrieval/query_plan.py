@@ -221,6 +221,43 @@ class QueryPlan:
     def required_constraints(self) -> tuple[ClaimConstraint, ...]:
         return tuple(c for c in self.claim_constraints if c.required)
 
+    @property
+    def effective_claim_constraints(self) -> tuple[ClaimConstraint, ...]:
+        """Every constraint the executor actually enforces against claims.
+
+        `location` is not a `ClaimConstraint` in the plan -- it is kept separate so the
+        diagnostics can speak the user's language -- but it *executes* as a required
+        ``located_in`` claim constraint under the field name ``district``. Synthesizing it
+        here rather than inside the executor means anything that needs to know "which
+        constraints must be backed by a claim" gets the same answer as the code that
+        enforced them. The answer layer needs exactly that, and a second copy of this
+        synthesis would be a copy that can drift.
+        """
+        constraints = list(self.claim_constraints)
+        if self.location is not None:
+            constraints.append(
+                ClaimConstraint(
+                    field="district",
+                    operator="=",
+                    value_text=self.location.district,
+                    required=True,
+                )
+            )
+        return tuple(constraints)
+
+    @property
+    def required_claim_fields(self) -> frozenset[str]:
+        """Field names whose qualification rests on a creator claim and is mandatory.
+
+        Deliberately excludes `entity_types`, `entity_subtypes` and `user_state`. Those are
+        real constraints, but none of them qualifies an entity on a creator's authority: a
+        subtype is our own annotation and 想去 is the user's own declaration (DEC-018), so
+        neither needs creator provenance in order to be stated. Optional claim constraints
+        are excluded too -- an optional constraint that goes unrendered is the feature
+        working, not a grounding failure.
+        """
+        return frozenset(c.field for c in self.effective_claim_constraints if c.required)
+
     def constraint_for(self, field_name: str) -> ClaimConstraint | None:
         for constraint in self.claim_constraints:
             if constraint.field == field_name:
