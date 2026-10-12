@@ -14,6 +14,7 @@ from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 
+from douyin_knowledge.capture.daily_sync import refresh_outcome, tick
 from douyin_knowledge.config import Settings, get_settings
 from douyin_knowledge.core.errors import DKError
 from douyin_knowledge.db.session import session_scope
@@ -78,6 +79,7 @@ class Worker:
                     handler = self.registry.get(job_type)
                     handler(JobContext(fresh, session, queue, self.settings))
                     queue.succeed(fresh, message=f"{time.monotonic() - started:.2f}s")
+                    refresh_outcome(session)
                 logger.info("job succeeded", extra={"duration_s": round(time.monotonic() - started, 3)})
             except Exception as exc:  # noqa: BLE001 - the worker is the failure boundary
                 retried = self._record_failure(job_id, attempt, exc)
@@ -101,7 +103,9 @@ class Worker:
                 if fresh is None:  # pragma: no cover
                     return False
                 self._replay_audit(session, exc)
-                return queue.fail(fresh, exc, retry_delay_ms=backoff_delay_ms(attempt, self.settings))
+                retried = queue.fail(fresh, exc, retry_delay_ms=backoff_delay_ms(attempt, self.settings))
+                refresh_outcome(session)
+                return retried
         except Exception:  # pragma: no cover - never let bookkeeping kill the worker
             logger.exception("failed to record job failure")
             return False
@@ -132,8 +136,14 @@ class Worker:
     # ---- loops ----------------------------------------------------------
     def run_forever(self, *, on_idle: Callable[[], None] | None = None) -> None:
         logger.info("worker started", extra={"worker": self.name, "types": self.registry.known_types()})
+        next_schedule_check = 0.0
         while not self._stop.is_set():
             try:
+                if time.monotonic() >= next_schedule_check:
+                    next_schedule_check = time.monotonic() + 30.0
+                    with session_scope() as session:
+                        refresh_outcome(session)
+                        tick(session, self.settings)
                 did_work = self.run_once()
             except Exception:  # pragma: no cover
                 logger.exception("worker loop error")

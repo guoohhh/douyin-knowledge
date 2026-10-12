@@ -122,6 +122,20 @@ export interface CaptureScope {
   named_collection_ids: string[]
 }
 
+export interface DailySyncSettings {
+  enabled: boolean
+  local_time: string
+  timezone: string
+  effective_after_ms: number | null
+  last_due_at_ms: number | null
+  last_attempt_at_ms: number | null
+  last_job_id: string | null
+  last_target_job_ids: string[]
+  root_fanout_completed: boolean
+  last_outcome: string | null
+  next_run_at_ms: number | null
+}
+
 export interface DiscoveryStatus {
   state: 'ok' | 'error'
   error_code: string | null

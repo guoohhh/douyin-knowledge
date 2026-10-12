@@ -17,6 +17,9 @@ const run = async () => {
   const { collections } = await api.collections()
   need(collections.length === 3 && collections[0].name, 'collections carry names')
   const captureScope = await api.captureScope()
+  const dailySync = await api.dailySync()
+  need(dailySync.enabled === false && typeof dailySync.timezone === 'string' && dailySync.last_attempt_at_ms === null,
+    'daily sync defaults off on a fresh fixture database')
   const captureTargets = await api.captureTargets()
   need(captureScope.schema_version === 1 && captureScope.platform === 'douyin', 'saved capture scope')
   need(captureTargets.discovery.state === 'ok' && captureTargets.default_favorites.available,

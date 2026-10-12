@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
 
@@ -178,6 +179,8 @@ class CaptureSyncService:
             return creator
 
         existing.display_name = captured.display_name or existing.display_name
+        existing.avatar_url = captured.avatar_url or existing.avatar_url
+        existing.profile_url = captured.profile_url or existing.profile_url
         existing.last_seen_at_ms = now_ms()
         return existing
 
@@ -363,6 +366,9 @@ class CaptureSyncService:
 
         existing.last_seen_at_ms = now_ms()
         if latest is not None and latest.content_hash == digest:
+            # Signed display URLs can rotate without a source-content change.
+            existing.source_url = captured.source_url or existing.source_url
+            existing.cover_url = captured.cover_url or existing.cover_url
             stats.sources_unchanged += 1
             return existing, False
 
@@ -663,12 +669,48 @@ class CaptureSyncService:
 
     @staticmethod
     def _payload_hash(captured: CapturedSource) -> str:
-        """Hash the payload with stable key ordering.
+        """Fingerprint meaningful source metadata, not transport observations.
 
-        Sorting keys matters: without it, a provider reordering its JSON would
-        look like a content change and create a spurious snapshot on every sync.
+        ``raw`` includes DTK fetch timestamps and signed media URLs; engagement
+        counters and URL query signatures also change without editing the saved
+        item's content.  The full raw payload is still retained on every *real*
+        snapshot. Asset reconciliation separately updates current signed URLs on
+        every capture, including captures with an unchanged fingerprint.
         """
-        payload = captured.model_dump(mode="json")
+        def stable_url(value: str | None) -> str | None:
+            if not value:
+                return value
+            parsed = urlsplit(value)
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+        creator = captured.creator
+        payload = {
+            "platform": captured.platform,
+            "external_id": captured.external_id,
+            "source_type": captured.source_type,
+            "title": captured.title,
+            "caption_raw": captured.caption_raw,
+            "source_url": stable_url(captured.source_url),
+            "cover_url": stable_url(captured.cover_url),
+            "published_at_ms": captured.published_at_ms,
+            "saved_at_ms": captured.saved_at_ms,
+            "duration_ms": captured.duration_ms,
+            "availability": captured.availability,
+            "hashtags": captured.hashtags,
+            "creator": None if creator is None else {
+                "external_creator_id": creator.external_creator_id,
+                "display_name": creator.display_name,
+                "handle": creator.handle,
+                "profile_url": stable_url(creator.profile_url),
+            },
+            "media": [
+                {
+                    **media.model_dump(mode="json", exclude={"url"}),
+                    "url": stable_url(media.url),
+                }
+                for media in captured.media
+            ],
+        }
         return content_hash(json.dumps(payload, sort_keys=True, ensure_ascii=False))
 
     @staticmethod

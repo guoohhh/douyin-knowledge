@@ -76,6 +76,7 @@ def handle_sync_capture_scope(ctx: JobContext) -> None:
     scope = initialize_capture_scope(ctx.session, ctx.settings)
     auto_process = bool(ctx.payload.get("auto_process", True))
     targets = 0
+    target_job_ids: list[str] = []
     if scope.default_favorites:
         result = ctx.queue.enqueue(
             JobType.SYNC_DEFAULT_FAVORITES,
@@ -84,6 +85,7 @@ def handle_sync_capture_scope(ctx: JobContext) -> None:
             priority=Priority.INTERACTIVE,
         )
         targets += int(result.created)
+        target_job_ids.append(result.job.id)
     for external_id in scope.named_collection_ids:
         result = ctx.queue.enqueue(
             JobType.SYNC_NAMED_COLLECTION,
@@ -92,7 +94,13 @@ def handle_sync_capture_scope(ctx: JobContext) -> None:
             priority=Priority.INTERACTIVE,
         )
         targets += int(result.created)
-    ctx.emit("targets_enqueued", f"{targets} target jobs", count=targets)
+        target_job_ids.append(result.job.id)
+    due_at_ms = ctx.payload.get("scheduled_due_at_ms")
+    if isinstance(due_at_ms, int):
+        from douyin_knowledge.capture.daily_sync import record_targets
+
+        record_targets(ctx.session, due_at_ms, target_job_ids)
+    ctx.emit("targets_enqueued", f"{targets} target jobs", count=targets, job_ids=target_job_ids)
 
 
 def _enqueue_processing(ctx: JobContext, source_ids: list[str]) -> None:

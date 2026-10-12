@@ -19,6 +19,12 @@ from douyin_knowledge.api.deps import (
     JobQueueDep,
     PolicyRepositoryDep,
 )
+from douyin_knowledge.capture.daily_sync import (
+    DailySyncUpdate,
+    refresh_outcome,
+    save_state,
+    view_state,
+)
 from douyin_knowledge.db.models.capture import Collection, Creator, Source
 from douyin_knowledge.db.models.conversation import Conversation, Message
 from douyin_knowledge.db.models.entities import Claim, Entity, EntityMention
@@ -33,6 +39,18 @@ from douyin_knowledge.policy.reconciler import PolicyReconciler
 from douyin_knowledge.policy.triage import ContentType
 
 router = APIRouter()
+
+
+@router.get("/daily-sync")
+def get_daily_sync(db: DbSession) -> dict[str, Any]:
+    refresh_outcome(db)
+    return view_state(db).model_dump(mode="json")
+
+
+@router.put("/daily-sync")
+def put_daily_sync(update: DailySyncUpdate, db: DbSession) -> dict[str, Any]:
+    save_state(db, update)
+    return view_state(db).model_dump(mode="json")
 
 
 def _count(db: DbSession, model: Any, *where: Any) -> int:

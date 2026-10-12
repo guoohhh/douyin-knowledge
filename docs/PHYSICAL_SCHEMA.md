@@ -1622,6 +1622,12 @@ describes the JSON shape, not a mutable scope revision. The first application
 read persists a scope inferred from already captured named collection rows;
 Alembic migrations do not write this setting.
 
+`capture.daily_sync` holds the non-secret daily schedule (`enabled`, local
+`HH:MM` time, IANA timezone) and its durable checkpoint (`effective_after_ms`,
+last due/attempt times, root and target job IDs, latest outcome). It defaults
+to disabled when absent. It contains no cookie, identity secret, or AI key.
+This uses the existing `app_settings` table and needs no schema migration.
+
 ---
 
 # Part L — Important Query Patterns

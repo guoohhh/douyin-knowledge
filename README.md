@@ -6,7 +6,7 @@ Douyin Knowledge is a local-first personal knowledge project that starts from Do
 
 ## Current status
 
-The system runs end to end. In its default configuration it uses a fixture capture provider and a mock AI provider, so you can install it and watch the whole loop — sync, policy, processing, extraction, wiki integration, retrieval, cited answers — without a Douyin session or an API key. Real providers (OpenAI for chat/embedding/vision, a Douyin capture sidecar) are implemented and selected by configuration; neither has been exercised against a live endpoint.
+The system runs end to end. In its default configuration it uses a fixture capture provider and a mock AI provider, so you can install it and watch the whole loop — sync, policy, processing, extraction, wiki integration, retrieval, cited answers — without a Douyin session or an API key. Real providers are selected by configuration; Stage 3E validated Capture Scope against an isolated Douyin test account. Stage 3F verification uses local fixtures and makes no real Douyin or paid AI requests.
 
 Delivered: phases 0–9 and 11–13 of `docs/TASKS.md`, with 12 partial. Not started: on-demand enrichment, resurfacing, export/backup, and the evaluation suite. `docs/TASKS.md` section 0 is the honest inventory, and `docs/DECISIONS.md` records where the implementation departs from the design docs.
 
@@ -153,6 +153,27 @@ npm run probe                                 # client vs a live server on :8787
 ```
 
 The probe exists because every payload-shape bug in this project came from a plausible guess about a response, not from a missing endpoint. Read the route before writing the type.
+
+### Daily capture
+
+Settings → Daily sync is off by default. Enable it to submit a metadata-only
+Capture Scope sync at 03:00 in the saved IANA timezone (or choose another local
+time). Keep the API and `dk worker` running for on-time sync. If the computer
+sleeps or the worker stops, the latest overdue slot is attempted once on worker
+restart; missed days are not replayed one by one. An empty saved Capture Scope
+does not contact Douyin. Manual “Sync now” remains in Capture Scope and is also
+the deliberate retry path after a failed daily run. The schedule shows the last
+attempt, latest known root/target outcome, and next expected run. Enabling daily
+capture never enables AI processing or changes Processing Policy.
+Disabling the schedule stops future submissions; it does not cancel work already
+accepted by the job queue.
+
+Source snapshots now compare stable source fields. Re-signed media/display URLs,
+DTK fetch timestamps, and volatile engagement counters do not create a new
+snapshot by themselves. Asset URLs still refresh on every capture; substantive
+caption, title, creator, availability, or media-path changes retain a new raw
+historical snapshot. Existing databases need no schema change; the first sync
+under this fingerprint may add one transition snapshot per source.
 
 ## Guiding idea
 
