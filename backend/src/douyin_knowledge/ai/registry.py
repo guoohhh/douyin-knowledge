@@ -36,15 +36,16 @@ def get_chat_model(settings: Settings) -> ChatModel:
     if provider == "openai":
         from douyin_knowledge.ai.adapters.openai_adapter import OpenAIChatModel
         return OpenAIChatModel(
-            model=settings.openai_chat_model or "gpt-4o-mini",
+            model=settings.model_for_role("answer"),
             api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
         )
     if provider == "deepseek":
         from douyin_knowledge.ai.adapters.deepseek_adapter import DeepSeekChatModel
         if not settings.deepseek_api_key:
             raise ConfigurationError("ai_provider=deepseek requires DK_DEEPSEEK_API_KEY")
         return DeepSeekChatModel(
-            model=settings.deepseek_chat_model,
+            model=settings.model_for_role("answer"),
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             timeout_s=settings.deepseek_timeout_s,
@@ -72,7 +73,7 @@ def get_answer_chat_model(settings: Settings) -> ChatModel | None:
     return get_chat_model(settings)
 
 
-def get_structured_model(settings: Settings) -> StructuredModel:
+def get_structured_model(settings: Settings, *, role: str = "extraction") -> StructuredModel:
     """Build the configured structured extraction model."""
     provider = settings.ai_provider
     if provider == "mock":
@@ -81,15 +82,16 @@ def get_structured_model(settings: Settings) -> StructuredModel:
     if provider == "openai":
         from douyin_knowledge.ai.adapters.openai_adapter import OpenAIStructuredModel
         return OpenAIStructuredModel(
-            model=settings.openai_chat_model or "gpt-4o-mini",
+            model=settings.model_for_role(role),
             api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
         )
     if provider == "deepseek":
         from douyin_knowledge.ai.adapters.deepseek_adapter import DeepSeekStructuredModel
         if not settings.deepseek_api_key:
             raise ConfigurationError("ai_provider=deepseek requires DK_DEEPSEEK_API_KEY")
         return DeepSeekStructuredModel(
-            model=settings.deepseek_chat_model,
+            model=settings.model_for_role(role),
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             timeout_s=settings.deepseek_timeout_s,
@@ -106,8 +108,9 @@ def get_vision_model(settings: Settings) -> VisionModel:
     if provider == "openai":
         from douyin_knowledge.ai.adapters.openai_adapter import OpenAIVisionModel
         return OpenAIVisionModel(
-            model=settings.openai_vision_model or "gpt-4o",
+            model=settings.model_for_role("vision"),
             api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
         )
     raise ConfigurationError(f"unknown ai_provider {provider!r}")
 
@@ -120,7 +123,10 @@ def get_asr_provider(settings: Settings) -> ASRProvider:
         return MockASRProvider()
     if provider == "openai":
         from douyin_knowledge.ai.adapters.openai_adapter import OpenAIASRProvider
-        return OpenAIASRProvider(api_key=settings.openai_api_key)
+        return OpenAIASRProvider(
+            model=settings.model_for_role("asr"), api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+        )
     if provider == "doubao":
         from douyin_knowledge.ai.adapters.doubao_adapter import DoubaoASRProvider
         if not settings.doubao_asr_api_key:
@@ -159,7 +165,8 @@ def get_embedding_model(settings: Settings) -> EmbeddingModel:
     if provider == "openai":
         from douyin_knowledge.ai.adapters.openai_adapter import OpenAIEmbeddingModel
         return OpenAIEmbeddingModel(
-            model=settings.openai_embedding_model or "text-embedding-3-small",
+            model=settings.model_for_role("embedding"),
             api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
         )
     raise ConfigurationError(f"unknown embedding_provider {provider!r}")

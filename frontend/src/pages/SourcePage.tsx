@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
@@ -17,6 +18,7 @@ export function SourcePage() {
   const { sourceId = '' } = useParams()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [jobId, setJobId] = useState<string | null>(null)
 
   const source = useQuery({
     queryKey: ['source', sourceId],
@@ -39,8 +41,22 @@ export function SourcePage() {
 
   const process = useMutation({
     mutationFn: (force: boolean) => api.processSource(sourceId, { force }),
-    onSuccess: invalidate,
+    onSuccess: (accepted) => {
+      setJobId(accepted.job_id)
+      invalidate()
+    },
   })
+
+  const job = useQuery({
+    queryKey: ['process-job', jobId],
+    queryFn: () => api.job(jobId!),
+    enabled: jobId !== null,
+    refetchInterval: (query) =>
+      ['succeeded', 'failed', 'cancelled'].includes(query.state.data?.status ?? '') ? false : 2000,
+  })
+  useEffect(() => {
+    if (job.data && ['succeeded', 'failed', 'cancelled'].includes(job.data.status)) invalidate()
+  }, [job.data?.status, job.data?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const remove = useMutation({
     mutationFn: () => api.deleteSource(sourceId),
@@ -55,6 +71,7 @@ export function SourcePage() {
 
   const item = source.data
   const claims = item.claims ?? []
+  const currentRun = item.runs.find((run) => run.is_current)
   const latestDecision = decisions.data?.decisions?.[0]
 
   return (
@@ -95,7 +112,7 @@ export function SourcePage() {
           <div className="figure__value">
             L{item.processing.achieved_level}
             <span className="faint" style={{ fontSize: '0.9rem' }}>
-              /{item.processing.desired_level}
+              /{currentRun?.target_level ?? item.processing.desired_level}
             </span>
           </div>
           <div className="figure__label">已达深度 / 目标</div>
@@ -125,7 +142,7 @@ export function SourcePage() {
           onClick={() => process.mutate(false)}
           disabled={process.isPending}
         >
-          处理这条
+          处理这条（可能付费）
         </button>
         <button
           className="btn btn--quiet"
@@ -150,7 +167,19 @@ export function SourcePage() {
         </button>
       </div>
 
-      {process.isSuccess ? <p className="notice">已排队，处理完这页会更新。</p> : null}
+      <p className="faint" style={{ fontSize: '0.83rem' }}>
+        手动处理可能调用付费 AI。收藏同步和每日自动同步不会因为这里配置了密钥就自动处理全部视频。
+      </p>
+
+      {process.isSuccess ? <p className="notice">
+        {process.data.created ? '新处理任务已接受' : '已有同一处理任务，继续跟踪原任务'}：
+        <span className="mono">{process.data.job_id}</span>。
+        {job.data ? ` 当前状态：${statusLabel(job.data.status)}。` : '正在读取状态。'}
+        {job.data?.status === 'succeeded' ? '任务已完成；下方显示当前处理结果。' : null}
+        {job.data?.status === 'failed' ? `失败：${job.data.error?.message ?? '请查看任务记录'}` : null}
+        {job.data?.status === 'succeeded' ? <> 可前往<Link to="/">问答</Link>检索证据。</> : null}
+      </p> : null}
+      {job.isError ? <p className="notice notice--error">无法读取任务状态：{errorMessage(job.error)}</p> : null}
       {process.isError ? (
         <p className="notice notice--error">{errorMessage(process.error)}</p>
       ) : null}

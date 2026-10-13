@@ -286,6 +286,7 @@ class TestDeepSeekAdapters:
         assert "tool_choice" in seen
         assert "functions" not in seen
         assert "function_call" not in seen
+        assert seen["max_tokens"] == 1024
         assert seen["extra_body"] == {"thinking": {"type": "disabled"}}
 
     def test_structured_rejects_schema_violation(self) -> None:
@@ -339,4 +340,20 @@ class TestDeepSeekAdapters:
         assert result.content == "answer"
         assert result.model == "deepseek-flash"
         assert result.usage and result.usage["total_tokens"] == 18
+        assert seen["max_tokens"] == 1024
         assert seen["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_paid_transport_does_not_hide_retries(self, monkeypatch: object) -> None:
+        from douyin_knowledge.ai.adapters import deepseek_adapter
+
+        kwargs_seen: list[dict[str, object]] = []
+
+        def fake_openai(**kwargs: object) -> object:
+            kwargs_seen.append(kwargs)
+            return object()
+
+        monkeypatch.setattr(deepseek_adapter, "OpenAI", fake_openai)  # type: ignore[attr-defined]
+        deepseek_adapter.DeepSeekChatModel(api_key="test-only")
+        deepseek_adapter.DeepSeekStructuredModel(api_key="test-only")
+        assert len(kwargs_seen) == 2
+        assert all(kwargs["max_retries"] == 0 for kwargs in kwargs_seen)

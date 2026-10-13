@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import func, select
 
 from douyin_knowledge.api.deps import (
@@ -25,6 +26,7 @@ from douyin_knowledge.capture.daily_sync import (
     save_state,
     view_state,
 )
+from douyin_knowledge.config.ai_local import AIConfigUpdate, config_view, save_local
 from douyin_knowledge.db.models.capture import Collection, Creator, Source
 from douyin_knowledge.db.models.conversation import Conversation, Message
 from douyin_knowledge.db.models.entities import Claim, Entity, EntityMention
@@ -151,6 +153,30 @@ def get_settings_view(settings: AppSettings) -> dict[str, Any]:
         role: settings.model_for_role(role) for role in ("extraction", "answer", "embedding", "asr")
     }
     return data
+
+
+@router.get("/ai-configuration")
+def get_ai_configuration(settings: AppSettings) -> dict[str, Any]:
+    """Public model choices and credential presence, never credential values."""
+    return config_view(settings)
+
+
+@router.put("/ai-configuration")
+async def put_ai_configuration(request: Request, settings: AppSettings) -> dict[str, Any]:
+    """Save for the next API and worker start; running jobs keep their settings."""
+    try:
+        update = AIConfigUpdate.model_validate(await request.json())
+    except (ValueError, PydanticValidationError) as exc:
+        # FastAPI's default 422 includes the submitted `input`. A rejected model
+        # choice may arrive beside a credential, so never echo the request body.
+        if isinstance(exc, PydanticValidationError):
+            errors = [{"field": ".".join(map(str, issue["loc"])), "message": issue["msg"]}
+                      for issue in exc.errors()]
+        else:
+            errors = [{"field": "body", "message": "invalid JSON"}]
+        raise HTTPException(status_code=422, detail=errors) from None
+    save_local(settings, update)
+    return config_view(settings)
 
 
 # ------------------------------------------------------------------------ jobs

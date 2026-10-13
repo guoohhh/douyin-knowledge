@@ -19,7 +19,12 @@ from sqlalchemy import func, select
 from douyin_knowledge.api.deps import AppSettings, DbSession, JobQueueDep
 from douyin_knowledge.capture.discovery import CaptureTargets, discover_capture_targets
 from douyin_knowledge.capture.scope import CaptureScope, initialize_capture_scope, set_capture_scope
+from douyin_knowledge.config.ai_local import (
+    validate_embedding_index_configuration,
+    validate_processing_configuration,
+)
 from douyin_knowledge.core.clock import now_ms
+from douyin_knowledge.core.errors import ConfigurationError
 from douyin_knowledge.db.models.capture import (
     Collection,
     Creator,
@@ -507,6 +512,12 @@ def process_source(
                 f"{settings.max_processing_level}"
             ),
         )
+
+    try:
+        validate_processing_configuration(settings, target_level)
+        validate_embedding_index_configuration(db, settings)
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     job_type = JobType.REPROCESS_SOURCE if request.force else JobType.PROCESS_SOURCE
     dedupe = f"{job_type}:{source_id}:{target_level}"

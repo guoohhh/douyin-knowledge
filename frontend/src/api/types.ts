@@ -174,6 +174,40 @@ export interface JobAccepted {
   created: boolean
 }
 
+export interface JobDetail {
+  id: string
+  job_type: string
+  status: string
+  attempt: number
+  error: { code?: string; message?: string } | null
+  events: Array<{ event_type: string; message: string | null }>
+}
+
+export type AIRole = 'triage' | 'extraction' | 'answer' | 'embedding' | 'asr'
+export type AIProvider = 'mock' | 'openai' | 'deepseek'
+export type ASRProviderChoice = 'mock' | 'openai' | 'doubao'
+export type EmbeddingProviderChoice = 'mock' | 'openai'
+
+export interface AIChoices {
+  ai_provider: AIProvider
+  asr_provider: ASRProviderChoice
+  embedding_provider: EmbeddingProviderChoice
+  models: Record<AIRole, string>
+}
+
+export interface AIConfiguration {
+  effective: AIChoices
+  saved: AIChoices
+  credentials_configured: Record<'openai' | 'deepseek' | 'doubao', boolean>
+  sdk_available: Record<'openai' | 'deepseek' | 'doubao', boolean>
+  restart_required: boolean
+  model_options: Record<AIRole, Record<string, string[]>>
+}
+
+export interface AIConfigurationUpdate extends AIChoices {
+  credentials: Partial<Record<'openai' | 'deepseek' | 'doubao', string>>
+}
+
 export interface Citation {
   ordinal: number
   marker: string

@@ -175,6 +175,36 @@ caption, title, creator, availability, or media-path changes retain a new raw
 historical snapshot. Existing databases need no schema change; the first sync
 under this fingerprint may add one transition snapshot per source.
 
+### AI providers and manual processing
+
+In Settings → AI providers, choose the text provider (mock, OpenAI, or DeepSeek),
+ASR provider (mock, OpenAI Whisper, or Doubao), and embedding provider (mock or
+OpenAI). The UI offers only model IDs already supported by the corresponding
+adapter. OpenAI provides chat/structured extraction, Whisper ASR, and embeddings;
+DeepSeek provides chat/structured extraction; Doubao provides ASR. Real OCR and
+level-3 visual processing are not yet wired into the processing pipeline.
+
+Model choices are saved in `DK_DATA_DIR/ai-settings.json`; API keys, when entered
+in the UI, are saved separately in owner-only `DK_DATA_DIR/ai-secrets.json`.
+Both files are local and ignored by Git. `DK_*` environment variables and `.env`
+take precedence over the corresponding saved fields. Keys are never returned by
+settings GET APIs or stored in SQLite. **Restart both `dk serve` and `dk worker`
+after saving**: existing processes and running jobs keep their startup settings.
+Queued jobs use the worker configuration when claimed. The UI shows whether a
+restart is pending and whether each provider has a credential.
+
+To process one captured video, open it from Collections and click **处理这条**.
+This explicitly accepts a background job that may make paid AI calls; the page
+tracks queued, running, failed, and completed job state and shows achieved level,
+evidence, claims, and run history. Ask a question from the Ask page after
+processing and indexing finish. A completed processing job can still have
+partial coverage or no extractable claim; inspect the evidence and run record.
+Daily capture remains metadata-only (`auto_process=false`) regardless of keys.
+The vector index currently holds one embedding model. If it already contains
+vectors from another model, processing and reindexing stop before any new paid
+embedding call; keep the existing embedding model until an explicit index
+migration is available. A fresh data directory can start with OpenAI embeddings.
+
 ## Guiding idea
 
 The system should answer a different question from the public web:

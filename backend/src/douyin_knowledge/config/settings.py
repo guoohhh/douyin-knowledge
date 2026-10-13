@@ -3,7 +3,7 @@
 Three classes of configuration, per ARCHITECTURE.md section 23:
 
 1. non-secret runtime config  -> env vars / .env, defaults here
-2. secrets                    -> env vars only, never persisted to SQLite
+2. secrets                    -> env vars or a private local file, never SQLite
 3. user product settings      -> ``app_settings`` table (see db.repositories.settings)
 """
 
@@ -330,7 +330,11 @@ class Settings(BaseSettings):
 
 @functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    from douyin_knowledge.config.ai_local import local_overrides
+
+    base = Settings()
+    overrides = local_overrides(base.data_dir)
+    return Settings(**overrides) if overrides else base
 
 
 def reset_settings_cache() -> None:

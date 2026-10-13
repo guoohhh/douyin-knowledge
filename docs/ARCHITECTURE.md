@@ -1012,6 +1012,13 @@ Douyin sidecar API key
 
 V1 may load these from environment variables or a local secret file outside version control.
 
+Stage 3G uses two files under `DK_DATA_DIR`: `ai-settings.json` for non-secret
+provider/model choices and owner-only `ai-secrets.json` for UI-entered AI keys.
+`DK_*` environment variables and `.env` override matching saved values. The
+API and worker load them only at startup, so changing them in Settings requires
+both processes to restart. Running processing jobs retain their startup provider
+instances and settings. Neither file is part of SQLite or version control.
+
 They must never be written into Git or logs.
 
 A platform keychain integration may be added later.

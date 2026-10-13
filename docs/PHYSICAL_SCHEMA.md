@@ -1616,6 +1616,11 @@ retrieval.personal_first
 
 Secrets such as API keys, Douyin cookies, or provider credentials should not be stored here in plaintext. Prefer environment variables, OS keychain/secret storage, or the capture sidecar's own credential storage.
 
+Stage 3G AI provider/model selections are runtime configuration in
+`DK_DATA_DIR/ai-settings.json`; UI-entered AI keys are in separate owner-only
+`DK_DATA_DIR/ai-secrets.json`. They are not `app_settings` rows. Environment
+configuration has precedence and both API and worker need a restart to load edits.
+
 `capture.scope.douyin` holds a version-1 JSON object with `schema_version`,
 `platform`, `default_favorites`, and `named_collection_ids`. `schema_version`
 describes the JSON shape, not a mutable scope revision. The first application

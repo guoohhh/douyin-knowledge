@@ -23,6 +23,10 @@ from douyin_knowledge.capture.registry import get_capture_provider
 from douyin_knowledge.capture.scope import initialize_capture_scope
 from douyin_knowledge.capture.sync import CaptureSyncService
 from douyin_knowledge.config import Settings
+from douyin_knowledge.config.ai_local import (
+    validate_embedding_index_configuration,
+    validate_processing_configuration,
+)
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.core.errors import DKError, ValidationError
 from douyin_knowledge.extraction.orchestrator import ProcessingOrchestrator
@@ -243,6 +247,9 @@ def handle_process_source(ctx: JobContext) -> None:
         # An explicit pin means the user wants the full ladder regardless of the default.
         target_level = max(target_level, ctx.settings.max_processing_level)
 
+    validate_processing_configuration(ctx.settings, target_level)
+    validate_embedding_index_configuration(ctx.session, ctx.settings)
+
     orchestrator = _orchestrator(ctx.settings)
     outcome = orchestrator.process_source(ctx.session, source_id, target_level=target_level)
     ctx.emit("processed", outcome.status, **outcome.as_dict())
@@ -383,6 +390,7 @@ def handle_rebuild_vectors(ctx: JobContext) -> None:
     so the cost is proportional to what actually moved rather than to corpus size.
     """
     source_ids = ctx.payload.get("source_ids") or []
+    validate_embedding_index_configuration(ctx.session, ctx.settings)
     store = _vector_store(ctx.settings)
     embedder = get_embedding_model(ctx.settings)
     model_name = ctx.settings.model_for_role("embedding")
