@@ -22,6 +22,8 @@ except ImportError:
 from douyin_knowledge.ai.providers import ChatMessage, ChatResponse, StructuredResponse
 from douyin_knowledge.core.errors import DKError, StructuredOutputInvalid
 
+_DEFAULT_MAX_OUTPUT_TOKENS = 1024
+
 
 class DeepSeekNotAvailable(DKError):
     """The OpenAI-compatible SDK transport is not installed."""
@@ -71,7 +73,9 @@ class DeepSeekChatModel:
     ) -> None:
         _require_openai()
         self.model = model
-        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
+        # Paid jobs have their own explicit retry policy. Hidden SDK retries can
+        # multiply charges without appearing as separate job attempts.
+        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s, max_retries=0)
 
     def generate(
         self,
@@ -84,7 +88,7 @@ class DeepSeekChatModel:
             model=self.model,
             messages=[{"role": message.role, "content": message.content} for message in messages],
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens if max_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS,
             # DeepSeek enables thinking by default. Stage 3C deliberately validates
             # deterministic non-thinking extraction/chat behaviour.
             extra_body={"thinking": {"type": "disabled"}},
@@ -113,7 +117,7 @@ class DeepSeekStructuredModel:
     ) -> None:
         _require_openai()
         self.model = model
-        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
+        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s, max_retries=0)
 
     def extract(
         self,
@@ -137,6 +141,7 @@ class DeepSeekStructuredModel:
             ],
             tool_choice={"type": "function", "function": {"name": self._TOOL_NAME}},
             temperature=temperature,
+            max_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
             extra_body={"thinking": {"type": "disabled"}},
         )
         choice = response.choices[0]
