@@ -14,20 +14,21 @@ First retrospective pass: 2026-09-29
 
 ## Current Engineering State / Handoff Snapshot
 
-**Review cutoff (2026-10-13):** `integration/v1` = `e1af20e5f839ec069d4a06adb42aa790bc876dd9` (PR #2 → PR #3); `main` remains at `ee98fc7bd57363daec5069a2ad56bc90c4943be2`. The **original historical retrospective baseline** is `b08efb04f975641b41c0a368eba0a35bf88245bd`, not today's code HEAD.
+**Review cutoff (2026-10-13):** `integration/v1` = `d2d43b41aecfd2c4427ba1e9b75347a9d4d5d0b2` (PR #2 → PR #3 → PR #4); `main` remains at `ee98fc7bd57363daec5069a2ad56bc90c4943be2`. The **original historical retrospective baseline** is `b08efb04f975641b41c0a368eba0a35bf88245bd`, not today's code HEAD.
 
-**Coverage:** architecture/invariants (§2), GPT-vs-Claude provenance and integration (§3, §6), sidecar/media/asset/grounding/retrieval/citation failures (§7–12), long-audio ASR (§13), Capture Scope (§13B), outcome semantics (§13C), scheduler and snapshot history (§13D); source/test map (§18), milestone SHA map (§19). This is an evidence-based retrospective, **not** an assertion of exhaustive independent code audit.
+**Coverage:** architecture/invariants (§2), GPT-vs-Claude provenance and integration (§3, §6), sidecar/media/asset/grounding/retrieval/citation failures (§7–12), long-audio ASR (§13), Capture Scope (§13B), outcome semantics (§13C), scheduler and snapshot history (§13D), local AI configuration and manual processing (§13E); source/test map (§18), milestone SHA map (§19). This is an evidence-based retrospective, **not** an assertion of exhaustive independent code audit.
 
 **Current milestone states:**
 - **Stage 3D:** bounded-session ASR + timestamp restoration were REAL VALIDATED at the historical `b08efb0` source; conservative boundary-stitching code/tests (`4142ae8`, `638585f`) are now **CODE INTEGRATED** in `integration/v1`, but post-fix **REAL ASR / downstream EvidenceUnit validation remains pending**.
 - **Stage 3E:** PR #2 **MERGED** (`1c494b7`). Stage 3E-6 full real-account + isolated DTK + browser workflow is **REAL E2E REPORTED BY CODEX / ACCEPTED BY PROJECT COORDINATOR / ORIGINAL LOCAL ARTIFACTS NOT INDEPENDENTLY ARCHIVED**; 16 default + 16 named observations overlap on 16 unique Sources (§13B). Do not confuse this accepted report with repository-archived raw test logs, or extrapolate it to second-page, multi-folder or multi-identity trials.
 - **Stage 3F:** PR #3 **MERGED** (`e1af20e`); **CODE IMPLEMENTED / UNIT TESTED / CI VALIDATED**. Local report: 933 passed, 4 skipped; integration Backend/Frontend/Integration CI all SUCCESS. **REAL SCHEDULED E2E NOT TESTED**, including cross-day real-account runs (§13D).
+- **Stage 3G:** PR #4 **MERGED** (`d2d43b4`, 2026-10-13); local AI settings and manual processing **CODE INTEGRATED / UNIT TESTED / CI VALIDATED** (five green merge-HEAD checks). **REAL PAID-AI E2E NOT VALIDATED**; PR implementation validation used mocks (§13E).
 
-**Load-bearing invariants:** capture selection ≠ observation ≠ Processing Policy; only completed authoritative page walks may reconcile absence; a Source remains one entity across targets; unpinned identity fails closed; transport/session reliability ≠ transcript semantic reconciliation; Evidence/Claim/citation must remain grounded; root job fan-out ≠ completed target work; automatic sync must not silently trigger paid AI; snapshots track content changes rather than signed-URL churn.
+**Load-bearing invariants:** capture selection ≠ observation ≠ Processing Policy; only completed authoritative page walks may reconcile absence; a Source remains one entity across targets; unpinned identity fails closed; transport/session reliability ≠ transcript semantic reconciliation; Evidence/Claim/citation must remain grounded; root job fan-out ≠ completed target work; automatic sync must not silently trigger paid AI; snapshots track content changes rather than signed-URL churn; AI credentials stay out of SQLite/API responses, runtime settings take effect after restart, and an existing embedding index cannot silently mix models.
 
 **Evidence boundaries:** Stage 3E real-run counts below are an *accepted coordinator-provided Codex report*, not independently archived original artifacts. Stage 3F's 8-source/8-snapshot repeat-sync result is *simulation* and is not a post-fix measurement of the actual 16-source corpus. Passing mock/fixture CI is not live provider proof.
 
-**Priority open problems:** Stage 3D post-stitch live ASR + EvidenceUnits; Stage 3E real second page, multiple selected named folders, independent multi-identity provenance, long-running stability; Stage 3F live cross-day restart/scheduler operation and real-corpus snapshot measurement; incomplete Stage 3B/C run artifacts (§14–16). New maintainers should read **§0 → §2 → §13 → §13B → §13D → §15–16** before changing claims.
+**Priority open problems:** Stage 3D post-stitch live ASR + EvidenceUnits; Stage 3E real second page, multiple selected named folders, independent multi-identity provenance, long-running stability; Stage 3F live cross-day restart/scheduler operation and real-corpus snapshot measurement; incomplete Stage 3B/C run artifacts; Stage 3G paid-provider real E2E and explicit embedding-index migration remain open (§14–16). New maintainers should read **§0 → §2 → §13 → §13B → §13D → §13E → §15–16** before changing claims.
 
 ---
 
@@ -960,6 +961,8 @@ This subsection records the original product decision. Stage 3F subsequently imp
 
 ### Provider configuration
 
+This is the original product decision; Stage 3G subsequently implemented a bounded local configuration surface and merged through PR #4 at `d2d43b4`. See §13E for as-built behavior, CI and real-AI validation limits. The decision alone did not establish implementation.
+
 V1 should allow the user to choose independently:
 
 ~~~text
@@ -1194,6 +1197,24 @@ Stage 3F changes `CaptureSyncService._payload_hash` to fingerprint selected mean
 
 ---
 
+## 13E. Stage 3G — provider settings, credential boundaries and paid-work safety
+
+**Review cutoff:** `integration/v1@d2d43b41aecfd2c4427ba1e9b75347a9d4d5d0b2` (2026-10-13). [PR #4](https://github.com/guoohhh/douyin-knowledge/pull/4) **MERGED** with merge parents `e1af20e` and `edf4bfa`. Implementation `38ec362`; follow-ups `361f406` (bounded DeepSeek output / disabled SDK implicit retries) and `edf4bfa` (explicit UI cost wording). This is **CODE INTEGRATED / UNIT TESTED / CI VALIDATED**, **NOT REAL PAID-AI E2E VALIDATED**.
+
+**Why separate configuration from product state?** Provider/model choices and keys are local runtime configuration, not captured knowledge or user Processing Policy. `config/ai_local.py` writes non-secret choices to `DK_DATA_DIR/ai-settings.json` and keys to a separate owner-only `ai-secrets.json`, outside SQLite and version control. File creation is atomic, secret file permissions are checked, symlinks rejected, API views return only credential-present booleans, and `DK_*` environment/`.env` values override saved choices. Saving does **not** mutate the already-running API/worker: both must restart for new effective settings. Saving secrets before choices prevents activating a new provider with missing credentials after an interrupted save; it is not a full transactional two-file update.
+
+**Safety invariants at the paid-work boundary:** the supported role/model matrix is validated before manual processing; missing credentials and unsupported providers fail before accepting work. The existing vector index records an embedding model: changing to a different model without an explicit migration is rejected before paid embedding. `DeepSeekChatModel` and `DeepSeekStructuredModel` use `max_retries=0` to avoid hidden SDK-level retries on top of job retry policy and cap default output to 1024 tokens. This controls *unobserved retry multiplication*, not a guarantee of fixed billing or no application-level retries.
+
+**UI/operational semantics:** Settings → AI providers distinguishes saved versus effective configuration, key presence, restart requirement and unsupported adapters. Manual source processing exposes accepted/reused job feedback and job status; new work is not synonymous with completed processing. UI wording explicitly warns that manual processing and real-model answers may incur cost. Real OCR/deep vision is **not** advertised as wired. Existing Stage 3E Capture Scope default-off paid processing and Stage 3F automatic `auto_process=false` remain separate invariants.
+
+**Evidence map:** `backend/src/douyin_knowledge/config/ai_local.py`, `ai/registry.py`, `ai/adapters/deepseek_adapter.py`, `api/routes/admin.py`, `api/routes/sources.py`, `jobs/handlers.py`, `frontend/src/pages/AISettingsSection.tsx`, `SourcePage.tsx`; tests `backend/tests/unit/test_ai_local_configuration.py`, `test_registry.py`, `test_ai_adapters.py`, `backend/tests/test_api.py`, `frontend/scripts/test-capture-scope.ts`. Merge HEAD's five GitHub checks were independently observed **SUCCESS**: [Backend](https://github.com/guoohhh/douyin-knowledge/actions/runs/38364777455), [Frontend](https://github.com/guoohhh/douyin-knowledge/actions/runs/38364777424), [Integration smoke](https://github.com/guoohhh/douyin-knowledge/actions/runs/38364777464). The PR describes **mock/fixture processing and browser validation** but no real Douyin or paid-provider requests; its original draft wording about not merging is historical, superseded by GitHub's merged status.
+
+**Not yet demonstrated:** live selected-model outbound calls; real Douyin media → ASR → extraction → embedding → knowledge → evidence-grounded cited answer; real cost/latency/error behavior; index migration between embedding models; robustness of restart and secret handling beyond tested cases. Do not upgrade mock CI or a merge into REAL VALIDATED.
+
+**Interview lesson:** configuration is an execution contract. A correct UI must distinguish saved intent from running process state, protect credentials from product storage, and reject incompatible expensive work *before* it starts.
+
+---
+
 ## 14. Topics with enough code evidence but incomplete historical evidence
 
 ### 14.1 Default/all-favorites API limitation
@@ -1292,9 +1313,10 @@ These are not all bugs. They are places where the current design knowingly buys 
 - Reused queued/running sync jobs keep their original AI processing option; UI warns but does not cancel or reconfigure the existing job.
 - Stage 3E Capture Scope discovery capability is not a live provider-health proof; display saved selection and provider discovery status independently.
 - Snapshot evidence spans unlike samples: pre-Stage 3F reported real state **16 Sources / 128 Snapshots**, versus simulated new-fingerprint **8 Sources / 8 Snapshots** remaining eight after repeated simulation sync. The new fingerprint has **not** been measured against the same real 16-source corpus.
-- Stage 3F 03:00 local scheduled sync and restart catch-up are merged into `integration/v1` with CODE/UNIT/CI evidence, but lack real-account operation validation; user-facing provider/model configuration remains separate V1 work.
+- Stage 3F 03:00 local scheduled sync and restart catch-up are merged into `integration/v1` with CODE/UNIT/CI evidence, but lack real-account operation validation.
+- Stage 3G local provider/model/credential settings and manual processing are now CODE INTEGRATED / UNIT TESTED / CI VALIDATED at `d2d43b4`, **not** real paid-AI E2E validated. Existing embedding indexes cannot switch models without explicit migration; the UI-managed local secret store remains owner-only and restart-bound.
 
-Evidence cutoff for this P2 inventory: `integration/v1@e1af20e5f839ec069d4a06adb42aa790bc876dd9` (2026-10-13 review), `docs/DECISIONS.md`, current implementation/tests and accepted-but-not-independently-archived Stage 3E-6 report. Historical b08 facts above remain tied to their original SHA.
+Evidence cutoff for this P2 inventory: `integration/v1@d2d43b41aecfd2c4427ba1e9b75347a9d4d5d0b2` (2026-10-13 review), `docs/DECISIONS.md`, current implementation/tests and accepted-but-not-independently-archived Stage 3E-6 report. Historical b08 facts above remain tied to their original SHA.
 
 ---
 
@@ -1320,6 +1342,8 @@ The following questions are worth answering from old conversations, terminal log
 | Stage 3E real multi-identity sidecar proof | Confirms pinning against actual DTK identity-pool behavior and prevents wrong-account ingestion |
 | Stage 3E-6 browser recordings and extended behavior cases | Selection/save/reload/reuse/offline/AI-off flows are accepted Codex real E2E **report evidence**; archive browser artifacts and separately test actual multi-identity and multiple named folders |
 | Stage 3F daily scheduler real operation | Merged `e1af20e`; unit and integrated CI pass, but cross-day real-account/worker-restart target outcomes remain REAL SCHEDULED E2E NOT TESTED |
+| Stage 3G real selected-model paid AI E2E | PR #4 implementation used mocks; archive provider/model, request outcome, source→ASR→EvidenceUnit→Claim/Wiki→citation, errors and cost/latency before REAL VALIDATED |
+| Stage 3G embedding-index migration / restart operational proof | Current code rejects incompatible model changes; migration and live restart/credential behavior are not yet established by real operation |
 | Any manual DB repair commands used during Phase 3 | Important for migration/recovery story and future runbook |
 | CI run URLs for milestone SHAs | Independent evidence that a state was green |
 
@@ -1458,6 +1482,10 @@ This list is deliberately selective. It maps engineering stories, not every comm
 - 8087006 — default-favorites page-size cap from reported real upstream 50/20 probe
 - 1c494b7 — merge Stage 3E PR #2 into integration/v1 (2026-10-12)
 - ba83713 — Stage 3F daily scheduler, durable due/checkpoint/outcomes, meaningful source fingerprint
+- 38ec362 — Stage 3G local AI provider settings, credential separation and manual processing
+- 361f406 — bound DeepSeek output and disable hidden SDK retries
+- edf4bfa — clarify costs for manual AI processing and answers
+- d2d43b4 — Stage 3G PR #4 merged into integration/v1 (2026-10-13); CI green, real paid AI E2E pending
 - e1af20e — Stage 3F PR #3 merged into integration/v1 (2026-10-12); not live scheduled E2E
 
 ---
