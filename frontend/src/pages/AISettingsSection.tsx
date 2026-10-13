@@ -74,7 +74,7 @@ export function AISettingsSection() {
       <h2>AI 提供商</h2>
       <p className="muted" style={{ maxWidth: '68ch' }}>
         新配置保存后需重启本地 API 和 worker 才会生效。运行中的任务继续使用启动时的配置。
-        同步收藏不会自动处理视频；只有明确点击「处理这条」等处理操作才可能调用付费模型。
+        收藏同步不会自动调用付费 AI。手动处理视频和使用真实模型问答都可能产生费用；模拟模式不会产生外部 AI 费用。
       </p>
 
       <div className="chips">
