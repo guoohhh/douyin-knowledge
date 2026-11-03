@@ -33,6 +33,9 @@ jobs:
       - name: Test Capture Scope contract
         run: npm run test:capture-scope
 
+      - name: Test API error contract
+        run: npm run test:api-errors
+
       - name: Build production bundle
         run: npm run build
 

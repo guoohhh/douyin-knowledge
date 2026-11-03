@@ -40,13 +40,15 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly detail: unknown
+  readonly retryable: boolean
 
-  constructor(status: number, code: string, message: string, detail?: unknown) {
+  constructor(status: number, code: string, message: string, detail?: unknown, retryable = false) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.detail = detail
+    this.retryable = retryable
   }
 }
 
@@ -70,10 +72,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (response.status === 204) return undefined as T
 
   const text = await response.text()
-  const body = text ? (JSON.parse(text) as unknown) : null
+  let body: unknown = null
+  try {
+    body = text ? JSON.parse(text) : null
+  } catch {
+    if (response.ok) {
+      throw new ApiError(response.status, 'invalid_response', '本地服务返回了无法读取的响应')
+    }
+  }
 
   if (!response.ok) {
-    const error = (body as { error?: { code?: string; message?: string } } | null)?.error
+    const error = (body as { error?: { code?: string; message?: string; retryable?: boolean } } | null)?.error
     const detail = (body as { detail?: unknown } | null)?.detail
     const validation = Array.isArray(detail)
       ? detail.map((item: { message?: string; msg?: string }) => item.message ?? item.msg).filter(Boolean).join('；')
@@ -83,6 +92,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       error?.code ?? 'http_error',
       error?.message ?? (typeof detail === 'string' ? detail : validation || `请求失败（${response.status}）`),
       body,
+      error?.retryable === true,
     )
   }
   return body as T

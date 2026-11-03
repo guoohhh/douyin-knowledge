@@ -15,12 +15,13 @@ from jsonschema import ValidationError as JSONSchemaValidationError
 from jsonschema import validate as validate_json_schema
 
 try:
-    from openai import OpenAI
+    from openai import APIStatusError, OpenAI
 except ImportError:
     OpenAI = None  # type: ignore
+    APIStatusError = ()  # type: ignore[assignment]
 
 from douyin_knowledge.ai.providers import ChatMessage, ChatResponse, StructuredResponse
-from douyin_knowledge.core.errors import DKError, StructuredOutputInvalid
+from douyin_knowledge.core.errors import DKError, ModelUnavailable, StructuredOutputInvalid
 
 _DEFAULT_MAX_OUTPUT_TOKENS = 1024
 
@@ -84,15 +85,20 @@ class DeepSeekChatModel:
         temperature: float = 0.7,
         max_tokens: int | None = None,
     ) -> ChatResponse:
-        response = self._client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": message.role, "content": message.content} for message in messages],
-            temperature=temperature,
-            max_tokens=max_tokens if max_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS,
-            # DeepSeek enables thinking by default. Stage 3C deliberately validates
-            # deterministic non-thinking extraction/chat behaviour.
-            extra_body={"thinking": {"type": "disabled"}},
-        )
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": message.role, "content": message.content} for message in messages],
+                temperature=temperature,
+                max_tokens=max_tokens if max_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS,
+                # DeepSeek enables thinking by default. Stage 3C deliberately validates
+                # deterministic non-thinking extraction/chat behaviour.
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+        except APIStatusError as exc:
+            if exc.status_code in (502, 503, 504):
+                raise ModelUnavailable("AI 服务暂时繁忙，请稍后重试") from None
+            raise
         choice = response.choices[0]
         return ChatResponse(
             content=choice.message.content or "",

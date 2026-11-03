@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from douyin_knowledge.core.clock import now_ms
 from douyin_knowledge.core.text import content_hash, normalize_ws
-from douyin_knowledge.db.models.capture import Source, SourceAsset
+from douyin_knowledge.db.models.capture import Source
 from douyin_knowledge.db.models.policy import SourceProcessingState
 from douyin_knowledge.db.models.processing import (
     EvidenceUnit,
@@ -411,6 +411,7 @@ class ProcessingOrchestrator:
             # retryable, and gated by policy before it is spent (DEC-014); this call
             # only asks which already-local file to transcribe.
             MediaDownloader(store),
+            max_attempts=self.settings.job_max_attempts,
         )
         candidates = service.transcribable_assets(source.id)
         if not candidates:
@@ -422,11 +423,10 @@ class ProcessingOrchestrator:
             # Distinguish "never fetched" from "fetching failed": the first is a queue
             # that has not drained, the second needs a human to look. Collapsing both
             # into one note is what let the storage_key bug hide for so long.
-            states = {a.download_state for a in candidates}
-            if states & {SourceAsset.DOWNLOAD_FAILED, SourceAsset.DOWNLOAD_UNAVAILABLE}:
-                outcome.notes.append("asr_skipped_media_unavailable")
-            else:
+            if service.pending_assets(source.id):
                 outcome.notes.append("asr_skipped_media_not_downloaded")
+            else:
+                outcome.notes.append("asr_skipped_media_unavailable")
             return []
 
         local = store.resolve(audio.storage_key)

@@ -100,6 +100,7 @@ class ModelRateLimited(DKError):
 
 class ModelUnavailable(DKError):
     code = "model_unavailable"
+    http_status = 503
     retryable = True
 
 
