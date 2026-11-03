@@ -322,3 +322,47 @@ def test_processed_job_event_persists_empty_asr_notes_and_run_id(
     assert event.data_json is not None
     assert event.data_json["run_id"] == run.id
     assert "asr_empty_result" in event.data_json["notes"]
+
+
+@pytest.mark.parametrize("has_pending", [True, False])
+def test_processing_media_eligibility_and_acquisition_dedupe(
+    session: Session,
+    settings: Settings,
+    source: Source,
+    monkeypatch: pytest.MonkeyPatch,
+    has_pending: bool,
+) -> None:
+    from douyin_knowledge.db.models.ops import Job
+
+    asset = session.scalars(select(SourceAsset).where(SourceAsset.source_id == source.id)).one()
+    asset.download_state = SourceAsset.DOWNLOAD_UNAVAILABLE
+    if has_pending:
+        session.add(SourceAsset(
+            source_id=source.id,
+            asset_type="video",
+            storage_key="pending.mp4",
+            remote_url="https://media.invalid/pending.mp4",
+        ))
+    session.flush()
+    asr = MockASRProvider()
+    orchestrator = make_orchestrator(settings, asr)
+    monkeypatch.setattr(handlers_module, "_orchestrator", lambda _: orchestrator)
+    queue = JobQueue(session)
+    job = queue.enqueue(
+        JobType.PROCESS_SOURCE,
+        source_id=source.id,
+        payload={"target_level": 2},
+    ).job
+    ctx = JobContext(job=job, session=session, queue=queue, settings=settings)
+
+    for _ in range(2):
+        handlers_module.handle_process_source(ctx)
+
+    jobs = session.scalars(select(Job).where(Job.job_type == JobType.ACQUIRE_MEDIA)).all()
+    assert len(jobs) == int(has_pending)
+    events = session.scalars(select(JobEvent).where(
+        JobEvent.job_id == job.id, JobEvent.event_type == "processed"
+    )).all()
+    expected = "asr_skipped_media_not_downloaded" if has_pending else "asr_skipped_media_unavailable"
+    assert len(events) == 2
+    assert all(event.data_json and expected in event.data_json["notes"] for event in events)
